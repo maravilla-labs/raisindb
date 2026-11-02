@@ -114,6 +114,10 @@ impl<'a> ConditionEvaluator<'a> {
                 .email
                 .as_ref()
                 .map(|s| PropertyValue::String(s.clone())),
+            "$auth.user_key" => self
+                .auth
+                .user_key()
+                .map(|s| PropertyValue::String(s.to_string())),
             _ => {
                 // Unknown variable - treat as literal string for now
                 tracing::warn!("Unknown auth variable: {}", var);

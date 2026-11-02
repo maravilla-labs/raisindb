@@ -40,6 +40,7 @@
 //! - `config` - TenantAuthConfig, AuthProviderConfig, PasswordPolicy
 
 pub mod agent_identity;
+pub mod user_key;
 pub mod visitor;
 
 mod access;
@@ -59,3 +60,7 @@ pub use identity::*;
 pub use oauth::{OAuthClient, RefreshToken, TokenEndpointAuthMethod};
 pub use oauth_error::{oauth_error_detail, oauth_error_parts};
 pub use session::*;
+pub use user_key::{
+    assign_user_key_name, is_keyed_home_location, is_user_key, mint_user_key, user_home_for_key,
+    user_key_from_home,
+};

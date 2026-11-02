@@ -371,6 +371,17 @@ pub trait TransactionalContext: Send + Sync {
         Ok(())
     }
 
+    /// Mark this transaction as a content import (package install, restore).
+    ///
+    /// A `raisin:User` home created outside an import is named by a minted
+    /// user key (`/users/internal/u_…`, see `raisin_models::auth::user_key`)
+    /// and can never be moved or renamed. An import keeps the path its content
+    /// carries, and its migrations may move user homes. Only engine code that
+    /// installs content sets this.
+    fn set_content_import(&self, _import: bool) -> Result<()> {
+        Ok(())
+    }
+
     /// Check if schema validation is enabled.
     ///
     /// Returns true (default) if schema validation is enabled,

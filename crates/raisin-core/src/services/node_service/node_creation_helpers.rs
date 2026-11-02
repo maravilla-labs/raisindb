@@ -239,8 +239,14 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         self.validate_and_stamp(&mut node).await?;
 
         // Sanitize the node name
-        let clean_name = sanitize_name(&node.name)?;
-        node.name = clean_name.clone();
+        node.name = sanitize_name(&node.name)?;
+
+        // A user home is named by its minted key (`/users/internal/u_…`),
+        // after sanitizing (which lowercases) so the key keeps its case. The
+        // path is computed below from the parent, so any stale path goes.
+        node.path.clear();
+        raisin_models::auth::assign_user_key_name(&self.workspace_id, &mut node, Some(parent_path));
+        let clean_name = node.name.clone();
 
         // Validate parent exists (unless creating at root).
         // Use the lightweight id-only lookup: we only need to know the parent

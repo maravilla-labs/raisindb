@@ -34,6 +34,10 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // 1. Normalize parent field from path before saving
     let mut normalized_node = metadata::normalize_parent(node);
 
+    // 1a. A user home created outside a content import is named by its
+    // minted key (see `crate::user_homes`).
+    crate::user_homes::name_new_user_home(workspace, &mut normalized_node, tx.is_content_import());
+
     // 2. Resolve path-based references
     references::resolve_references(tx, &mut normalized_node.properties, workspace).await?;
 

@@ -154,6 +154,7 @@ pub async fn get_me(
                 groups: auth_ctx.groups.clone(),
                 anonymous: auth_ctx.user_id.is_none(),
                 home: auth_ctx.home.clone(),
+                user_key: auth_ctx.user_key().map(str::to_string),
             }))
         }
         None => {
@@ -165,6 +166,7 @@ pub async fn get_me(
                 groups: vec![],
                 anonymous: true,
                 home: None,
+                user_key: None,
             }))
         }
     }
@@ -242,12 +244,18 @@ pub async fn get_me_for_repo(
         None
     };
 
+    let user_key = home
+        .as_deref()
+        .and_then(raisin_models::auth::user_key_from_home)
+        .map(str::to_string);
+
     Ok(Json(MeForRepoResponse {
         id: user_id,
         email,
         roles,
         anonymous,
         home,
+        user_key,
         user_node,
     }))
 }

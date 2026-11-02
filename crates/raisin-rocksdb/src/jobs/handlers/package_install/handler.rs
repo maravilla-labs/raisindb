@@ -143,6 +143,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             tx.set_tenant_repo(&context.tenant_id, &context.repo_id)?;
             tx.set_branch(&context.branch)?;
             tx.set_actor("package-installer")?;
+            tx.set_content_import(true)?;
             tx.set_auth_context(AuthContext::system())?;
             tx.set_message(&format!("Set package status to {}", status))?;
 
@@ -562,6 +563,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         tx.set_tenant_repo(tenant_id, repo_id)?;
         tx.set_branch(branch)?;
         tx.set_actor("package-installer")?;
+        tx.set_content_import(true)?;
         tx.set_auth_context(AuthContext::system())?;
         tx.set_message("Finalize package installation")?;
 

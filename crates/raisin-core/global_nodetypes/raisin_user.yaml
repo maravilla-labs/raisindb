@@ -1,4 +1,9 @@
 name: raisin:User
+# A user home created by the engine lives at /users/internal/<user_key>, where
+# user_key is u_ + 22 random base62 characters (raisin_models::auth::user_key):
+# the path is the person's stable key, minted once and never moved or renamed.
+# It says nothing about the person, so admins recognise people by title,
+# display_name and email.
 description: User account with authentication and authorization information
 icon: person
 version: 1
@@ -19,6 +24,11 @@ properties:
     type: String
     required: true
     index: [Fulltext]
+  - name: title
+    type: String
+    required: false
+    index: [Fulltext]
+    description: What admin tools show for this user (the name, else the email); the home path is an opaque key
   - name: status
     type: String
     required: false

@@ -228,6 +228,10 @@ pub struct MeResponse {
     pub anonymous: bool,
     /// User's home path (raisin:User node path in raisin:access_control workspace)
     pub home: Option<String>,
+    /// Stable person key: the last segment of `home` when it is a minted key
+    /// (`u_` + 22 base62); absent for legacy homes and anonymous callers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_key: Option<String>,
 }
 
 /// Response for /auth/{repo}/me endpoint
@@ -243,6 +247,10 @@ pub struct MeForRepoResponse {
     pub anonymous: bool,
     /// User's home path (raisin:User node path in raisin:access_control workspace)
     pub home: Option<String>,
+    /// Stable person key: the last segment of `home` when it is a minted key
+    /// (`u_` + 22 base62); absent for legacy homes and anonymous callers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_key: Option<String>,
     /// User's node from the repository (if exists)
     pub user_node: Option<raisin_models::nodes::Node>,
 }

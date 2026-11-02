@@ -626,6 +626,11 @@ impl TransactionalContext for RocksDBTransaction {
         Ok(())
     }
 
+    fn set_content_import(&self, import: bool) -> Result<()> {
+        self.set_content_import_enabled(import);
+        Ok(())
+    }
+
     /// Add a relationship from source node to target node within the transaction
     ///
     /// Creates both forward (outgoing) and reverse (incoming) index entries.

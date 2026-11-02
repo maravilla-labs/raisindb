@@ -31,6 +31,10 @@ pub struct FunctionCaller {
     /// Absent for callers that have none (system, API keys, anonymous).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
+    /// The caller's stable person key: the last segment of `home` when it is
+    /// a minted user key (`u_` + 22 base62). Absent for legacy homes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_key: Option<String>,
     /// The caller's local `raisin:User` node id (workspace-specific; the
     /// stable key `created_by`-style ownership checks do not use).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +79,7 @@ impl FunctionCaller {
             is_system_admin: auth.permissions().is_some_and(|p| p.is_system_admin),
             anonymous: auth.is_anonymous_principal(),
             home: auth.home.clone(),
+            user_key: auth.user_key().map(str::to_string),
             local_user_id: auth.local_user_id.clone(),
             email: auth.email.clone(),
             nested: false,

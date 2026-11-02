@@ -102,6 +102,12 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
                 "Node path must contain at least one '/' separator".to_string(),
             ));
         }
+
+        // A NEW user home is named by its minted key (`/users/internal/u_…`),
+        // after sanitizing (which lowercases) so the key keeps its case.
+        if is_new_node {
+            raisin_models::auth::assign_user_key_name(&self.workspace_id, &mut node, None);
+        }
         if let Some(ws) = &node.workspace {
             if ws != &self.workspace_id {
                 node.workspace = Some(self.workspace_id.clone());
@@ -296,6 +302,10 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
                 "Node path must contain at least one '/' separator".to_string(),
             ));
         }
+
+        // A user home is named by its minted key (`/users/internal/u_…`),
+        // after sanitizing (which lowercases) so the key keeps its case.
+        raisin_models::auth::assign_user_key_name(&self.workspace_id, &mut node, None);
 
         // RLS Authorization: Check if user can create at this path with this node_type
         if !self

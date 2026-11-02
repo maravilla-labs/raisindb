@@ -8,6 +8,7 @@
 //! ## `auth.*` variables
 //! - `auth.user_id` - Global identity (JWT sub claim)
 //! - `auth.local_user_id` - Workspace-specific raisin:User node ID
+//! - `auth.user_key` - Stable person key (keyed home segment), or null
 //! - `auth.email` - User's email
 //! - `auth.home` - User's home path (raisin:User node path)
 //! - `auth.is_anonymous` - Whether user is unauthenticated
@@ -94,6 +95,14 @@ pub fn build_rel_context(auth: &AuthContext, node: &Node) -> EvalContext {
                 .map(|g| Value::String(g.clone()))
                 .collect(),
         ),
+    );
+
+    // auth.user_key: the keyed home segment, or null (see AuthContext::user_key)
+    auth_obj.insert(
+        "user_key".to_string(),
+        auth.user_key()
+            .map(|k| Value::String(k.to_string()))
+            .unwrap_or(Value::Null),
     );
 
     // auth.home (user's home path)
@@ -394,6 +403,24 @@ mod tests {
             auth_val.get("home"),
             Some(&Value::String("/users/user-123".to_string()))
         );
+    }
+
+    #[test]
+    fn test_auth_user_key_from_keyed_home() {
+        let key = "u_0123456789abcdefABCDEF";
+        let node = make_test_node();
+
+        let keyed = AuthContext::for_user("u").with_home(format!("/users/internal/{key}"));
+        let ctx = build_rel_context(&keyed, &node);
+        let auth_val = ctx.get("auth").unwrap();
+        assert_eq!(
+            auth_val.get("user_key"),
+            Some(&Value::String(key.to_string()))
+        );
+
+        let legacy = AuthContext::for_user("u").with_home("/users/internal/alice-at-x-com");
+        let ctx = build_rel_context(&legacy, &node);
+        assert_eq!(ctx.get("auth").unwrap().get("user_key"), Some(&Value::Null));
     }
 
     #[test]

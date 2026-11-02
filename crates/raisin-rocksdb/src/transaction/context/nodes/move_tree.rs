@@ -48,6 +48,12 @@ pub async fn move_node_tree(
         .await?
         .ok_or_else(|| raisin_error::Error::NotFound(format!("Node {} not found", node_id)))?;
     let old_root_path = source_node.path.clone();
+    crate::user_homes::reject_user_home_move(
+        workspace,
+        &source_node,
+        new_path,
+        tx.is_content_import(),
+    )?;
 
     // 3. Use storage layer to read all descendants (synchronous, no batch conflicts)
     let node_repo = tx.node_repo.as_ref();

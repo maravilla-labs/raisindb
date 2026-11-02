@@ -1028,6 +1028,16 @@ mod caller_context {
         assert_eq!(ctx["caller"]["email"], "buyer@example.com");
         // Not a nested run.
         assert!(ctx["caller"].get("nested").is_none());
+        // A legacy (slug) home carries no user key.
+        assert!(ctx["caller"].get("user_key").is_none());
+    }
+
+    #[test]
+    fn a_keyed_home_reaches_the_function_as_user_key() {
+        let mut user = AuthContext::for_user("identity-1");
+        user.home = Some("/users/internal/u_0123456789abcdefABCDEF".into());
+        let ctx = context_of(Some(FunctionCaller::from_auth(Some(&user))));
+        assert_eq!(ctx["caller"]["user_key"], "u_0123456789abcdefABCDEF");
     }
 
     #[test]

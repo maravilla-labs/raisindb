@@ -224,6 +224,7 @@ fn render_condition_operand(value: &PropertyValue) -> Option<String> {
             }
             "$user.email" | "$auth.email" => Some("auth.email".to_string()),
             "$user.home" | "$auth.home" => Some("auth.home".to_string()),
+            "$user.user_key" | "$user.key" | "$auth.user_key" => Some("auth.user_key".to_string()),
             // An unrecognised variable must not degrade into a literal string:
             // that would compare a property against "$user.whatever" and either
             // never match or, worse, match a value an attacker can write.

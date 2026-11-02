@@ -81,6 +81,7 @@ mod transaction;
 pub mod translation_history;
 mod translation_read;
 mod translation_write;
+pub(crate) mod user_homes;
 pub mod vaulting;
 pub mod vmount_registry;
 pub mod write_health;

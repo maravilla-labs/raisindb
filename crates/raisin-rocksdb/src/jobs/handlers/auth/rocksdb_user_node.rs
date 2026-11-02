@@ -18,7 +18,7 @@ use raisin_error::Result;
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
-use raisin_storage::{RepositoryManagementRepository, Storage};
+use raisin_storage::{NodeRepository, RepositoryManagementRepository, Storage, StorageScope};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -51,14 +51,18 @@ impl UserNodeCreator for RocksDBUserNodeCreator {
         email: &str,
         display_name: Option<&str>,
         default_roles: &[String],
-    ) -> Result<String> {
+    ) -> Result<(String, String)> {
         // Access control workspace where users are stored
         let workspace = "raisin:access_control";
         let users_path = "/users/internal";
 
-        // Generate safe node name from email
-        let node_name = email_to_node_name(email);
-        let user_path = format!("{}/{}", users_path, node_name);
+        // A new home is named by a minted user key, never by the email; an
+        // existing one is found by its unique email (a legacy home may still
+        // sit at its email slug, which the lookup below also covers).
+        // Placeholder: the node service names a home under /users/internal
+        // by a freshly minted key (see raisin_models::auth::user_key).
+        let node_name = "user".to_string();
+        let legacy_path = format!("{}/{}", users_path, email_to_node_name(email));
 
         // Get repository configuration to determine the default branch
         let default_branch = match self
@@ -76,7 +80,6 @@ impl UserNodeCreator for RocksDBUserNodeCreator {
             repo_id = %repo_id,
             identity_id = %identity_id,
             email = %email,
-            user_path = %user_path,
             branch = %default_branch,
             "Creating user node for registered identity"
         );
@@ -88,19 +91,35 @@ impl UserNodeCreator for RocksDBUserNodeCreator {
             self.storage.clone(),
             tenant_id.to_string(),
             repo_id.to_string(),
-            default_branch,
+            default_branch.clone(),
             workspace.to_string(),
         )
         .with_auth(AuthContext::system());
 
-        // Check if user node already exists
-        if let Some(existing_node) = node_service.get_by_path(&user_path).await? {
+        // Check if user node already exists: by its unique email, then at the
+        // legacy email-slug path.
+        let by_email = self
+            .storage
+            .nodes()
+            .find_by_property(
+                StorageScope::new(tenant_id, repo_id, &default_branch, workspace),
+                "email",
+                &PropertyValue::String(email.to_string()),
+            )
+            .await?
+            .into_iter()
+            .find(|n| n.node_type == "raisin:User");
+        let existing = match by_email {
+            Some(n) => Some(n),
+            None => node_service.get_by_path(&legacy_path).await?,
+        };
+        if let Some(existing_node) = existing {
             tracing::info!(
                 user_node_id = %existing_node.id,
-                user_path = %user_path,
+                user_path = %existing_node.path,
                 "User node already exists"
             );
-            return Ok(existing_node.id);
+            return Ok((existing_node.id, existing_node.path));
         }
 
         // Build roles as references to role paths
@@ -159,6 +178,6 @@ impl UserNodeCreator for RocksDBUserNodeCreator {
             "User node created successfully with initial_structure"
         );
 
-        Ok(created_node.id)
+        Ok((created_node.id, created_node.path))
     }
 }

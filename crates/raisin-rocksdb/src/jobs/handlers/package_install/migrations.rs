@@ -69,6 +69,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                     tx.set_tenant_repo(tenant_id, repo_id)?;
                     tx.set_branch(branch)?;
                     tx.set_actor("package-migration")?;
+                    tx.set_content_import(true)?;
                     tx.set_message(&format!(
                         "Package migration already applied: {}",
                         file.migration.id
@@ -101,6 +102,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             tx.set_tenant_repo(tenant_id, repo_id)?;
             tx.set_branch(branch)?;
             tx.set_actor("package-migration")?;
+            tx.set_content_import(true)?;
             tx.set_message(&format!("Package migration: {}", file.migration.id))?;
             tx.set_auth_context(AuthContext::system())?;
 

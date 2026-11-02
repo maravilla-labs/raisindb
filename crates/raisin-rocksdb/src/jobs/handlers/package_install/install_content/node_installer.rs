@@ -182,6 +182,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             tx.set_tenant_repo(tenant_id, repo_id)?;
             tx.set_branch(branch)?;
             tx.set_actor("package-install")?;
+            tx.set_content_import(true)?;
             tx.set_message(&format!("Package install batch ({} items)", batch.len()))?;
             tx.set_auth_context(AuthContext::system())?;
 
@@ -383,6 +384,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 tx.set_tenant_repo(tenant_id, repo_id)?;
                 tx.set_branch(branch)?;
                 tx.set_actor("package-install")?;
+                tx.set_content_import(true)?;
                 tx.set_message("Package install: resolve deferred references")?;
                 tx.set_auth_context(AuthContext::system())?;
 

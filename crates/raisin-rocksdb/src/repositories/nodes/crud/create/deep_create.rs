@@ -160,6 +160,10 @@ impl NodeRepositoryImpl {
         if node.id.is_empty() {
             node.id = nanoid::nanoid!();
         }
+        // A user home created here is named by its minted key.
+        crate::user_homes::name_new_user_home(workspace, &mut node, false);
+        let path = node.path.clone();
+        let path = path.as_str();
 
         // Reserve the LEAF path. Unlike intermediate folders, contention on
         // the leaf IS a genuine conflict (two creators racing to create the

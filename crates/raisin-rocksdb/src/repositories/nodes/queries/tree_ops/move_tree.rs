@@ -59,6 +59,7 @@ impl NodeRepositoryImpl {
             .ok_or_else(|| raisin_error::Error::NotFound("Node not found".to_string()))?;
 
         let old_root_path = root_node.path.clone();
+        crate::user_homes::reject_user_home_move(workspace, &root_node, new_path, false)?;
 
         // Validation 1: Cannot move root node
         self.validate_not_root_node(&old_root_path)?;

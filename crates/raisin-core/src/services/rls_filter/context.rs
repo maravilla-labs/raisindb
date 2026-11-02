@@ -89,6 +89,14 @@ fn build_rel_context(auth: &AuthContext, node: &Node) -> EvalContext {
         auth_obj.insert("local_user_id".to_string(), Value::Null);
     }
 
+    // auth.user_key: the keyed home segment, or null (see AuthContext::user_key)
+    auth_obj.insert(
+        "user_key".to_string(),
+        auth.user_key()
+            .map(|k| Value::String(k.to_string()))
+            .unwrap_or(Value::Null),
+    );
+
     if let Some(email) = &auth.email {
         auth_obj.insert("email".to_string(), Value::String(email.clone()));
     } else {

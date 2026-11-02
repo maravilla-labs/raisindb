@@ -17,8 +17,6 @@ use raisin_error::{Error, Result};
 use raisin_storage::jobs::{JobContext, JobInfo, JobType};
 use std::sync::Arc;
 
-use super::email_to_node_name;
-
 /// Callback trait for creating user nodes in the access_control workspace
 #[async_trait]
 pub trait UserNodeCreator: Send + Sync {
@@ -35,7 +33,8 @@ pub trait UserNodeCreator: Send + Sync {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(user_node_id)` on success, or an error if creation fails.
+    /// Returns `Ok((user_node_id, home_path))` on success. A new home is
+    /// `/users/internal/<user_key>` (see `raisin_models::auth::user_key`).
     async fn create_user_node(
         &self,
         tenant_id: &str,
@@ -44,7 +43,7 @@ pub trait UserNodeCreator: Send + Sync {
         email: &str,
         display_name: Option<&str>,
         default_roles: &[String],
-    ) -> Result<String>;
+    ) -> Result<(String, String)>;
 }
 
 /// Data for the create user node job
@@ -243,9 +242,7 @@ impl<C: UserNodeCreator> AuthCreateUserNodeHandler<C> {
             )
             .await
         {
-            Ok(user_node_id) => {
-                let user_path = format!("/users/internal/{}", email_to_node_name(&email));
-
+            Ok((user_node_id, user_path)) => {
                 tracing::info!(
                     job_id = %job.id,
                     user_node_id = %user_node_id,

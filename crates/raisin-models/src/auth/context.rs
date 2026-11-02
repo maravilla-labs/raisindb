@@ -325,6 +325,19 @@ impl AuthContext {
         self
     }
 
+    /// The user's stable person key: the last segment of [`Self::home`] when it
+    /// is a minted user key (`u_` + 22 base62), see [`crate::auth::user_key`].
+    ///
+    /// Derived, not stored: it is exactly as trustworthy as `home`, which comes
+    /// from the verified token. `None` for anonymous and system contexts, for
+    /// visitors, and for users whose home predates keyed homes. Exposed to
+    /// permission conditions as `auth.user_key`.
+    pub fn user_key(&self) -> Option<&str> {
+        self.home
+            .as_deref()
+            .and_then(crate::auth::user_key::user_key_from_home)
+    }
+
     /// Check if this context has been fully resolved (permissions loaded)
     pub fn is_resolved(&self) -> bool {
         self.is_system || self.resolved_permissions.is_some()
@@ -575,6 +588,24 @@ mod tests {
         assert!(!ctx.has_role("admin"));
         assert!(ctx.in_group("team-a"));
         assert_eq!(ctx.actor_id(), "user123");
+    }
+
+    #[test]
+    fn user_key_is_the_keyed_home_segment_only() {
+        let key = "u_0123456789abcdefABCDEF";
+        let ctx = AuthContext::for_user("u1").with_home(format!("/users/internal/{key}"));
+        assert_eq!(ctx.user_key(), Some(key));
+
+        let legacy = AuthContext::for_user("u1").with_home("/users/internal/alice-at-x-com");
+        assert_eq!(legacy.user_key(), None);
+        assert_eq!(AuthContext::for_user("u1").user_key(), None);
+        assert_eq!(AuthContext::system().user_key(), None);
+        let visitor = AuthContext::anonymous().with_visitor_home(format!("/visitors/{key}"));
+        assert_eq!(
+            visitor.user_key(),
+            None,
+            "a visitor home is never a user key"
+        );
     }
 
     #[test]

@@ -162,6 +162,44 @@ fn test_no_scope_restriction_matches_all() {
     assert!(filter_node(node.clone(), &auth, &scope3).is_some());
 }
 
+// === auth.user_key ===
+
+#[test]
+fn test_user_key_condition_matches_the_keyed_home_only() {
+    let key = "u_0123456789abcdefABCDEF";
+    let cond = "node.owner_key == auth.user_key";
+    let auth = make_auth(
+        "user1",
+        vec![Permission::new("content/**", vec![Operation::Read]).with_condition(cond)],
+    )
+    .with_home(format!("/users/internal/{key}"));
+    let scope = make_scope();
+
+    let mut mine = make_node("/content/a", "Article");
+    mine.properties.insert(
+        "owner_key".to_string(),
+        raisin_models::nodes::properties::PropertyValue::String(key.to_string()),
+    );
+    assert!(filter_node(mine.clone(), &auth, &scope).is_some());
+
+    let mut other = make_node("/content/b", "Article");
+    other.properties.insert(
+        "owner_key".to_string(),
+        raisin_models::nodes::properties::PropertyValue::String(
+            "u_ZZZZZZZZZZZZZZZZZZZZZZ".to_string(),
+        ),
+    );
+    assert!(filter_node(other, &auth, &scope).is_none());
+
+    // A legacy (email slug) home has no key: auth.user_key is null, never a match.
+    let legacy = make_auth(
+        "user1",
+        vec![Permission::new("content/**", vec![Operation::Read]).with_condition(cond)],
+    )
+    .with_home("/users/internal/alice-at-x-com");
+    assert!(filter_node(mine, &legacy, &scope).is_none());
+}
+
 // === Stewardship context tests ===
 
 #[test]

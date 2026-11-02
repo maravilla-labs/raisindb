@@ -113,6 +113,12 @@ pub struct RocksDBTransaction {
     /// always stamped from this transaction's principal.
     pub(super) trusted_import: Arc<Mutex<bool>>,
 
+    /// Content import (default: false): a package install or restore. User
+    /// homes keep the path the content carries instead of being named by a
+    /// minted key, and package migrations may move them (see
+    /// `raisin_models::auth::user_key`).
+    pub(super) content_import: Arc<Mutex<bool>>,
+
     /// Owner token for CREATE path reservations held by this transaction.
     ///
     /// `add_node` reserves each created path in the shared registry on
@@ -218,6 +224,7 @@ impl RocksDBTransaction {
             storage,
             validate_schema: Arc::new(Mutex::new(true)), // Default: validation enabled
             trusted_import: Arc::new(Mutex::new(false)),
+            content_import: Arc::new(Mutex::new(false)),
             path_reservation_owner,
             reserved_create_paths: Arc::new(Mutex::new(HashSet::new())),
             vaulted_secrets: Arc::new(Mutex::new(HashMap::new())),
@@ -465,6 +472,21 @@ impl RocksDBTransaction {
             .trusted_import
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Is this a content import (package install / restore)?
+    pub(super) fn is_content_import(&self) -> bool {
+        *self
+            .content_import
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(super) fn set_content_import_enabled(&self, enabled: bool) {
+        *self
+            .content_import
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = enabled;
     }
 
     pub(super) fn set_trusted_import_enabled(&self, enabled: bool) {

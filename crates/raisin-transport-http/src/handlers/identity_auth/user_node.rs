@@ -54,26 +54,12 @@ pub fn email_to_node_name(email: &str) -> String {
 #[cfg(feature = "storage-rocksdb")]
 const ACCESS_CONTROL_BRANCH: &str = "main";
 
-/// Disambiguating suffix for an email whose slug is already taken by a
-/// *different* address.
-///
-/// `email_to_node_name` maps both '.' and '@' onto '-', so `a.b@x.com` and
-/// `a-b@x.com` collide on `/users/internal/a-b-at-x-com`. When that happens the
-/// second user must still get a node - refusing would leave them with no ACL
-/// node, hence no roles, hence a silent `200 []` on every read, which is the
-/// exact outage this module exists to prevent.
-///
-/// FNV-1a over the lowercased address: deterministic (so the same user lands on
-/// the same node at every login), dependency-free, and only ever used as a
-/// disambiguator - never as a security boundary.
-#[cfg_attr(not(feature = "storage-rocksdb"), allow(dead_code))]
-fn email_slug_suffix(email: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in email.to_lowercase().as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+/// What admin tools show for a user home: the display name, else the email.
+pub fn user_title(display_name: Option<&str>, email: &str) -> String {
+    match display_name.map(str::trim) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => email.to_string(),
     }
-    format!("{:08x}", (hash & 0xffff_ffff) as u32)
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +407,17 @@ async fn reconcile_user_node(
         writes.push(("email", PropertyValue::String(email.to_string())));
     }
 
+    // Homes carry a human title for admin tools (the path may be an opaque key).
+    if prop_str(&existing, "title").is_none() {
+        writes.push((
+            "title",
+            PropertyValue::String(user_title(
+                display_name.or(prop_str(&existing, "display_name")),
+                email,
+            )),
+        ));
+    }
+
     let existing_roles: Vec<PropertyValue> = match existing.properties.get("roles") {
         Some(PropertyValue::Array(items)) => items.clone(),
         _ => Vec::new(),
@@ -624,20 +621,22 @@ pub async fn ensure_user_node(
 
     // No existing node found - create new one.
     //
-    // If the email-derived name is occupied by a different address, create
-    // under a de-collided name instead of giving up (see email_slug_suffix).
-    let node_name = if slug_collision {
-        let disambiguated = format!("{}-{}", node_name, email_slug_suffix(email));
+    // A new home is `/users/internal/<user_key>`: a minted key, never derived
+    // from the email or the identity, so it cannot collide with another
+    // person's home and survives an email change, a re-registration (which
+    // rebinds `user_id`) and a package or backup round trip. The lookups above
+    // still find homes created before keys (at their email slug) and any home
+    // by its unique `email`.
+    if slug_collision {
         tracing::warn!(
             taken_path = %user_path,
-            new_name = %disambiguated,
-            "Email slug collides with a different address; creating the user \
-             node under a disambiguated name"
+            "Email slug path belongs to a different address; creating a keyed home"
         );
-        disambiguated
-    } else {
-        node_name
-    };
+    }
+    // The requested name is only a placeholder: the node service names a
+    // home under /users/internal by a freshly minted key (after its name
+    // sanitizing, which would lowercase a key minted here).
+    let node_name = "user".to_string();
 
     // Build role references (bare role_id strings, not paths)
     let role_refs: Vec<PropertyValue> = default_roles
@@ -662,6 +661,11 @@ pub async fn ensure_user_node(
                 .unwrap_or_else(|| email.split('@').next().unwrap_or("User"))
                 .to_string(),
         ),
+    );
+    // The home path is an opaque key: admin tools show the title.
+    properties.insert(
+        "title".to_string(),
+        PropertyValue::String(user_title(display_name, email)),
     );
     properties.insert(
         "status".to_string(),
@@ -699,7 +703,8 @@ pub async fn ensure_user_node(
     Ok(created_node.path)
 }
 
-/// Look up existing user node by email, returning the home path.
+/// Look up existing user node by email, returning the home path (by the
+/// unique `email` property, else at the legacy email-slug path).
 #[cfg(feature = "storage-rocksdb")]
 pub async fn lookup_user_home(
     storage: &Arc<raisin_rocksdb::RocksDBStorage>,
@@ -709,11 +714,28 @@ pub async fn lookup_user_home(
 ) -> Result<Option<String>, String> {
     use raisin_core::services::node_service::NodeService;
     use raisin_models::auth::AuthContext;
-    use raisin_storage::{RepositoryManagementRepository, Storage};
+    use raisin_models::nodes::properties::PropertyValue;
+    use raisin_storage::{NodeRepository, Storage, StorageScope};
 
     let workspace = "raisin:access_control";
     let node_name = email_to_node_name(email);
     let user_path = format!("/users/internal/{}", node_name);
+
+    // A keyed home (/users/internal/<user_key>) says nothing about the email:
+    // find it by its unique `email` property first.
+    let by_email = Storage::nodes(storage.as_ref())
+        .find_by_property(
+            StorageScope::new(tenant_id, repo_id, ACCESS_CONTROL_BRANCH, workspace),
+            "email",
+            &PropertyValue::String(email.to_string()),
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|n| n.node_type == "raisin:User");
+    if let Some(node) = by_email {
+        return Ok(Some(node.path));
+    }
 
     // The ACL workspace is pinned to its own branch - see ACCESS_CONTROL_BRANCH.
     let default_branch = ACCESS_CONTROL_BRANCH.to_string();
@@ -932,21 +954,6 @@ mod tests {
             reconcile_action(&facts(None, Some("deleted"), None), ME, EMAIL),
             ReconcileAction::Rebind(RebindReason::ClaimOrphan)
         );
-    }
-
-    /// The disambiguator must be stable across logins and differ per address.
-    #[test]
-    fn email_slug_suffix_is_deterministic_and_distinguishing() {
-        assert_eq!(email_slug_suffix(EMAIL), email_slug_suffix(EMAIL));
-        assert_eq!(
-            email_slug_suffix(EMAIL),
-            email_slug_suffix(&EMAIL.to_uppercase())
-        );
-        assert_ne!(
-            email_slug_suffix("ada.lovelace@example.com"),
-            email_slug_suffix("ada-lovelace@example.com")
-        );
-        assert_eq!(email_slug_suffix(EMAIL).len(), 8);
     }
 
     /// The reason the email guard exists at all: the path slug is lossy, so a
