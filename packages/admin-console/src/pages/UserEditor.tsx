@@ -188,6 +188,9 @@ export default function UserEditor() {
         user_id: formData.user_id.trim(),
         email: formData.email.trim(),
         display_name: formData.display_name.trim(),
+        // A home under /users/internal is named by an opaque key the engine
+        // mints; admins recognise the user by this title.
+        title: formData.display_name.trim() || formData.email.trim(),
         groups: formData.groups || [],
         roles: formData.roles || [],
         metadata: formData.metadata || {},
@@ -199,7 +202,9 @@ export default function UserEditor() {
       }
 
       if (isNew) {
-        // Use email-derived name for the node name (same convention as ensure_user_node)
+        // Requested name: under /users/internal the engine replaces it with a
+        // minted user key (the home path is the user's stable key); elsewhere
+        // the email-derived name is kept.
         const nodeName = properties.email
           .toLowerCase()
           .replace(/@/g, '-at-')

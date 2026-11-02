@@ -73,6 +73,8 @@ export interface UserNode {
 interface AuthMeResponse {
   user_id: string;
   user_path: string;
+  /** Stable person key (`u_` + 22 base62), when the home is keyed. */
+  user_key?: string;
   user_node?: UserNode;
   roles: string[];
   anonymous: boolean;

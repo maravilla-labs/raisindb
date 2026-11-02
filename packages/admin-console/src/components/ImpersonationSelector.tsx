@@ -17,6 +17,20 @@ import { sqlApi } from '../api/sql'
 import { getImpersonatedUserId, getImpersonatedUserName, setImpersonatedUserId } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 
+
+/** A home at /users/internal/<user_key> (`u_` + 22 base62): its path says nothing about the person. */
+function isKeyedHome(path: string): boolean {
+  return /\/u_[0-9A-Za-z]{22}$/.test(path)
+}
+
+/** What to call a user node: its name, title or email, never an opaque key. */
+function userLabel(node: Node): string {
+  const p = node.properties ?? {}
+  return (
+    (p.display_name as string) || (p.title as string) || (p.email as string) || node.name
+  )
+}
+
 interface ImpersonationSelectorProps {
   /** Repository name */
   repo: string
@@ -185,13 +199,15 @@ export default function ImpersonationSelector({
         SELECT id, path, name,
                properties->>'user_id' as user_id,
                properties->>'email' as email,
-               properties->>'display_name' as display_name
+               properties->>'display_name' as display_name,
+               properties->>'title' as title
         FROM "raisin:access_control"
         WHERE node_type = 'raisin:User'
           AND (
             COALESCE(properties->>'display_name', '') ILIKE '%' || $1 || '%'
             OR COALESCE(properties->>'email', '') ILIKE '%' || $1 || '%'
             OR COALESCE(properties->>'user_id', '') ILIKE '%' || $1 || '%'
+            OR COALESCE(properties->>'title', '') ILIKE '%' || $1 || '%'
             OR COALESCE(name, '') ILIKE '%' || $1 || '%'
           )
         ORDER BY properties->>'display_name'
@@ -203,7 +219,8 @@ export default function ImpersonationSelector({
         path: row.path,
         user_id: row.user_id || row.name,
         email: row.email || '',
-        display_name: row.display_name || row.name,
+        // The home path may be an opaque key: name the person, not the path.
+        display_name: row.display_name || row.title || row.email || row.name,
       }))
       setSearchResults(results)
     } catch (err) {
@@ -246,7 +263,7 @@ export default function ImpersonationSelector({
       for (const node of nodes) {
         if (node.node_type === 'raisin:User') {
           if (node.id === impersonatedUserId) {
-            return (node.properties?.display_name as string) || node.name
+            return userLabel(node)
           }
         }
         const children = childrenCache.get(node.path)
@@ -294,7 +311,9 @@ export default function ImpersonationSelector({
           {result.email && result.email !== result.display_name && (
             <p className="text-xs text-gray-400 truncate">{result.email}</p>
           )}
-          <p className="text-xs text-gray-500 truncate">{result.path}</p>
+          {!isKeyedHome(result.path) && (
+            <p className="text-xs text-gray-500 truncate">{result.path}</p>
+          )}
         </div>
         <span className="text-xs text-gray-500 truncate max-w-20">
           {result.user_id}
@@ -319,9 +338,7 @@ export default function ImpersonationSelector({
     const nodeId = node.id
     const userIdDisplay = isUser ? ((node.properties?.user_id as string) || node.name) : null
     const isSelected = isUser && nodeId === impersonatedUserId
-    const displayName = isUser
-      ? ((node.properties?.display_name as string) || node.name)
-      : node.name
+    const displayName = isUser ? userLabel(node) : node.name
     const email = isUser ? (node.properties?.email as string) : null
 
     return (

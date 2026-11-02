@@ -88,6 +88,12 @@ export interface IdentityMe {
   roles: string[];
   anonymous: boolean;
   home: string | null;
+  /**
+   * Stable person key: the last segment of `home` when it is a minted user
+   * key (`u_` + 22 base62, homes at `/users/internal/<user_key>`). Absent for
+   * anonymous callers and for homes created before keys.
+   */
+  user_key?: string;
 }
 
 /**
