@@ -309,6 +309,7 @@ fn user(user_id: &str, permissions: Vec<Permission>) -> AuthContext {
         groups: vec![],
         permissions,
         is_system_admin: false,
+        home: None,
         resolved_at: None,
     })
 }

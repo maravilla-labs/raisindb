@@ -1036,6 +1036,7 @@ mod caller_context {
     fn a_keyed_home_reaches_the_function_as_user_key() {
         let mut user = AuthContext::for_user("identity-1");
         user.home = Some("/users/internal/u_0123456789abcdefABCDEF".into());
+        user.resolved_home = Some("/users/internal/u_0123456789abcdefABCDEF".into());
         let ctx = context_of(Some(FunctionCaller::from_auth(Some(&user))));
         assert_eq!(ctx["caller"]["user_key"], "u_0123456789abcdefABCDEF");
     }

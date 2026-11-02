@@ -48,6 +48,13 @@ pub struct ResolvedPermissions {
     /// Whether this user has the system_admin role (bypasses all checks)
     pub is_system_admin: bool,
 
+    /// Path of the `raisin:User` node these permissions were resolved from, in
+    /// the repository of the request (`None` when resolved without one). The
+    /// only source of `auth.user_key` (see `AuthContext::user_key`): a home
+    /// claim in a token is not trusted for it.
+    #[serde(default)]
+    pub home: Option<String>,
+
     /// When these permissions were resolved (for cache invalidation)
     #[serde(skip)]
     pub resolved_at: Option<Instant>,
@@ -65,6 +72,7 @@ impl ResolvedPermissions {
             groups: vec![],
             permissions: vec![],
             is_system_admin: false,
+            home: None,
             resolved_at: Some(Instant::now()),
         }
     }
@@ -80,6 +88,7 @@ impl ResolvedPermissions {
             groups: vec![],
             permissions: vec![Permission::full_access("**")],
             is_system_admin: true,
+            home: None,
             resolved_at: Some(Instant::now()),
         }
     }
@@ -95,6 +104,7 @@ impl ResolvedPermissions {
             groups: vec![],
             permissions,
             is_system_admin: false,
+            home: None,
             resolved_at: Some(Instant::now()),
         }
     }
@@ -114,6 +124,7 @@ impl ResolvedPermissions {
             groups: vec![],
             permissions: vec![], // Empty = deny all
             is_system_admin: false,
+            home: None,
             resolved_at: Some(Instant::now()),
         }
     }

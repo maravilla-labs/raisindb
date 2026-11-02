@@ -410,7 +410,8 @@ mod tests {
         let key = "u_0123456789abcdefABCDEF";
         let node = make_test_node();
 
-        let keyed = AuthContext::for_user("u").with_home(format!("/users/internal/{key}"));
+        let mut keyed = AuthContext::for_user("u");
+        keyed.resolved_home = Some(format!("/users/internal/{key}"));
         let ctx = build_rel_context(&keyed, &node);
         let auth_val = ctx.get("auth").unwrap();
         assert_eq!(
@@ -418,7 +419,8 @@ mod tests {
             Some(&Value::String(key.to_string()))
         );
 
-        let legacy = AuthContext::for_user("u").with_home("/users/internal/alice-at-x-com");
+        let mut legacy = AuthContext::for_user("u");
+        legacy.resolved_home = Some("/users/internal/alice-at-x-com".to_string());
         let ctx = build_rel_context(&legacy, &node);
         assert_eq!(ctx.get("auth").unwrap().get("user_key"), Some(&Value::Null));
     }

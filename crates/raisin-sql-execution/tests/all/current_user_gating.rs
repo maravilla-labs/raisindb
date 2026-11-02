@@ -111,6 +111,7 @@ fn reader(user_id: &str) -> AuthContext {
             vec![Operation::Create, Operation::Read, Operation::Update],
         )],
         is_system_admin: false,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     })
 }

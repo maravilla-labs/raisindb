@@ -169,6 +169,7 @@ fn admin() -> AuthContext {
             ],
         )],
         is_system_admin: false,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     })
 }

@@ -134,6 +134,7 @@ async fn an_rls_restricted_listing_past_the_index_read_cap_is_complete() {
         permissions: vec![Permission::new("/**", vec![Operation::Read])
             .with_condition("node.owner == auth.user_id".to_string())],
         is_system_admin: false,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     });
     let engine = engine.with_auth(alice);

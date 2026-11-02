@@ -690,21 +690,21 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             props.insert("birth_date".to_string(), PropertyValue::String(bd.clone()));
         }
 
-        let mut node = Self::acl_node(
-            &nanoid::nanoid!(),
-            &stmt.user_id,
-            &path,
-            "raisin:User",
-            props,
-        );
-        // In the keyed home folder (`IN FOLDER '/users/internal'`) the home is
-        // named by its minted key, not by the user id.
-        raisin_models::auth::assign_user_key_name(scope.workspace, &mut node, None);
-        let created_path = node.path.clone();
+        let id = nanoid::nanoid!();
+        let node = Self::acl_node(&id, &stmt.user_id, &path, "raisin:User", props);
         self.storage
             .nodes()
             .create(scope, node, Self::acl_create_opts())
             .await?;
+        // In the keyed home folder (`IN FOLDER '/users/internal'`) the write
+        // path names the home by a freshly minted key, not by the user id.
+        let created_path = self
+            .storage
+            .nodes()
+            .get(scope, &id, None)
+            .await?
+            .map(|n| n.path)
+            .unwrap_or(path);
         Self::acl_ok(format!(
             "User '{}' created at {}",
             stmt.user_id, created_path

@@ -14,6 +14,7 @@ fn make_auth(user_id: &str, permissions: Vec<Permission>) -> AuthContext {
         groups: vec![],
         permissions,
         is_system_admin: false,
+        home: None,
         resolved_at: None,
     })
 }
@@ -168,11 +169,11 @@ fn test_no_scope_restriction_matches_all() {
 fn test_user_key_condition_matches_the_keyed_home_only() {
     let key = "u_0123456789abcdefABCDEF";
     let cond = "node.owner_key == auth.user_key";
-    let auth = make_auth(
+    let mut auth = make_auth(
         "user1",
         vec![Permission::new("content/**", vec![Operation::Read]).with_condition(cond)],
-    )
-    .with_home(format!("/users/internal/{key}"));
+    );
+    auth.resolved_home = Some(format!("/users/internal/{key}"));
     let scope = make_scope();
 
     let mut mine = make_node("/content/a", "Article");
@@ -192,11 +193,11 @@ fn test_user_key_condition_matches_the_keyed_home_only() {
     assert!(filter_node(other, &auth, &scope).is_none());
 
     // A legacy (email slug) home has no key: auth.user_key is null, never a match.
-    let legacy = make_auth(
+    let mut legacy = make_auth(
         "user1",
         vec![Permission::new("content/**", vec![Operation::Read]).with_condition(cond)],
-    )
-    .with_home("/users/internal/alice-at-x-com");
+    );
+    legacy.resolved_home = Some("/users/internal/alice-at-x-com".to_string());
     assert!(filter_node(mine, &legacy, &scope).is_none());
 }
 

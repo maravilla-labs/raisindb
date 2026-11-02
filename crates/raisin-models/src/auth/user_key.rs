@@ -74,12 +74,13 @@ pub fn mint_user_key() -> String {
 
 /// The user key of a home path, when its last segment is one.
 ///
-/// `"/users/internal/u_…"` gives the key; a legacy email-slug home, a visitor
-/// home or any other path gives `None`. Only the last segment is inspected, so
-/// the rule is the same wherever a keyed home is placed.
+/// Only the exact shape `/users/internal/<key>` gives the key: the parent is
+/// exactly [`USER_HOMES_ROOT`], one segment, in the key format. A legacy
+/// email-slug home, a visitor home, `/users/<key>`, a key-looking segment
+/// under any other parent or deeper (`/users/internal/x/u_…`) gives `None`.
 pub fn user_key_from_home(home: &str) -> Option<&str> {
-    let last = home.trim_end_matches('/').rsplit('/').next()?;
-    is_user_key(last).then_some(last)
+    let rest = home.strip_prefix(USER_HOMES_ROOT)?.strip_prefix('/')?;
+    is_user_key(rest).then_some(rest)
 }
 
 /// The keyed home path for `key`: `/users/internal/<key>`.
@@ -99,22 +100,25 @@ pub fn is_keyed_home_location(workspace: &str, node_type: &str, parent_path: &st
         && parent_path.trim_end_matches('/') == USER_HOMES_ROOT
 }
 
-/// Name a new user home by a freshly minted key, unless it already is one.
+/// Name a new user home by a freshly minted key.
 ///
 /// Applies only to a keyed home location (see [`is_keyed_home_location`]);
 /// the parent is taken from `node.path` when set, else from `parent_path`.
 /// Sets `node.name` and, when the path is known, `node.path`. Returns the key
-/// when the node was renamed, `None` when nothing changed.
+/// when the node was (re)named, `None` when nothing changed.
 ///
-/// This is the ONE minting rule: every creator of user homes calls it
-/// (identity provisioning, the node service, SQL `INSERT` / `CREATE USER`, the
-/// HTTP create endpoints) and the storage write path applies it again for any
-/// caller that did not, except for imports (package install, backup restore),
-/// which keep the path they carry.
+/// A name or path supplied by the caller is NEVER adopted, even when it looks
+/// like a key: whoever can influence a created node's name must not pick, or
+/// re-claim, a person's key. Only `adopt_supplied_key` (a content import by a
+/// system principal: package install, where preserving the key is the point)
+/// keeps the path the content carries (a key, or a legacy home). The storage
+/// write path is the one place this runs for every create
+/// (`raisin_rocksdb::user_homes`).
 pub fn assign_user_key_name(
     workspace: &str,
     node: &mut crate::nodes::Node,
     parent_path: Option<&str>,
+    adopt_supplied_key: bool,
 ) -> Option<String> {
     let parent = if node.path.is_empty() {
         parent_path?.to_string()
@@ -125,16 +129,13 @@ pub fn assign_user_key_name(
             None => return None,
         }
     };
-    if !is_keyed_home_location(workspace, &node.node_type, &parent) || is_user_key(&node.name) {
+    if !is_keyed_home_location(workspace, &node.node_type, &parent) {
         return None;
     }
-    if !node.path.is_empty() {
-        if let Some((_, leaf)) = node.path.rsplit_once('/') {
-            if is_user_key(leaf) {
-                node.name = leaf.to_string();
-                return None;
-            }
-        }
+    if adopt_supplied_key {
+        // An import keeps the path it carries: a key, or a legacy home that
+        // predates keys (renaming it would orphan the content below it).
+        return None;
     }
     let key = mint_user_key();
     node.name = key.clone();
@@ -161,34 +162,59 @@ mod tests {
     #[test]
     fn a_new_home_under_users_internal_gets_a_key() {
         let mut n = user("/users/internal/alice-at-x-com", "alice-at-x-com");
-        let key = assign_user_key_name(USER_WORKSPACE, &mut n, None).expect("renamed");
+        let key = assign_user_key_name(USER_WORKSPACE, &mut n, None, false).expect("renamed");
         assert!(is_user_key(&key));
         assert_eq!(n.name, key);
         assert_eq!(n.path, format!("/users/internal/{key}"));
 
         // Path not known yet: the parent comes from the caller.
         let mut n = user("", "bob");
-        let key = assign_user_key_name(USER_WORKSPACE, &mut n, Some("/users/internal")).unwrap();
+        let key =
+            assign_user_key_name(USER_WORKSPACE, &mut n, Some("/users/internal"), false).unwrap();
         assert_eq!(n.name, key);
         assert!(n.path.is_empty());
     }
 
     #[test]
-    fn keyed_names_other_places_and_other_types_are_left_alone() {
+    fn a_supplied_key_is_never_adopted_outside_an_import() {
         let key = "u_0123456789abcdefABCDEF";
         let mut n = user(&format!("/users/internal/{key}"), key);
-        assert_eq!(assign_user_key_name(USER_WORKSPACE, &mut n, None), None);
-        assert_eq!(n.path, format!("/users/internal/{key}"));
+        let minted = assign_user_key_name(USER_WORKSPACE, &mut n, None, false).expect("minted");
+        assert_ne!(minted, key, "a key-shaped name is replaced");
+        assert_eq!(n.path, format!("/users/internal/{minted}"));
 
+        // An import keeps the path it carries, a key or a legacy home.
+        let mut n = user(&format!("/users/internal/{key}"), key);
+        assert_eq!(
+            assign_user_key_name(USER_WORKSPACE, &mut n, None, true),
+            None
+        );
+        assert_eq!(n.path, format!("/users/internal/{key}"));
+        let mut n = user("/users/internal/alice", "alice");
+        assert_eq!(
+            assign_user_key_name(USER_WORKSPACE, &mut n, None, true),
+            None
+        );
+        assert_eq!(n.path, "/users/internal/alice");
+    }
+
+    #[test]
+    fn other_places_and_other_types_are_left_alone() {
         let mut n = user("/users/system/anonymous", "anonymous");
-        assert_eq!(assign_user_key_name(USER_WORKSPACE, &mut n, None), None);
+        assert_eq!(
+            assign_user_key_name(USER_WORKSPACE, &mut n, None, false),
+            None
+        );
 
         let mut n = user("/users/internal/alice", "alice");
-        assert_eq!(assign_user_key_name("people", &mut n, None), None);
+        assert_eq!(assign_user_key_name("people", &mut n, None, false), None);
 
         let mut n = user("/users/internal/inbox", "inbox");
         n.node_type = "raisin:Folder".into();
-        assert_eq!(assign_user_key_name(USER_WORKSPACE, &mut n, None), None);
+        assert_eq!(
+            assign_user_key_name(USER_WORKSPACE, &mut n, None, false),
+            None
+        );
     }
 
     #[test]
@@ -215,13 +241,9 @@ mod tests {
     }
 
     #[test]
-    fn key_from_home_reads_the_last_segment_only() {
+    fn key_from_home_takes_only_the_exact_keyed_home() {
         let key = "u_0123456789abcdefABCDEF";
         assert_eq!(user_key_from_home(&user_home_for_key(key)), Some(key));
-        assert_eq!(
-            user_key_from_home("/users/internal/u_0123456789abcdefABCDEF/"),
-            Some(key)
-        );
         assert_eq!(user_key_from_home("/users/internal/alice-at-x-com"), None);
         assert_eq!(
             user_key_from_home("/users/internal/guest0e1-at-guest-invalid"),
@@ -232,5 +254,14 @@ mod tests {
             None
         );
         assert_eq!(user_key_from_home(""), None);
+        // Only /users/internal/<key>, nothing deeper, nothing elsewhere.
+        assert_eq!(user_key_from_home(&format!("/users/{key}")), None);
+        assert_eq!(
+            user_key_from_home(&format!("/users/internal/x/{key}")),
+            None
+        );
+        assert_eq!(user_key_from_home(&format!("/other/internal/{key}")), None);
+        assert_eq!(user_key_from_home(&format!("/visitors/{key}")), None);
+        assert_eq!(user_key_from_home(&format!("users/internal/{key}")), None);
     }
 }

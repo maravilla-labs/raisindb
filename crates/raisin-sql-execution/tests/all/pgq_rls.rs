@@ -93,6 +93,7 @@ fn owner_scoped_user(user: &str) -> AuthContext {
         permissions: vec![Permission::new("/**", vec![Operation::Read])
             .with_condition("node.owner == auth.user_id".to_string())],
         is_system_admin: false,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     })
 }

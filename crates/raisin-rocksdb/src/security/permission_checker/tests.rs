@@ -34,6 +34,7 @@ fn test_basic_read_permission() {
         groups: vec![],
         permissions: permissions.clone(),
         is_system_admin: false,
+        home: None,
         resolved_at: None,
     });
 
@@ -70,6 +71,7 @@ fn test_node_type_filter() {
         groups: vec![],
         permissions: permissions.clone(),
         is_system_admin: false,
+        home: None,
         resolved_at: None,
     });
 
@@ -95,6 +97,7 @@ fn test_operation_filter() {
         groups: vec![],
         permissions: permissions.clone(),
         is_system_admin: false,
+        home: None,
         resolved_at: None,
     });
 
@@ -125,6 +128,7 @@ fn test_rel_condition_ownership() {
         groups: vec![],
         permissions: permissions.clone(),
         is_system_admin: false,
+        home: None,
         resolved_at: None,
     });
 
@@ -161,6 +165,7 @@ fn test_rel_condition_published_status() {
         groups: vec![],
         permissions: permissions.clone(),
         is_system_admin: false,
+        home: None,
         resolved_at: None,
     });
 

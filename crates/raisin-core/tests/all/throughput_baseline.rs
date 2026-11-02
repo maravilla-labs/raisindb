@@ -152,6 +152,7 @@ fn rls_user(uid: &str, condition: Option<&str>) -> AuthContext {
         groups: vec![],
         permissions: vec![perm],
         is_system_admin: false,
+        home: None,
         resolved_at: None,
     };
     AuthContext::for_user(uid.to_string())

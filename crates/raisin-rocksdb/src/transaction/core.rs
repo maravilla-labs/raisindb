@@ -482,6 +482,21 @@ impl RocksDBTransaction {
             .unwrap_or_else(|e| e.into_inner())
     }
 
+    /// A content import by a SYSTEM principal: the only writer that may keep
+    /// a user key its content carries (see `crate::user_homes`).
+    pub(in crate::transaction) fn is_system_content_import(&self) -> raisin_error::Result<bool> {
+        if !self.is_content_import() {
+            return Ok(false);
+        }
+        Ok(self
+            .metadata
+            .lock()
+            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?
+            .auth_context
+            .as_ref()
+            .is_some_and(|a| a.is_system))
+    }
+
     pub(super) fn set_content_import_enabled(&self, enabled: bool) {
         *self
             .content_import

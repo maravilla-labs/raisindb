@@ -78,6 +78,7 @@ fn open_reader() -> AuthContext {
         groups: vec![],
         permissions: vec![Permission::new("/open/**", vec![Operation::Read]).with_workspace(WS)],
         is_system_admin: false,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     })
 }

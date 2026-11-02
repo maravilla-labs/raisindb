@@ -176,6 +176,7 @@ fn auth_for_user(
         groups: vec![],
         permissions,
         is_system_admin,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     })
 }

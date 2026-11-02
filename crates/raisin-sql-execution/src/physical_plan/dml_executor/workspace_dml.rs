@@ -137,16 +137,19 @@ async fn insert_rows_via_txn<S: Storage>(
 
         let actor = ctx.auth_context.as_ref().map(|a| a.actor_id());
         let mut node = build_node_from_columns(&col_map, workspace, actor.as_deref())?;
-        // A user home INSERTed under /users/internal is named by its minted
-        // key here, so its initial structure and RETURNING use the real path.
-        if !is_upsert {
-            raisin_models::auth::assign_user_key_name(workspace, &mut node, None);
-        }
 
         if is_upsert {
             txn_ctx.upsert_node(workspace, &node).await?;
         } else {
             txn_ctx.add_node(workspace, &node).await?;
+            // A user home is named by a freshly minted key on the write path
+            // (raisin_models::auth::user_key): its initial structure and
+            // RETURNING must use the stored path.
+            if let Some(stored) = txn_ctx.get_node(workspace, &node.id).await? {
+                if stored.path != node.path {
+                    node = stored;
+                }
+            }
 
             create_initial_structure_children(
                 txn_ctx,

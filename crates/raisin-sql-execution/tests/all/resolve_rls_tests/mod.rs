@@ -92,6 +92,7 @@ fn page_reader() -> AuthContext {
             Permission::new("/**", vec![Operation::Read]).with_workspace(ASSETS),
         ],
         is_system_admin: false,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     })
 }

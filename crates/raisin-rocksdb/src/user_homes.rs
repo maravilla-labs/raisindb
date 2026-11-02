@@ -17,10 +17,12 @@
 //! person's stable key and is never moved or renamed. Two rules, each applied
 //! by the low-level writers so no entry point can miss them:
 //!
-//! - [`name_new_user_home`]: on CREATE, a home whose name is not a key gets
-//!   one. Every creator in the engine names the home itself first (so it
-//!   knows the path it created); this is the net for any that does not.
-//!   Content imports (package install, restore) keep their paths.
+//! - [`name_new_user_home`]: on CREATE, a home is named by a freshly minted
+//!   key. A supplied name is never adopted, even when it looks like a key
+//!   (nobody may pick or re-claim a person's key), except in a content import
+//!   by a system principal (package install), which keeps the key it carries;
+//!   [`reject_user_home_takeover`] refuses an import whose key is already the
+//!   home of a different person. Backup restore writes records as they are.
 //! - [`reject_user_home_move`]: a move or rename of a user home, or of the
 //!   folders that hold every home (`/users`, `/users/internal`), is refused,
 //!   except inside a content import (a package migration).
@@ -34,20 +36,50 @@ use raisin_models::auth::user_key::{
 };
 use raisin_models::nodes::Node;
 
-/// Name a new user home by a minted key (no-op for imports, other nodes, and
-/// homes already named by a key).
-pub(crate) fn name_new_user_home(workspace: &str, node: &mut Node, content_import: bool) {
-    if content_import {
-        return;
-    }
+/// Name a new user home by a freshly minted key. `adopt_supplied_key` (a
+/// content import by a system principal) keeps a key-shaped name the import
+/// carries; nothing else does.
+pub(crate) fn name_new_user_home(workspace: &str, node: &mut Node, adopt_supplied_key: bool) {
     let before = node.path.clone();
-    if let Some(key) = assign_user_key_name(workspace, node, None) {
+    if let Some(key) = assign_user_key_name(workspace, node, None, adopt_supplied_key) {
         tracing::info!(
             requested_path = %before,
             user_path = %node.path,
             user_key = %key,
             "User home named by its minted key"
         );
+    }
+}
+
+/// Refuse an import that writes a keyed home over the home of a DIFFERENT
+/// person (another email) at the same key: a package must not re-claim a
+/// key. The same person (same email, or no email to compare) is an update.
+pub(crate) fn reject_user_home_takeover(
+    workspace: &str,
+    prior: &Node,
+    incoming: &Node,
+    content_import: bool,
+) -> Result<()> {
+    if !content_import
+        || workspace != USER_WORKSPACE
+        || prior.node_type != USER_NODE_TYPE
+        || raisin_models::auth::user_key::user_key_from_home(&prior.path).is_none()
+    {
+        return Ok(());
+    }
+    let email = |n: &Node| match n.properties.get("email") {
+        Some(raisin_models::nodes::properties::PropertyValue::String(s)) => {
+            Some(s.trim().to_lowercase())
+        }
+        _ => None,
+    };
+    match (email(prior), email(incoming)) {
+        (Some(a), Some(b)) if a != b => Err(Error::Conflict(format!(
+            "user key collision: '{}' is the home of another person; an import cannot \
+             re-claim it",
+            prior.path
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -89,15 +121,43 @@ mod tests {
     }
 
     #[test]
-    fn a_created_home_is_keyed_unless_imported() {
+    fn a_created_home_is_always_freshly_keyed_unless_an_import_carries_a_key() {
         let mut n = node("/users/internal/alice", USER_NODE_TYPE);
         name_new_user_home(USER_WORKSPACE, &mut n, false);
         assert!(is_user_key(&n.name), "{}", n.name);
         assert_eq!(n.path, format!("/users/internal/{}", n.name));
 
-        let mut n = node("/users/internal/alice", USER_NODE_TYPE);
+        let key = "u_0123456789abcdefABCDEF";
+        let mut n = node(&format!("/users/internal/{key}"), USER_NODE_TYPE);
+        name_new_user_home(USER_WORKSPACE, &mut n, false);
+        assert_ne!(n.name, key, "a supplied key is not adopted");
+
+        let mut n = node(&format!("/users/internal/{key}"), USER_NODE_TYPE);
         name_new_user_home(USER_WORKSPACE, &mut n, true);
-        assert_eq!(n.path, "/users/internal/alice");
+        assert_eq!(n.name, key, "an import keeps its key");
+    }
+
+    #[test]
+    fn an_import_cannot_reclaim_another_persons_key() {
+        use raisin_models::nodes::properties::PropertyValue;
+        let with_email = |e: &str| {
+            let mut n = node("/users/internal/u_0123456789abcdefABCDEF", USER_NODE_TYPE);
+            n.properties
+                .insert("email".into(), PropertyValue::String(e.into()));
+            n
+        };
+        let prior = with_email("a@x.com");
+        assert!(
+            reject_user_home_takeover(USER_WORKSPACE, &prior, &with_email("b@x.com"), true)
+                .is_err()
+        );
+        assert!(
+            reject_user_home_takeover(USER_WORKSPACE, &prior, &with_email("A@X.com"), true).is_ok()
+        );
+        assert!(
+            reject_user_home_takeover(USER_WORKSPACE, &prior, &with_email("b@x.com"), false)
+                .is_ok()
+        );
     }
 
     #[test]

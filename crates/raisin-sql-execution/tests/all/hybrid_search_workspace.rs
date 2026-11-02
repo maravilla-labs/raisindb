@@ -285,6 +285,7 @@ fn permissions_for(user: &str, permissions: Vec<Permission>) -> AuthContext {
         groups: vec![],
         permissions,
         is_system_admin: false,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     })
 }

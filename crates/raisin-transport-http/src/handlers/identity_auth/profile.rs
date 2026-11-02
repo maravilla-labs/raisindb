@@ -198,7 +198,7 @@ pub async fn get_me_for_repo(
     let tenant_id = &tenant_info.tenant_id;
 
     // Extract auth context
-    let (user_id, email, roles, anonymous, home) = match auth {
+    let (user_id, email, roles, anonymous, home, auth_user_key) = match auth {
         Some(Extension(auth_ctx)) => (
             auth_ctx
                 .user_id
@@ -208,8 +208,9 @@ pub async fn get_me_for_repo(
             auth_ctx.roles.clone(),
             auth_ctx.user_id.is_none(),
             auth_ctx.home.clone(),
+            auth_ctx.user_key().map(str::to_string),
         ),
-        None => ("anonymous".to_string(), None, vec![], true, None),
+        None => ("anonymous".to_string(), None, vec![], true, None, None),
     };
 
     // Get user node if home path is available
@@ -244,10 +245,8 @@ pub async fn get_me_for_repo(
         None
     };
 
-    let user_key = home
-        .as_deref()
-        .and_then(raisin_models::auth::user_key_from_home)
-        .map(str::to_string);
+    // From the user node resolved for THIS repository, never from the claim.
+    let user_key = auth_user_key;
 
     Ok(Json(MeForRepoResponse {
         id: user_id,

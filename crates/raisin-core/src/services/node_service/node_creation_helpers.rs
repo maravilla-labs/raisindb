@@ -239,14 +239,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         self.validate_and_stamp(&mut node).await?;
 
         // Sanitize the node name
-        node.name = sanitize_name(&node.name)?;
-
-        // A user home is named by its minted key (`/users/internal/u_…`),
-        // after sanitizing (which lowercases) so the key keeps its case. The
-        // path is computed below from the parent, so any stale path goes.
-        node.path.clear();
-        raisin_models::auth::assign_user_key_name(&self.workspace_id, &mut node, Some(parent_path));
-        let clean_name = node.name.clone();
+        let clean_name = sanitize_name(&node.name)?;
+        node.name = clean_name.clone();
 
         // Validate parent exists (unless creating at root).
         // Use the lightweight id-only lookup: we only need to know the parent
@@ -319,6 +313,26 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
 
         // Commit the transaction
         ctx.commit().await?;
+
+        // A user home is named by a freshly minted key on the write path
+        // (`/users/internal/u_…`, see raisin_models::auth::user_key): read the
+        // stored node back so the caller and the initial structure get the
+        // real path.
+        if raisin_models::auth::is_keyed_home_location(
+            &self.workspace_id,
+            &node.node_type,
+            parent_path,
+        ) {
+            if let Some(stored) = self
+                .storage
+                .nodes()
+                .get(self.scope(), &node.id, None)
+                .await?
+            {
+                node.name = stored.name;
+                node.path = stored.path;
+            }
+        }
 
         // Auto-create initial_structure children if defined in NodeType
         let node_type = self

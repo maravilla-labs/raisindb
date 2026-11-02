@@ -26,6 +26,7 @@ fn owner_reader() -> AuthContext {
                     .with_condition("node.id RELATES auth.local_user_id VIA 'OWNED_BY'"),
             ],
             is_system_admin: false,
+            home: None,
             resolved_at: Some(std::time::Instant::now()),
         })
         .with_local_user_id("u1")

@@ -214,6 +214,7 @@ fn user(user_id: &str) -> AuthContext {
             ],
         )],
         is_system_admin: false,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     })
 }

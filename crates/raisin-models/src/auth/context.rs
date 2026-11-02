@@ -109,6 +109,13 @@ pub struct AuthContext {
     /// were written for users and must never start matching for visitors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visitor_home: Option<String>,
+
+    /// The path of the `raisin:User` node the permissions were resolved from
+    /// in THIS request's repository (from [`ResolvedPermissions::home`]).
+    /// Unlike [`Self::home`], which comes from the token, it is never taken
+    /// from a claim; [`Self::user_key`] reads only this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_home: Option<String>,
 }
 
 impl Default for AuthContext {
@@ -138,6 +145,7 @@ impl AuthContext {
             home: None,
             agent: None,
             visitor_home: None,
+            resolved_home: None,
         }
     }
 
@@ -165,6 +173,7 @@ impl AuthContext {
             home: None,
             agent: None,
             visitor_home: None,
+            resolved_home: None,
         }
     }
 
@@ -210,6 +219,7 @@ impl AuthContext {
             home: None,
             agent: None,
             visitor_home: None,
+            resolved_home: None,
         }
     }
 
@@ -233,6 +243,7 @@ impl AuthContext {
             home: None,
             agent: None,
             visitor_home: None,
+            resolved_home: None,
         }
     }
 
@@ -271,6 +282,7 @@ impl AuthContext {
             home: None,
             agent: None,
             visitor_home: None,
+            resolved_home: None,
         }
     }
 
@@ -321,19 +333,22 @@ impl AuthContext {
         self.email = permissions.email.clone();
         // Capture the local user node ID (workspace-specific)
         self.local_user_id = Some(permissions.user_id.clone());
+        // The home resolved in this repository: the only source of user_key.
+        self.resolved_home = permissions.home.clone();
         self.resolved_permissions = Some(Arc::new(permissions));
         self
     }
 
-    /// The user's stable person key: the last segment of [`Self::home`] when it
-    /// is a minted user key (`u_` + 22 base62), see [`crate::auth::user_key`].
+    /// The user's stable person key: the key of [`Self::resolved_home`] when
+    /// it is exactly `/users/internal/<key>` (see [`crate::auth::user_key`]).
     ///
-    /// Derived, not stored: it is exactly as trustworthy as `home`, which comes
-    /// from the verified token. `None` for anonymous and system contexts, for
+    /// Derived from the user node resolved for THIS request's repository, never
+    /// from the token's `home` claim (a token for one repository used against
+    /// another yields no key). `None` for anonymous and system contexts, for
     /// visitors, and for users whose home predates keyed homes. Exposed to
     /// permission conditions as `auth.user_key`.
     pub fn user_key(&self) -> Option<&str> {
-        self.home
+        self.resolved_home
             .as_deref()
             .and_then(crate::auth::user_key::user_key_from_home)
     }
@@ -591,21 +606,36 @@ mod tests {
     }
 
     #[test]
-    fn user_key_is_the_keyed_home_segment_only() {
+    fn user_key_comes_only_from_the_home_resolved_for_this_repository() {
+        use crate::permissions::ResolvedPermissions;
         let key = "u_0123456789abcdefABCDEF";
-        let ctx = AuthContext::for_user("u1").with_home(format!("/users/internal/{key}"));
-        assert_eq!(ctx.user_key(), Some(key));
+        let resolved = |home: &str| {
+            let mut p = ResolvedPermissions::empty("node-1");
+            p.home = Some(home.to_string());
+            AuthContext::for_user("u1").with_permissions(p)
+        };
+        assert_eq!(
+            resolved(&format!("/users/internal/{key}")).user_key(),
+            Some(key)
+        );
 
-        let legacy = AuthContext::for_user("u1").with_home("/users/internal/alice-at-x-com");
-        assert_eq!(legacy.user_key(), None);
-        assert_eq!(AuthContext::for_user("u1").user_key(), None);
+        // The token's home claim alone (e.g. a token for repo A used against
+        // repo B, where no user node was resolved) yields no key.
+        let claim_only = AuthContext::for_user("u1").with_home(format!("/users/internal/{key}"));
+        assert_eq!(claim_only.user_key(), None);
+
+        // Only the exact keyed shape.
+        for home in [
+            format!("/users/internal/x/{key}"),
+            format!("/users/{key}"),
+            format!("/people/internal/{key}"),
+            "/users/internal/alice-at-x-com".to_string(),
+        ] {
+            assert_eq!(resolved(&home).user_key(), None, "{home}");
+        }
         assert_eq!(AuthContext::system().user_key(), None);
         let visitor = AuthContext::anonymous().with_visitor_home(format!("/visitors/{key}"));
-        assert_eq!(
-            visitor.user_key(),
-            None,
-            "a visitor home is never a user key"
-        );
+        assert_eq!(visitor.user_key(), None);
     }
 
     #[test]

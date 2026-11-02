@@ -66,11 +66,21 @@ fn node(id: &str, path: &str, node_type: &str) -> Node {
 }
 
 async fn tx_write(storage: &RocksDBStorage, n: &Node, put: bool, import: bool) -> Result<()> {
+    tx_write_as(storage, n, put, import, AuthContext::system()).await
+}
+
+async fn tx_write_as(
+    storage: &RocksDBStorage,
+    n: &Node,
+    put: bool,
+    import: bool,
+    auth: AuthContext,
+) -> Result<()> {
     let tx = storage.begin_context().await?;
     tx.set_tenant_repo(TENANT, REPO)?;
     tx.set_branch(BRANCH)?;
     tx.set_message("test")?;
-    tx.set_auth_context(AuthContext::system())?;
+    tx.set_auth_context(auth)?;
     tx.set_validate_schema(false)?;
     tx.set_content_import(import)?;
     if put {
@@ -211,5 +221,77 @@ async fn homes_do_not_move_or_rename() -> Result<()> {
     assert!(tx_write(&storage, &moved, true, false).await.is_err());
 
     assert_eq!(path_of(&storage, "u1").await, Some(path));
+    Ok(())
+}
+
+const KEY: &str = "u_0123456789abcdefABCDEF";
+
+fn with_email(mut n: Node, email: &str) -> Node {
+    n.properties.insert(
+        "email".into(),
+        raisin_models::nodes::properties::PropertyValue::String(email.into()),
+    );
+    n
+}
+
+#[tokio::test]
+async fn a_key_shaped_name_is_never_adopted_outside_a_system_import() -> Result<()> {
+    let (storage, _dir) = setup_ac().await?;
+    let wanted = format!("/users/internal/{KEY}");
+    // Normal create paths: a fresh key, never the supplied one.
+    tx_write(&storage, &node("u1", &wanted, "raisin:User"), false, false).await?;
+    tx_write(&storage, &node("u2", &wanted, "raisin:User"), true, false).await?;
+    // An import by a non-system principal is a normal create.
+    let mut user = AuthContext::for_user("someone");
+    user.is_system = false;
+    let _ = tx_write_as(
+        &storage,
+        &node("u3", &wanted, "raisin:User"),
+        true,
+        true,
+        user,
+    )
+    .await;
+    for id in ["u1", "u2", "u3"] {
+        if let Some(path) = path_of(&storage, id).await {
+            assert_ne!(path, wanted, "{id} adopted a supplied key");
+            assert!(user_key_from_home(&path).is_some(), "{path}");
+        }
+    }
+    // A system import keeps it.
+    tx_write(&storage, &node("u4", &wanted, "raisin:User"), true, true).await?;
+    assert_eq!(path_of(&storage, "u4").await, Some(wanted));
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_import_cannot_reclaim_another_persons_key() -> Result<()> {
+    let (storage, _dir) = setup_ac().await?;
+    let path = format!("/users/internal/{KEY}");
+    tx_write(
+        &storage,
+        &with_email(node("a", &path, "raisin:User"), "a@x.com"),
+        true,
+        true,
+    )
+    .await?;
+    // Same person (same email), reinstalled: an update.
+    tx_write(
+        &storage,
+        &with_email(node("a", &path, "raisin:User"), "A@x.com"),
+        true,
+        true,
+    )
+    .await?;
+    // Another person at that key: refused.
+    let err = tx_write(
+        &storage,
+        &with_email(node("a", &path, "raisin:User"), "b@x.com"),
+        true,
+        true,
+    )
+    .await
+    .expect_err("a different person cannot take the key");
+    assert!(err.to_string().contains("collision"), "{err}");
     Ok(())
 }

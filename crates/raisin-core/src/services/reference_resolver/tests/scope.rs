@@ -14,6 +14,7 @@ pub(super) fn reader_of(workspace: &str) -> AuthContext {
         groups: vec![],
         permissions: vec![Permission::new("/**", vec![Operation::Read]).with_workspace(workspace)],
         is_system_admin: false,
+        home: None,
         resolved_at: None,
     })
 }

@@ -202,6 +202,7 @@ fn rls_user(uid: &str) -> AuthContext {
                 vec![Operation::Read, Operation::Create],
             )],
             is_system_admin: false,
+            home: None,
             resolved_at: None,
         })
         .with_local_user_id(uid.to_string())

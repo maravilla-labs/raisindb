@@ -61,18 +61,25 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
 
     // 4a. User homes: a create is named by its minted key, an update may not
     // move one (see `crate::user_homes`).
+    let system_import = tx.is_system_content_import()?;
     match &existing_node {
-        None => crate::user_homes::name_new_user_home(
-            workspace,
-            &mut normalized_node,
-            tx.is_content_import(),
-        ),
-        Some(prior) => crate::user_homes::reject_user_home_move(
-            workspace,
-            prior,
-            &normalized_node.path,
-            tx.is_content_import(),
-        )?,
+        None => {
+            crate::user_homes::name_new_user_home(workspace, &mut normalized_node, system_import)
+        }
+        Some(prior) => {
+            crate::user_homes::reject_user_home_move(
+                workspace,
+                prior,
+                &normalized_node.path,
+                tx.is_content_import(),
+            )?;
+            crate::user_homes::reject_user_home_takeover(
+                workspace,
+                prior,
+                &normalized_node,
+                tx.is_content_import(),
+            )?;
+        }
     }
 
     tracing::debug!(

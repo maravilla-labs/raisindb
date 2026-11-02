@@ -176,15 +176,20 @@ outside repository backups.
 
 The contract:
 
-- **Minted in one place.** Every writer applies the same rule
-  (`raisin_models::auth::user_key::assign_user_key_name`): a `raisin:User`
-  created directly under `/users/internal` whose name is not a key gets a
-  minted one. Identity provisioning (`ensure_user_node`, registration, magic
-  link, OIDC, guests, admin identity creation), the node API, SQL `INSERT`
-  and `CREATE USER ... IN FOLDER '/users/internal'` all name the home before
-  writing; the storage write path (transaction `add_node` / `put_node`,
-  repository create and deep create) applies it again for any caller that did
-  not. Package installs and backup restores keep the path they carry.
+- **Minted in one place.** The storage write path (transaction `add_node` /
+  `put_node`, repository create and deep create; `raisin_rocksdb::user_homes`)
+  names every `raisin:User` created directly under `/users/internal` by a
+  freshly minted key, whichever entry point created it (identity
+  provisioning: registration, login, magic link, OIDC, guests, admin
+  identity creation; the node API; SQL `INSERT` and
+  `CREATE USER ... IN FOLDER '/users/internal'`). The entry points read the
+  stored node back for the real path. A supplied name is never adopted, even
+  when it looks like a key: nobody can pick or re-claim a person's key.
+- **Imports keep the key.** A package install (a content import by a system
+  principal) keeps the path its content carries, a key or a legacy home; an
+  import that would write a keyed home over a different person (another
+  email) is refused as a key collision. A backup restore writes the records
+  as they are.
 - **Immutable.** A home, and the folders holding every home (`/users`,
   `/users/internal`), cannot be moved or renamed (node API, SQL `MOVE`, a
   `put` that changes the path). Only a package migration (inside an install)
@@ -194,10 +199,18 @@ The contract:
 - **Exposed** as `auth.user_key` in permission conditions (RLS and REL,
   also `$auth.user_key` / `$user.user_key` in role conditions), `user_key` in
   `GET /auth/{repo}/me` and `/auth/me`, `caller.user_key` in a function's
-  context, and `user_key` in the JS SDK's `IdentityMe`. It is derived from
-  `home`, not stored in the JWT: present only when the last home segment is a
-  key, absent for anonymous callers and for homes created before keys
-  (email-slug paths are left as they are; there is no migration).
+  context, and `user_key` in the JS SDK's `IdentityMe`. It is not in the JWT
+  and never taken from the token's `home` claim: it is derived from the user
+  node resolved for the request's repository (`AuthContext::resolved_home`,
+  the node that also gives `auth.local_user_id`), and only when that path is
+  exactly `/users/internal/<key>`. Absent for anonymous callers and for homes
+  created before keys (email-slug paths are left as they are; there is no
+  migration). A token's `home` claim is ignored for a request to another
+  repository than the one it was issued for.
+- **Open risk: retired keys.** Deleting a user leaves no tombstone of its
+  key. A fresh mint cannot collide in practice (131 random bits), but a
+  package carrying a deleted person's home can recreate it on install. Keep
+  packages with user data as private as backups.
 - **Who can see it.** The built-in `authenticated_user` role lets every
   signed-in user read every `raisin:User` node (`display_name` field only)
   and friends read profiles, so a key is visible to other users; it is an

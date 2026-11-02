@@ -279,6 +279,7 @@ impl<S: Storage> PermissionService<S> {
             groups,
             permissions,
             is_system_admin,
+            home: Some(user_node.path.clone()).filter(|p| !p.is_empty()),
             resolved_at: Some(std::time::Instant::now()),
         })
     }

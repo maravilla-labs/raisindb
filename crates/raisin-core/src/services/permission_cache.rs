@@ -167,6 +167,7 @@ mod tests {
             groups: vec![],
             permissions: vec![],
             is_system_admin: false,
+            home: None,
             resolved_at: None,
         }
     }

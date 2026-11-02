@@ -120,6 +120,7 @@ fn open_reader() -> AuthContext {
         groups: vec![],
         permissions: vec![Permission::new("/**", vec![Operation::Read]).with_workspace(OPEN_WS)],
         is_system_admin: false,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     })
 }
@@ -238,6 +239,7 @@ async fn restricted_count_matches_visible_subset() {
         // Only /o1 is readable in OPEN.
         permissions: vec![Permission::new("/o1", vec![Operation::Read]).with_workspace(OPEN_WS)],
         is_system_admin: false,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     });
     let reader = engine(&storage, subtree_reader);

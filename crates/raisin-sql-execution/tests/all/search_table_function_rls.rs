@@ -127,6 +127,7 @@ fn permissions_for(user: &str, permissions: Vec<Permission>) -> AuthContext {
         groups: vec![],
         permissions,
         is_system_admin: false,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     })
 }
@@ -490,6 +491,7 @@ async fn every_unfilterable_caller_resolves_all_readable_to_everything() {
         groups: vec![],
         permissions: vec![],
         is_system_admin: true,
+        home: None,
         resolved_at: Some(std::time::Instant::now()),
     });
     assert_eq!(
