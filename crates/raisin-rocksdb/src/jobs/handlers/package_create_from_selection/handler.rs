@@ -463,6 +463,7 @@ impl PackageCreateFromSelectionHandler {
             .map_err(io)?;
         let mut inventory = InventorySorter::new(&spill_dir, DEFAULT_RUN_BYTES);
         let mut node_types_used: BTreeSet<String> = BTreeSet::new();
+        let mut export_relations = super::relations::ExportRelations::default();
         let mut progress = Progress::new(mirror, store.clone(), floor, cancel.clone(), est.bytes);
 
         let mut any_root = false;
@@ -606,6 +607,15 @@ impl PackageCreateFromSelectionHandler {
                     if !node.node_type.is_empty() {
                         node_types_used.insert(node.node_type.clone());
                     }
+                    export_relations
+                        .collect(
+                            &self.storage,
+                            (tenant, repo, branch),
+                            &root.workspace,
+                            &node,
+                            &spec.requester,
+                        )
+                        .await?;
                     inventory.push(&written.line).await.map_err(io)?;
                     progress.node_done(&root.workspace, &written);
                     progress.revise_estimate();
@@ -661,6 +671,41 @@ impl PackageCreateFromSelectionHandler {
                 progress.counters.node_types = node_types_written;
                 check(progress.mirror.tick().await, cancel)?;
             }
+        }
+
+        // ---- relations -----------------------------------------------------
+        if !export_relations.relations.is_empty() {
+            let doc = raisin_packages::PackageRelations::new(std::mem::take(
+                &mut export_relations.relations,
+            ));
+            let yaml = doc
+                .to_yaml()
+                .map_err(|e| Error::storage(format!("Failed to serialize relations: {e}")))?;
+            zip.write_entry(
+                raisin_packages::RELATIONS_FILE,
+                Compression::Deflate(6),
+                yaml.as_bytes(),
+            )
+            .await
+            .map_err(io)?;
+            progress
+                .mirror
+                .log("info", format!("Wrote {} relation(s)", doc.relations.len()))
+                .await;
+        }
+        if export_relations.left_out > 0 {
+            progress.counters.warnings += 1;
+            progress
+                .mirror
+                .log(
+                    "warn",
+                    format!(
+                        "{} relation(s) left out: their target is gone, not readable or not \
+                         exportable",
+                        export_relations.left_out
+                    ),
+                )
+                .await;
         }
 
         // ---- seal ----------------------------------------------------------
@@ -881,6 +926,7 @@ fn fidelity(spec: &Spec) -> PropertyValue {
         }),
     );
     m.insert("binaries".to_string(), s("honoured"));
+    m.insert("relations".to_string(), s("honoured"));
     m.insert("schema".to_string(), s("unsupported"));
     m.insert("translations".to_string(), s("unsupported"));
     m.insert("acl".to_string(), s("unsupported"));

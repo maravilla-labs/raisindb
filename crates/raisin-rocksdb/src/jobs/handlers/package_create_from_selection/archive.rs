@@ -187,6 +187,10 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
     let (yaml, json) = serialize_node(node)?;
     let hash = content_hash(json);
     let path = &node.path;
+    // `raisin:access_control` is written `_raisin__access_control`, the
+    // spelling hand-written packages use and the installer decodes.
+    let archive_ws = raisin_packages::namespace_encoding::encode_namespace(workspace);
+    let archive_ws = archive_ws.as_str();
     let io = |e: std::io::Error| Error::storage(format!("Failed to write archive entry: {e}"));
 
     let mut bytes = yaml.len() as u64;
@@ -197,7 +201,7 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
 
     if let Some((storage_key, mime)) = embedded_file(node) {
         let parent = parent_path(path);
-        let meta_entry = format!("content/{}{}.node.{}.yaml", workspace, parent, node.name);
+        let meta_entry = format!("content/{}{}.node.{}.yaml", archive_ws, parent, node.name);
         zip.write_entry(&meta_entry, Compression::Deflate(6), yaml.as_bytes())
             .await
             .map_err(io)?;
@@ -220,7 +224,7 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
         };
         match fetched {
             Some((_len, mut body)) => {
-                let entry_name = format!("content/{}{}{}", workspace, parent, node.name);
+                let entry_name = format!("content/{}{}{}", archive_ws, parent, node.name);
                 let mut entry = zip
                     .start_entry(&entry_name, Compression::for_content_type(mime.as_deref()))
                     .await
@@ -255,14 +259,14 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
     } else if is_folder_type(&node.node_type) || has_children {
         let entry = format!(
             "content/{}{}/.node.yaml",
-            workspace,
+            archive_ws,
             path.trim_end_matches('/')
         );
         zip.write_entry(&entry, Compression::Deflate(6), yaml.as_bytes())
             .await
             .map_err(io)?;
     } else {
-        let entry = format!("content/{}{}.yaml", workspace, path);
+        let entry = format!("content/{}{}.yaml", archive_ws, path);
         zip.write_entry(&entry, Compression::Deflate(6), yaml.as_bytes())
             .await
             .map_err(io)?;

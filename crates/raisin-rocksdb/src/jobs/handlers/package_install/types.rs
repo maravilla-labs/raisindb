@@ -339,6 +339,19 @@ pub struct PackageInstallResult {
     pub binary_files_installed: usize,
     /// Number of translations applied to content nodes
     pub translations_applied: usize,
+    /// Relations of the package added to the target.
+    #[serde(default)]
+    pub relations_created: usize,
+    /// Relations already present (reinstall), or kept as they were (`skip`).
+    #[serde(default)]
+    pub relations_existing: usize,
+    /// Relations present whose weight was set to the package's.
+    #[serde(default)]
+    pub relations_updated: usize,
+    /// Relations skipped because an endpoint does not exist on the target,
+    /// each as `workspace:path -[TYPE]-> workspace:path`.
+    #[serde(default)]
+    pub relations_unresolved: Vec<String>,
 }
 
 // ============================================================================

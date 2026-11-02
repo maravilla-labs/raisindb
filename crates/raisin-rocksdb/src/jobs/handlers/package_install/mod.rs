@@ -59,6 +59,7 @@ mod migrations;
 mod nested;
 #[cfg(test)]
 mod nested_element_install_tests;
+mod relations;
 #[cfg(test)]
 mod role_install_tests;
 pub(in crate::jobs::handlers) mod translation;

@@ -38,9 +38,15 @@ pub const DENIED_WORKSPACES: &[&str] = &[
     "job_activity",
     "publish_state",
     "link_state",
-    "raisin:access_control",
     "secrets",
 ];
+
+/// The access-control workspace (users, roles, groups). Exportable since
+/// packages carry user data; credentials are not in it (identities, sessions
+/// and provider configs are denied by node type below), and every node still
+/// passes the requester's row-level security. Any other spelling of it
+/// (an archive encoding such as `_raisin__access_control`) stays refused.
+pub const ACCESS_CONTROL_WORKSPACE: &str = "raisin:access_control";
 
 /// Node types an export never archives.
 pub const DENIED_NODE_TYPES: &[&str] = &[
@@ -58,6 +64,9 @@ pub const DENIED_NODE_TYPES: &[&str] = &[
 
 /// May an export read workspace `ws`?
 pub fn workspace_allowed(ws: &str) -> bool {
+    if ws == ACCESS_CONTROL_WORKSPACE {
+        return true;
+    }
     let lower = ws.to_ascii_lowercase();
     !(DENIED_WORKSPACES.iter().any(|d| lower == *d)
         || lower.ends_with("_jobs")
@@ -288,14 +297,20 @@ mod tests {
             "flows_jobs",
             "publish_state",
             "link_state",
-            "raisin:access_control",
+            "RAISIN:ACCESS_CONTROL",
             "_raisin__access_control",
             "",
             "a/b",
         ] {
             assert!(!workspace_allowed(ws), "{ws}");
         }
-        for ws in ["stories", "assets", "nodetypes", "people"] {
+        for ws in [
+            "stories",
+            "assets",
+            "nodetypes",
+            "people",
+            "raisin:access_control",
+        ] {
             assert!(workspace_allowed(ws), "{ws}");
         }
         assert!(!node_type_allowed("raisin:Identity"));

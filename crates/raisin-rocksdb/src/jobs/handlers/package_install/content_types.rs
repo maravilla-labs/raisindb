@@ -56,6 +56,16 @@ pub(super) struct InstallStats {
     /// (`skip`). Distinct from `translations_skipped`, which counts overlays
     /// whose target node is missing.
     pub translations_kept: usize,
+    /// Relations of `relations.yaml` added on this install.
+    pub relations_created: usize,
+    /// Relations already present (a reinstall), or left alone in `skip`.
+    pub relations_existing: usize,
+    /// Relations present whose weight was set to the package's.
+    pub relations_updated: usize,
+    /// Relations with an endpoint that does not exist on the target.
+    pub relations_unresolved: usize,
+    /// `ws:path -[type]-> ws:path` of each unresolved relation.
+    pub relations_unresolved_list: Vec<String>,
     /// Per-entry rejections, one message each.
     ///
     /// Content entries no longer abort the install on the first bad node, so

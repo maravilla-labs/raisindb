@@ -421,6 +421,21 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         )
         .await?;
 
+        // Phase 5b: Graph relations (relations.yaml), resolved by path now
+        // that the content is in place.
+        let cursor = Cursor::new(&zip_data);
+        let mut archive = ZipArchive::new(cursor)
+            .map_err(|e| Error::Validation(format!("Invalid ZIP file: {}", e)))?;
+        self.install_package_relations(
+            &mut archive,
+            &context.tenant_id,
+            &context.repo_id,
+            &context.branch,
+            install_mode,
+            &mut stats,
+        )
+        .await?;
+
         // Phase 6: Install package assets (README.md, static/) (85-90%)
         self.report_progress(&job.id, 0.85, "Installing package assets")
             .await;
@@ -497,6 +512,10 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             translations = stats.translations_applied,
             translations_skipped = stats.translations_skipped,
             translations_kept = stats.translations_kept,
+            relations_created = stats.relations_created,
+            relations_existing = stats.relations_existing,
+            relations_updated = stats.relations_updated,
+            relations_unresolved = stats.relations_unresolved,
             "Package installation completed"
         );
 
@@ -511,6 +530,10 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             content_nodes_created: stats.content_nodes_created,
             binary_files_installed: stats.binary_files_installed,
             translations_applied: stats.translations_applied,
+            relations_created: stats.relations_created,
+            relations_existing: stats.relations_existing,
+            relations_updated: stats.relations_updated,
+            relations_unresolved: std::mem::take(&mut stats.relations_unresolved_list),
         };
 
         Ok(Some(serde_json::to_value(result).unwrap_or_default()))

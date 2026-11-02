@@ -16,6 +16,7 @@ mod manifest_types;
 mod mirror;
 mod progress;
 mod registration;
+mod relations;
 mod request;
 pub mod scope;
 pub(crate) mod submit;

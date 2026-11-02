@@ -47,6 +47,7 @@ mod manifest;
 mod migrations;
 pub mod namespace_encoding;
 mod patcher;
+mod relations;
 pub mod sync;
 pub mod sync_config;
 
@@ -64,6 +65,9 @@ pub use installer::{ContentNode, InstallResult, PackageInstaller, UninstallResul
 pub use manifest::{Dependency, Manifest, Provides, WorkspacePatch};
 pub use migrations::{read_migration_summaries, MigrationSummary, PackageMigration};
 pub use patcher::{PatchOperation, WorkspacePatcher};
+pub use relations::{
+    PackageRelation, PackageRelations, RelationEndpoint, RELATIONS_FILE, RELATIONS_FORMAT_VERSION,
+};
 pub use sync::{
     compute_hash, DiffType, ExportMode, ExportOptions, FileDiff, OverallSyncStatus,
     PackageSyncStatus, SyncError, SyncFileInfo, SyncFileStatus, SyncResult, SyncSummary,
