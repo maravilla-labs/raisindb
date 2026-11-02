@@ -602,6 +602,37 @@ if !uninstall.node_types_removed {
 }
 ```
 
+## Graph Relations (`relations.yaml`)
+
+Relations (`RELATE`) are stored by node id, and node ids do not survive a
+package round trip. A package therefore carries its relations in an optional
+`relations.yaml` at the archive root, with both endpoints named by
+`(workspace, path)`:
+
+```yaml
+version: 1
+relations:
+  - from: { workspace: "raisin:access_control", path: /users/internal/u_3fA9... }
+    to: { workspace: "raisin:access_control", path: /users/internal/u_Q7c1... }
+    type: FRIENDS_WITH
+    weight: 1.0
+```
+
+- **Export** (create-from-selection) writes the outgoing relations of every
+  exported node whose target the requester can read and could export; the
+  others are left out and counted in the build log.
+- **Install** runs after the content phase and resolves both endpoints by
+  path on the target branch, so content written by hand without `id:` lines
+  links up. Every mode adds missing relations; `skip` leaves an existing one
+  alone, `sync` and `overwrite` set its weight; no relation is ever removed.
+  A reinstall is idempotent. The job result reports `relations_created`,
+  `relations_existing`, `relations_updated` and `relations_unresolved` (the
+  relations whose endpoint does not exist, as `ws:path -[TYPE]-> ws:path`).
+- A user's home path is its stable key (`/users/internal/<user_key>`, see
+  Authentication), so relations between users need nothing beyond paths.
+  `raisin:access_control` is exportable; credentials are not in it (identity,
+  session and provider records are never exported).
+
 ## Dependencies
 
 Packages can declare dependencies on other packages. The `DependencyGraph` handles validation, circular dependency detection, and installation ordering.

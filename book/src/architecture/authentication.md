@@ -156,6 +156,59 @@ pub struct LinkedProvider {
 
 The `strategy_id` uses a namespaced format (`oidc:google`, `oidc:okta`) so that multiple OIDC providers can coexist without collision. When an OIDC callback returns, the system first searches for an existing identity with a matching `(strategy_id, external_id)` pair before creating a new one.
 
+### Stable user keys (the user home path)
+
+In each repository a person is a `raisin:User` node in `raisin:access_control`,
+their **home**. A home the engine creates lives at
+
+```text
+/users/internal/<user_key>        user_key = u_ + 22 random base62 characters
+```
+
+The key is minted once when the home is created and is never derived from the
+email address or the identity UUID. The home path is therefore the person's
+stable key: it is what `auth.home`, the JWT `home` claim and every reference
+to the home already carry, it survives an email change and a re-registration
+(which rebinds `user_id`), and a package or backup round trip keeps it.
+Node ids are not a person key (they change when content is recreated or
+installed from YAML without ids); `user_id` is the tenant identity, kept
+outside repository backups.
+
+The contract:
+
+- **Minted in one place.** Every writer applies the same rule
+  (`raisin_models::auth::user_key::assign_user_key_name`): a `raisin:User`
+  created directly under `/users/internal` whose name is not a key gets a
+  minted one. Identity provisioning (`ensure_user_node`, registration, magic
+  link, OIDC, guests, admin identity creation), the node API, SQL `INSERT`
+  and `CREATE USER ... IN FOLDER '/users/internal'` all name the home before
+  writing; the storage write path (transaction `add_node` / `put_node`,
+  repository create and deep create) applies it again for any caller that did
+  not. Package installs and backup restores keep the path they carry.
+- **Immutable.** A home, and the folders holding every home (`/users`,
+  `/users/internal`), cannot be moved or renamed (node API, SQL `MOVE`, a
+  `put` that changes the path). Only a package migration (inside an install)
+  may. Delete and recreate is a new person with a new key.
+- **Found by email.** Re-registration and login find an existing home by its
+  unique `email` property, then at the legacy email-slug path.
+- **Exposed** as `auth.user_key` in permission conditions (RLS and REL,
+  also `$auth.user_key` / `$user.user_key` in role conditions), `user_key` in
+  `GET /auth/{repo}/me` and `/auth/me`, `caller.user_key` in a function's
+  context, and `user_key` in the JS SDK's `IdentityMe`. It is derived from
+  `home`, not stored in the JWT: present only when the last home segment is a
+  key, absent for anonymous callers and for homes created before keys
+  (email-slug paths are left as they are; there is no migration).
+- **Who can see it.** The built-in `authenticated_user` role lets every
+  signed-in user read every `raisin:User` node (`display_name` field only)
+  and friends read profiles, so a key is visible to other users; it is an
+  identifier, not a secret.
+- **For admins** the key says nothing: user homes carry `title` (the name,
+  else the email), `display_name` and `email`, and admin tools show those.
+
+`raisin_models::auth::is_user_key` checks the format
+(`^u_[0-9A-Za-z]{22}$`); `user_key_from_home` returns the key of a home path.
+Applications should reject a home that is not keyed where they rely on it.
+
 ## JWT Tokens
 
 Authentication produces a pair of tokens with different lifetimes and purposes:

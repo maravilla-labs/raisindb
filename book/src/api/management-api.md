@@ -151,6 +151,27 @@ Create a backup of the entire RocksDB database.
 POST /api/admin/management/global/rocksdb/backup
 ```
 
+### Repository backups (per tenant)
+
+```http
+POST /management/backup/{tenant}
+{"path": "/var/backups/raisin"}
+```
+
+Writes one directory per repository, `<path>/<tenant>/<repo>/`:
+`metadata.json`, `nodes.jsonl`, `relations.jsonl`, `branches.json`,
+`workspaces.json`, `revisions.json`, `trees.jsonl`, `nodetypes.json`.
+
+`relations.jsonl` holds every graph relation live at each branch HEAD, one
+versioned JSON object per line (`v`, `branch`, `source_id`,
+`source_workspace`, `source_node_type`, `target_id`, `target_workspace`,
+`target_node_type`, `relation_type`, `weight`). A restore
+(`ManagementOps::restore_tenant`) writes nodes with their ids, then the
+relations with the same endpoints, so `NEIGHBORS`, Cypher and PGQ see them
+again. Backups without the file (older releases) restore without relations;
+a line format newer than the reader is refused. User homes keep their paths
+(`/users/internal/<user_key>`), so a person's key survives a restore.
+
 ### Get RocksDB Stats
 
 Retrieve RocksDB performance statistics.

@@ -82,6 +82,25 @@ let result = parse_query("MATCH (n RETURN n");
 // Error: Syntax error at line 1, column 10: expected ')', found 'RETURN'
 ```
 
+## RELATE, UNRELATE and NEIGHBORS semantics
+
+- `RELATE FROM ... TO ... TYPE 't'` is idempotent: relating an existing
+  `(source, type, target)` again answers `affected_rows 1` and leaves one
+  relation (its weight is the last one written). It is never an error.
+- `UNRELATE ... TYPE 't'` removes only that type; without `TYPE` it removes
+  every relation between the pair. Removing a missing relation answers
+  `affected_rows 0`.
+- `NEIGHBORS(id, 'OUT' | 'IN' | 'BOTH' [, 'TYPE'])` lists the other end of
+  each relation. A friendship is two relations (A to B and B to A); `IN` on A
+  lists B only when B to A exists.
+- Over `POST /api/sql/{repo}/{branch}` every execution error (an unknown node
+  id, a refused permission) is answered as HTTP 400 `VALIDATION_FAILED` with
+  the cause in `message`. A 400 on RELATE therefore means the RELATE did not
+  happen (check the message), never "already related".
+- Role conditions may walk relations with
+  `node.created_by RELATES auth.local_user_id VIA 'FRIENDS_WITH' DEPTH 1..2`;
+  `DEPTH n` alone means exactly `n` hops.
+
 ## Graph Algorithms
 
 The `raisin-graph-algorithms` crate implements a "Graph Projection" engine for running global graph algorithms on subgraphs loaded from storage.
