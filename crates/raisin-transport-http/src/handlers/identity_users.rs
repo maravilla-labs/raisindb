@@ -498,32 +498,31 @@ async fn cascade_user_status(
         }
     };
 
-    let identity_id_value = PropertyValue::String(identity_id.to_string());
     let workspace = "raisin:access_control";
 
     for repo in &repos {
         let branch = repo.config.default_branch.as_str();
         let scope = raisin_storage::StorageScope::new(tenant_id, &repo.repo_id, branch, workspace);
 
-        // Find user node linked to this identity
-        let nodes = match Storage::nodes(storage.as_ref())
-            .find_by_property(scope, "user_id", &identity_id_value)
-            .await
+        // Find user node linked to this identity (the one resolution rule:
+        // raisin_core::services::user_resolution)
+        let user_node = match raisin_core::services::user_resolution::resolve_user_node(
+            storage.as_ref(),
+            scope,
+            identity_id,
+        )
+        .await
         {
-            Ok(nodes) => nodes,
+            Ok(Some(node)) => node,
+            Ok(None) => continue,
             Err(e) => {
                 tracing::warn!(
                     repo_id = %repo.repo_id,
                     error = %e,
-                    "Failed to find user node for cascade"
+                    "Failed to resolve user node for cascade"
                 );
                 continue;
             }
-        };
-
-        let user_node = match nodes.into_iter().find(|n| n.node_type == "raisin:User") {
-            Some(node) => node,
-            None => continue,
         };
 
         // Update the status property

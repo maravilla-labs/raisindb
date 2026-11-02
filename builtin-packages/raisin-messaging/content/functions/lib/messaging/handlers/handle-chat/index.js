@@ -410,9 +410,12 @@ async function resolveUser(workspace, userPath, userId, email, userKey) {
       SELECT id, path, name, node_type, properties
       FROM '${workspace}'
       WHERE node_type = 'raisin:User' AND properties->>'user_id'::String = $1
-      LIMIT 1
+      LIMIT 2
     `, [userId]);
-    if (rows.length > 0) return userNodeToEntity(rows[0], workspace);
+    // Two homes for one identity is ambiguous: no recipient rather than a guess
+    // (the engine's resolver refuses it the same way).
+    if (rows.length > 1) return null;
+    if (rows.length === 1) return userNodeToEntity(rows[0], workspace);
   }
 
   // By path (only a raisin:User node is a user)
@@ -438,9 +441,10 @@ async function resolveUser(workspace, userPath, userId, email, userKey) {
       SELECT id, path, name, node_type, properties
       FROM '${workspace}'
       WHERE node_type = 'raisin:User' AND properties->>'email'::String = $1
-      LIMIT 1
+      LIMIT 2
     `, [email]);
-    if (rows.length > 0) return userNodeToEntity(rows[0], workspace);
+    if (rows.length > 1) return null;
+    if (rows.length === 1) return userNodeToEntity(rows[0], workspace);
   }
 
   return null;

@@ -95,6 +95,7 @@ pub mod services {
     pub mod translation_service;
     pub mod translation_staleness;
     pub mod ttl_cache;
+    pub mod user_resolution;
     pub mod workspace_service;
 }
 pub mod audit_adapter;

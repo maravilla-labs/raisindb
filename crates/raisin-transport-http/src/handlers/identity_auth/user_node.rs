@@ -587,20 +587,15 @@ pub async fn ensure_user_node(
         }
     }
 
-    // Also search by user_id (identity_id) property
-    let user_id_value = PropertyValue::String(identity_id.to_string());
-    let nodes_by_user_id = Storage::nodes(storage.as_ref())
-        .find_by_property(
-            StorageScope::new(tenant_id, repo_id, &default_branch, workspace),
-            "user_id",
-            &user_id_value,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if let Some(existing_node) = nodes_by_user_id
-        .into_iter()
-        .find(|n| n.node_type == "raisin:User")
+    // Also search by user_id (identity_id), by the one resolution rule
+    // (raisin_core::services::user_resolution): unique, else an error.
+    if let Some(existing_node) = raisin_core::services::user_resolution::resolve_user_node(
+        storage.as_ref(),
+        StorageScope::new(tenant_id, repo_id, &default_branch, workspace),
+        identity_id,
+    )
+    .await
+    .map_err(|e| e.to_string())?
     {
         // A by-user_id hit is unambiguous, so None cannot occur here; treat it
         // defensively rather than unwrapping.

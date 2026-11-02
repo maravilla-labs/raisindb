@@ -380,20 +380,14 @@ impl<S: Storage> PermissionService<S> {
         );
 
         let scope = StorageScope::new(tenant_id, repo_id, branch, ACCESS_CONTROL_WORKSPACE);
-        let identity_id_value = PropertyValue::String(identity_id.to_string());
-        let nodes = self
-            .storage
-            .nodes()
-            .find_by_property(scope, "user_id", &identity_id_value)
-            .await?;
-
-        tracing::debug!(
-            identity_id = identity_id,
-            node_count = nodes.len(),
-            "Found nodes with matching user_id property"
-        );
-
-        let result = nodes.into_iter().find(|n| n.node_type == "raisin:User");
+        // The one resolution rule (by user_id, unique; legacy path only when
+        // it is that person's raisin:User): see services::user_resolution.
+        let result = crate::services::user_resolution::resolve_user_node(
+            self.storage.as_ref(),
+            scope,
+            identity_id,
+        )
+        .await?;
 
         if let Some(ref user) = result {
             tracing::debug!(
