@@ -63,34 +63,36 @@ export async function handle_chat(input) {
     throw new Error(`Unsupported message type: ${messageType}`);
   }
 
-  // 1. Copy to sender's sent folder
+  const body = props.body ?? {};
+
+  // 1. The sender is WHERE the message lives: the home whose outbox holds it.
+  // Row-level security lets a person create nodes only in their own outbox,
+  // but the node's content is theirs to write, so nothing in it may choose
+  // the sender. Anything that is not an exact outbox shape is refused.
+  const outboxHome = entityPathFromOutboxPath(nodePath);
+  if (!outboxHome) return refuse(triggerWorkspace, nodePath, 'bad_outbox_path');
+  const sender = await resolveSenderHome(triggerWorkspace, outboxHome);
+  if (!sender) throw new Error('Sender not found');
+  // Sender fields written into the message must name that same party.
+  if (!claimsMatch(sender, outboxHome, {
+    ids: [props.sender_id, body.sender_id],
+    paths: [props.sender_path, body.sender_path],
+    emails: [props.sender_email, body.sender_email],
+    keys: [props.sender_key, body.sender_key],
+  })) {
+    return refuse(triggerWorkspace, nodePath, 'sender_mismatch');
+  }
+
+  // 2. Copy to sender's sent folder
   await copyToSentFolder(triggerWorkspace, node);
 
-  // 2. Extract sender/recipient hints from node
-  const body = props.body ?? {};
-  // The outbox the message sits in names its sender: a sender_path written
-  // into the message must agree with it, or the message is refused (it could
-  // otherwise speak for someone else's home).
-  const outboxHome = entityPathFromOutboxPath(nodePath);
-  const claimedSender = body.sender_path || props.sender_path;
-  if (outboxHome && claimedSender && claimedSender !== outboxHome) {
-    throw new Error('Sender not found: sender_path does not match the outbox');
-  }
-  const senderHint = {
-    path: outboxHome || claimedSender,
-    id: props.sender_id || body.sender_id,
-    email: body.sender_email,
-  };
+  // 3. The recipient is the sender's choice, and must exist.
   const recipientHint = {
     path: body.recipient_path || props.recipient_path,
     id: props.recipient_id || body.recipient_id,
     email: body.recipient_email,
     key: props.recipient_key || body.recipient_key,
   };
-
-  // 3. Resolve sender: agent first (if ai workspace or agent: prefix), then user
-  const sender = await resolveSender(triggerWorkspace, senderHint);
-  if (!sender) throw new Error('Sender not found');
 
   // 4. Resolve recipient: user first, then agent
   const recipient = await resolveRecipient(recipientHint);
@@ -203,18 +205,8 @@ function extractAgentName(id, path) {
   return null;
 }
 
-const ENTITY_ROOTS = new Set(['users', 'agents', 'visitors']);
 
-/**
- * The home of the entity whose outbox holds `nodePath`: everything before the
- * `outbox` segment. Homes may be nested (`/users/internal/<slug>`), so the
- * home is NOT simply the first two segments.
- *
- *   /users/internal/alice/outbox/msg-1  -> /users/internal/alice
- *   /agents/site/outbox/msg-1           -> /agents/site
- *   /visitors/<key>/outbox/msg-1        -> /visitors/<key>
- */
-export /** A user key: `u_` + 22 base62 (raisin_models::auth::user_key). */
+/** A user key: `u_` + 22 base62 (raisin_models::auth::user_key). */
 const USER_KEY = /^u_[0-9A-Za-z]{22}$/;
 const USER_HOMES_ROOT = '/users/internal';
 
@@ -255,28 +247,74 @@ function forReader(convBase, reader) {
   return { ...convBase, agentMeta };
 }
 
+/**
+ * The home whose outbox directly holds the message at `nodePath`, or null.
+ * Only these exact shapes are outboxes (every segment non-empty, the message
+ * a direct child of `outbox`):
+ *
+ *   /users/<slug>/outbox/<name>               -> /users/<slug>
+ *   /users/internal/<key|slug>/outbox/<name>  -> /users/internal/<key|slug>
+ *   /agents/<name>/outbox/<name>              -> /agents/<name>
+ *   /visitors/<key>/outbox/<name>             -> /visitors/<key>
+ *
+ * The position decides, not a search for the word: a home literally named
+ * `outbox` (`/users/outbox/outbox/m`) is that home, and a node nested deeper
+ * under an outbox is no message.
+ */
 export function entityPathFromOutboxPath(nodePath) {
-  const parts = String(nodePath || '').split('/');
-  if (parts.length < 4 || parts[0] !== '' || !ENTITY_ROOTS.has(parts[1])) return null;
-  const outbox = parts.indexOf('outbox', 2);
-  if (outbox < 3 || outbox === parts.length - 1) return null;
-  return parts.slice(0, outbox).join('/');
+  if (typeof nodePath !== 'string' || !nodePath.startsWith('/')) return null;
+  const parts = nodePath.split('/').slice(1);
+  if (parts.some((p) => p === '' || p === '.' || p === '..')) return null;
+  const [root] = parts;
+  if (root === 'users' && parts.length === 5 && parts[1] === 'internal' && parts[3] === 'outbox') {
+    return `/users/internal/${parts[2]}`;
+  }
+  if (parts.length === 4 && parts[2] === 'outbox' && ['users', 'agents', 'visitors'].includes(root)) {
+    // /users/internal is the folder of homes, not a home.
+    if (root === 'users' && parts[1] === 'internal') return null;
+    return `/${root}/${parts[1]}`;
+  }
+  return null;
 }
 
-async function resolveSender(triggerWorkspace, hint) {
-  // A visitor session writes only from its own outbox (the server does that
-  // for it). Its identity is its home; the id in the message must agree.
-  if (isVisitorId(hint.id) || isVisitorPath(hint.path)) {
-    return resolveVisitor(hint.path, hint.id);
+/** Resolve the party living at `home` (a path from entityPathFromOutboxPath). */
+async function resolveSenderHome(triggerWorkspace, home) {
+  const root = home.split('/')[1];
+  if (root === 'visitors') {
+    if (triggerWorkspace !== 'raisin:access_control') return null;
+    return resolveVisitor(home, null);
   }
-  // Try agent resolution first if workspace is ai or sender_id is agent:
-  if (triggerWorkspace === 'ai' || isAgentId(hint.id)) {
-    const agent = await resolveAgent(hint.path, hint.id);
-    if (agent) return agent;
+  if (root === 'agents') {
+    if (triggerWorkspace !== 'ai') return null;
+    return resolveAgent(home, null);
   }
-  // Fall back to user in raisin:access_control
-  const user = await resolveUser('raisin:access_control', hint.path, hint.id, hint.email, hint.key);
-  return user;
+  if (triggerWorkspace !== 'raisin:access_control') return null;
+  const node = await raisin.nodes.get('raisin:access_control', home);
+  if (!node || node.node_type !== 'raisin:User') return null;
+  return userNodeToEntity(node, 'raisin:access_control');
+}
+
+/** Does every sender field the message carries name `sender` (at `home`)? */
+function claimsMatch(sender, home, { ids, paths, emails, keys }) {
+  const present = (list) => list.filter((v) => v !== undefined && v !== null && v !== '');
+  const p = sender.properties ?? {};
+  const idOk = new Set([sender.id, p.user_id, home].filter(Boolean));
+  for (const v of present(ids)) if (typeof v !== 'string' || !idOk.has(v)) return false;
+  for (const v of present(paths)) if (v !== home) return false;
+  const email = typeof p.email === 'string' ? p.email.toLowerCase() : null;
+  for (const v of present(emails)) if (typeof v !== 'string' || v.toLowerCase() !== email) return false;
+  for (const v of present(keys)) if (v !== sender.key) return false;
+  return true;
+}
+
+/** Mark the outbox message failed (not delivered, not retried) and stop. */
+async function refuse(workspace, nodePath, reason) {
+  console.warn(`[handle-chat] refused ${nodePath}: ${reason}`);
+  if (nodePath) {
+    await raisin.nodes.updateProperty(workspace, nodePath, 'status', 'failed');
+    await raisin.nodes.updateProperty(workspace, nodePath, 'failure_reason', reason);
+  }
+  return { success: false, reason };
 }
 
 async function resolveRecipient(hint) {
@@ -698,7 +736,7 @@ async function copyToSentFolder(workspace, node) {
   // Path: <home>/outbox/{slug}, the home being /{users|agents}/{name} or a
   // nested one such as /users/internal/{slug}. Only direct outbox children.
   const home = entityPathFromOutboxPath(nodePath);
-  if (!home || nodePath.split('/').length !== home.split('/').length + 2) return;
+  if (!home) return;
   const entityType = home.split('/')[1];
   // Visitors keep no sent folder: their home is ephemeral, and the delivered
   // copy in the conversation is the record.

@@ -54,6 +54,18 @@ test('entityPathFromOutboxPath keeps nested homes whole', () => {
   assert.equal(entityPathFromOutboxPath('/visitors/abc/outbox/m'), '/visitors/abc');
   assert.equal(entityPathFromOutboxPath('/users/alice/inbox/m'), null);
   assert.equal(entityPathFromOutboxPath('/users/outbox/m'), null);
+  // A home literally named `outbox`, flat and nested.
+  assert.equal(entityPathFromOutboxPath('/users/outbox/outbox/m'), '/users/outbox');
+  assert.equal(entityPathFromOutboxPath('/users/internal/outbox/outbox/m'), '/users/internal/outbox');
+  // /users/internal is the folder of homes, not a home.
+  assert.equal(entityPathFromOutboxPath('/users/internal/outbox/m'), null);
+  // Nothing nested under an outbox, no other depth, no traversal.
+  assert.equal(entityPathFromOutboxPath('/users/internal/alice/outbox/sub/m'), null);
+  assert.equal(entityPathFromOutboxPath('/users/alice/outbox/sub/m'), null);
+  assert.equal(entityPathFromOutboxPath('/users/a/b/c/outbox/m'), null);
+  assert.equal(entityPathFromOutboxPath('/users/../outbox/m'), null);
+  assert.equal(entityPathFromOutboxPath('/users//outbox/m'), null);
+  assert.equal(entityPathFromOutboxPath('/agents/site/outbox/m/x'), null);
   assert.equal(entityPathFromOutboxPath('/other/a/outbox/m'), null);
   assert.equal(entityPathFromOutboxPath(''), null);
   assert.equal(entityPathFromOutboxPath(undefined), null);
@@ -136,9 +148,8 @@ test('keys come from the resolved homes; the copies a person reads hold no home 
   const f = keyed();
   await send(f, keyedMessage({
     recipient_key: KEY_B,
-    sender_key: KEY_X,
     participant_keys: [KEY_X],
-    body: { content: 'hi', thread_id: 'conv-k', sender_key: KEY_X, sender_path: `/users/internal/${KEY_A}` },
+    body: { content: 'hi', thread_id: 'conv-k', sender_path: `/users/internal/${KEY_A}`, sender_key: KEY_A },
   }));
   const bobConv = f.nodes.get(`${AC}\u0000/users/internal/${KEY_B}/inbox/chats/conv-k`);
   const bobMsg = f.nodes.get(`${AC}\u0000/users/internal/${KEY_B}/inbox/chats/conv-k/msg-m-k`);
@@ -166,11 +177,70 @@ test('a recipient named by its key in recipient_id resolves; an unknown key does
   await assert.rejects(send(g, keyedMessage({ recipient_key: KEY_X })), /Recipient not found/);
 });
 
-test('a sender_path in the message cannot speak for another home', async () => {
+// ─── Sender spoofing ────────────────────────────────────────────────────────
+
+test('a message in A\'s outbox naming B as sender is refused, by id, path, email or key', async () => {
+  for (const claim of [
+    { sender_id: 'node-kb' },
+    { sender_id: 'idn-kb' },
+    { sender_path: `/users/internal/${KEY_B}` },
+    { body: { content: 'x', thread_id: 'conv-s', sender_path: `/users/internal/${KEY_B}` } },
+    { body: { content: 'x', thread_id: 'conv-s', sender_email: 'kb@example.com' } },
+    { sender_email: 'kb@example.com' },
+    { sender_key: KEY_B },
+  ]) {
+    const f = keyed();
+    f.nodes.get(`${AC}\u0000/users/internal/${KEY_B}`).properties.email = 'kb@example.com';
+    const msg = keyedMessage({ recipient_key: KEY_B, ...claim });
+    const res = await send(f, msg);
+    assert.deepEqual(res, { success: false, reason: 'sender_mismatch' }, JSON.stringify(claim));
+    const outbox = f.nodes.get(`${AC}\u0000${msg.path}`);
+    assert.equal(outbox.properties.status, 'failed');
+    assert.equal(outbox.properties.failure_reason, 'sender_mismatch');
+    const delivered = [...f.nodes.keys()].filter((k) => k.includes('/inbox/chats/'));
+    assert.deepEqual(delivered, [], 'nothing delivered');
+    assert.equal(f.nodes.get(`${AC}\u0000/users/internal/${KEY_A}/sent/msg-k`), undefined, 'no sent copy');
+  }
+});
+
+test('the sender\'s own id, user id, path, email and key are accepted', async () => {
   const f = keyed();
-  await assert.rejects(send(f, keyedMessage({
+  f.nodes.get(`${AC}\u0000/users/internal/${KEY_A}`).properties.email = 'Ka@Example.com';
+  await send(f, keyedMessage({
     recipient_key: KEY_B,
-    body: { content: 'hi', thread_id: 'conv-s', sender_path: `/users/internal/${KEY_B}` },
-  })), /does not match the outbox/);
-  assert.equal(f.nodes.get(`${AC}\u0000/users/internal/${KEY_B}/inbox/chats/conv-s`), undefined);
+    sender_id: 'idn-ka',
+    sender_path: `/users/internal/${KEY_A}`,
+    sender_email: 'ka@example.com',
+    sender_key: KEY_A,
+  }));
+  assert.ok(f.nodes.get(`${AC}\u0000/users/internal/${KEY_B}/inbox/chats/conv-k`));
+});
+
+test('a node nested under an outbox is no message (bad_outbox_path)', async () => {
+  const f = keyed();
+  const msg = keyedMessage({ recipient_key: KEY_B });
+  msg.path = `/users/internal/${KEY_A}/outbox/folder/msg-k`;
+  assert.deepEqual(await send(f, msg), { success: false, reason: 'bad_outbox_path' });
+  assert.equal(f.nodes.get(`${AC}\u0000${msg.path}`).properties.status, 'failed');
+});
+
+test('a flat /users/<slug> home and a home named outbox send', async () => {
+  const f = world();
+  f.put(AC, '/users/outbox', { id: 'node-o', node_type: 'raisin:User', properties: { display_name: 'O' } });
+  f.put(AC, '/users/carol', { id: 'node-c', node_type: 'raisin:User', properties: { display_name: 'C' } });
+  for (const [path, conv] of [['/users/outbox/outbox/m1', 'conv-o'], ['/users/carol/outbox/m2', 'conv-c']]) {
+    const msg = message({ recipient_path: '/users/internal/bob', body: { content: 'x', thread_id: conv } });
+    msg.path = path;
+    await send(f, msg);
+    const c = f.nodes.get(`${AC}\u0000/users/internal/bob/inbox/chats/${conv}`);
+    assert.ok(c, path);
+  }
+});
+
+test('an outbox home that is not a user cannot send', async () => {
+  const f = world();
+  f.put(AC, '/users/internal/shared', { id: 'folder-s', node_type: 'raisin:Folder', properties: {} });
+  const msg = message({ recipient_path: '/users/internal/bob' });
+  msg.path = '/users/internal/shared/outbox/m';
+  await assert.rejects(send(f, msg), /Sender not found/);
 });

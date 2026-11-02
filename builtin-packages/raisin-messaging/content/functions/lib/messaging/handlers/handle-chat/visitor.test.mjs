@@ -85,7 +85,10 @@ test('a message claiming another visitor\'s id from this home is not delivered',
   const f = world();
   const forged = visitorMessage(KEY_A, 'vchat-1');
   forged.properties.sender_id = `visitor:${KEY_B}`;
-  await assert.rejects(send(f, forged), /Sender not found/);
+  const res = await send(f, forged);
+  assert.deepEqual(res, { success: false, reason: 'sender_mismatch' });
+  assert.equal(f.nodes.get(`${AC}\u0000${forged.path}`).properties.status, 'failed');
+  assert.equal(f.nodes.get(`ai\u0000/agents/site/inbox/chats/vchat-1`), undefined);
 });
 
 test('the agent\'s reply reaches the visitor\'s conversation', async () => {
@@ -144,6 +147,12 @@ test('visitor paths and ids with traversal payloads name no session', async () =
     const m = visitorMessage(KEY_A, 'vchat-9');
     m.properties.sender_path = path;
     m.properties.sender_id = id;
-    await assert.rejects(send(f, m), /Sender not found/, JSON.stringify([path, id]));
+    const res = await send(f, m);
+    assert.deepEqual(res, { success: false, reason: 'sender_mismatch' }, JSON.stringify([path, id]));
   }
+  assert.equal(f.nodes.get(`ai\u0000/agents/site/inbox/chats/vchat-9`), undefined, 'nothing delivered');
+  // A message outside an exact outbox shape is no message.
+  const stray = visitorMessage(KEY_A, 'vchat-9');
+  stray.path = `/visitors/${KEY_A}/outbox/sub/msg-1`;
+  assert.deepEqual(await send(f, stray), { success: false, reason: 'bad_outbox_path' });
 });

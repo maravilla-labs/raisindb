@@ -58,11 +58,31 @@ Conversation nodes store participants, last_message, unread_count, and updated_a
 A user's home is `/users/internal/<user_key>` in `raisin:access_control`, where
 `user_key` is `u_` + 22 base62 characters minted by the engine (see
 `docs/book` "Stable user keys"). Homes created before keys keep their
-email-slug path and have no key. Homes may be nested, so the chat handler
-derives a home from an outbox path by everything before the `outbox` segment
-(`/users/internal/<key>/outbox/msg-1` gives `/users/internal/<key>`); a
-`sender_path` written into the message must agree with that outbox or the
-message is refused.
+email-slug path and have no key.
+
+**The sender is where the message lives.** Row-level security lets a person
+create nodes only in their own outbox, but the node's content is theirs to
+write, so nothing in it chooses the sender. The chat handler accepts exactly
+these outbox shapes (the message a direct child of `outbox`, every segment
+non-empty, no `.`/`..`):
+
+| Message path | Sender home |
+|---|---|
+| `/users/<slug>/outbox/<name>` | `/users/<slug>` (`raisin:User`) |
+| `/users/internal/<key-or-slug>/outbox/<name>` | `/users/internal/<key-or-slug>` (`raisin:User`) |
+| `/agents/<name>/outbox/<name>` (workspace `ai`) | the agent |
+| `/visitors/<key>/outbox/<name>` | the visitor session |
+
+The position decides, so a home literally named `outbox` is just a home.
+Anything else is marked `status: failed`, `failure_reason: bad_outbox_path`
+and not delivered. The sender is resolved strictly by that home (it must be a
+`raisin:User`, an agent definition or a `raisin:VisitorSession`). Sender fields
+the message carries (`sender_id`, `sender_path`, `sender_email`, `sender_key`,
+in the node or its `body`) are only checked: each must name that same party
+(its node id, identity `user_id`, home path, email, key), otherwise the
+message is marked `failed` with `failure_reason: sender_mismatch` and nothing
+is delivered or copied to `sent`. The recipient is the sender's choice and must
+resolve to an existing user, agent or visitor.
 
 The chat handler (`lib/messaging/handlers/handle-chat`) writes, next to the
 existing node ids:
