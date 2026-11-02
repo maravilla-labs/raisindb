@@ -260,3 +260,55 @@ fn a_refresh_token_never_outlives_its_session() {
         .unwrap();
     assert!(tokens.refresh_expires_in.unwrap().abs_diff(30 * 24 * 3600) <= 2);
 }
+
+/// A refreshed session keeps its repository scope, so its home claim stays
+/// bound to the repository it was issued for (a claim without a repository is
+/// never trusted for a home).
+#[test]
+fn a_refreshed_token_keeps_its_repository_claim() {
+    use raisin_models::auth::{home_claim_applies, Identity, Session};
+    use raisin_models::timestamp::StorageTimestamp;
+
+    let (_dir, service) = create_test_service();
+    let identity = Identity::new("id-1".into(), "t".into(), "a@example.com".into());
+    let session = Session::new(
+        "sid-1".into(),
+        "t".into(),
+        "id-1".into(),
+        "local".into(),
+        "fam".into(),
+        StorageTimestamp::from_nanos(
+            StorageTimestamp::now().timestamp_nanos() + 24 * 3600 * 1_000_000_000,
+        )
+        .unwrap(),
+    );
+    let home = Some("/users/internal/u_0123456789abcdefABCDEF".to_string());
+    let tokens = service
+        .generate_user_tokens(&identity, &session, Some("repo-a".into()), home.clone())
+        .unwrap();
+    let refresh = service
+        .validate_refresh_token(&tokens.refresh_token)
+        .unwrap();
+    assert_eq!(refresh.repository.as_deref(), Some("repo-a"));
+
+    let (refreshed, _) = service
+        .refresh_user_tokens_with_lifetimes(
+            &identity,
+            &session,
+            &refresh,
+            refresh.home.clone(),
+            TokenLifetimes::default(),
+        )
+        .unwrap();
+    let claims = service
+        .validate_user_token(&refreshed.access_token)
+        .unwrap();
+    assert_eq!(claims.repository.as_deref(), Some("repo-a"));
+    assert_eq!(claims.home, home);
+    assert!(home_claim_applies(claims.repository.as_deref(), "repo-a"));
+    assert!(!home_claim_applies(claims.repository.as_deref(), "repo-b"));
+    let next = service
+        .validate_refresh_token(&refreshed.refresh_token)
+        .unwrap();
+    assert_eq!(next.repository.as_deref(), Some("repo-a"));
+}

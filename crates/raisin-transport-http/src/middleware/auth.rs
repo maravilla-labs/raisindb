@@ -653,39 +653,25 @@ async fn resolve_user_auth_context(
             AuthContext::for_user(&user_claims.sub).with_email(&user_claims.email)
         }
     };
-    // A home claim belongs to the repository the token was issued for: never
-    // carry it into a request for another repository.
-    if let Some(ref home) = user_claims.home {
-        if claim_home_applies(user_claims.repository.as_deref(), &repo_id) {
-            ctx = ctx.with_home(home);
-        } else {
-            tracing::debug!(
-                user = %user_claims.sub,
-                token_repo = ?user_claims.repository,
-                request_repo = %repo_id,
-                "Ignoring the home claim of a token issued for another repository"
-            );
+    // The home is the user node resolved in THIS repository (set by
+    // with_permissions). A token's home claim is only a fallback when no node
+    // was resolved, and only for a token issued for exactly this repository.
+    if ctx.resolved_home.is_none() {
+        if let Some(ref home) = user_claims.home {
+            if raisin_models::auth::home_claim_applies(user_claims.repository.as_deref(), &repo_id)
+            {
+                ctx = ctx.with_home(home);
+            } else {
+                tracing::debug!(
+                    user = %user_claims.sub,
+                    token_repo = ?user_claims.repository,
+                    request_repo = %repo_id,
+                    "Ignoring a home claim not issued for this repository"
+                );
+            }
         }
     }
     Ok(ctx)
-}
-
-/// Does a token's `home` claim apply to a request for `request_repo`? Only
-/// when the token names no repository or names this one.
-pub(crate) fn claim_home_applies(token_repo: Option<&str>, request_repo: &str) -> bool {
-    token_repo.is_none_or(|r| r == request_repo)
-}
-
-#[cfg(test)]
-mod claim_home_tests {
-    use super::claim_home_applies;
-
-    #[test]
-    fn a_home_claim_is_kept_only_for_its_own_repository() {
-        assert!(claim_home_applies(None, "a"));
-        assert!(claim_home_applies(Some("a"), "a"));
-        assert!(!claim_home_applies(Some("a"), "b"));
-    }
 }
 
 /// Check if anonymous access is enabled for a specific tenant/repo context.

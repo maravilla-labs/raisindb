@@ -205,8 +205,10 @@ The contract:
   the node that also gives `auth.local_user_id`), and only when that path is
   exactly `/users/internal/<key>`. Absent for anonymous callers and for homes
   created before keys (email-slug paths are left as they are; there is no
-  migration). A token's `home` claim is ignored for a request to another
-  repository than the one it was issued for.
+  migration). `auth.home` is the same resolved node path; a token's `home`
+  claim is only a fallback when no user node was resolved, and only for a
+  token issued for exactly this repository (a token without a `repository`
+  claim never supplies a home). Refreshed tokens keep their `repository`.
 - **Open risk: retired keys.** Deleting a user leaves no tombstone of its
   key. A fresh mint cannot collide in practice (131 random bits), but a
   package carrying a deleted person's home can recreate it on install. Keep

@@ -112,8 +112,16 @@ where
             if !claims.email.is_empty() {
                 auth_context = auth_context.with_email(claims.email.clone());
             }
+            // A home claim applies only to the repository the token was
+            // issued for (fail closed); the user node resolved in this
+            // repository replaces it in with_permissions.
             if let Some(home) = claims.home.clone() {
-                auth_context = auth_context.with_home(home);
+                if raisin_models::auth::home_claim_applies(
+                    claims.repository.as_deref(),
+                    conn_state.repository.as_deref().unwrap_or("default"),
+                ) {
+                    auth_context = auth_context.with_home(home);
+                }
             }
             auth_context = auth_context.with_permissions(resolved);
             conn_state.set_auth_context(auth_context);

@@ -223,6 +223,21 @@ pub struct RefreshClaims {
     /// User's home node path (preserved across refreshes)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
+
+    /// The repository the session was issued for (preserved across
+    /// refreshes, so a refreshed access token keeps its repository scope and
+    /// its `home` claim stays bound to that repository).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+}
+
+/// Does a token's `home` claim apply to a request for `request_repo`? Only
+/// when the token names exactly that repository: a token without a
+/// repository, or for another one, never supplies a home (fail closed). The
+/// home of a request is the user node resolved in its repository
+/// (`ResolvedPermissions::home`); the claim is at most a fallback.
+pub fn home_claim_applies(token_repo: Option<&str>, request_repo: &str) -> bool {
+    matches!(token_repo, Some(r) if r == request_repo)
 }
 
 impl RefreshClaims {
@@ -347,5 +362,23 @@ mod tests {
             admin_identity_id: "admin".to_string(),
         };
         assert!(impersonation.is_impersonation());
+    }
+}
+
+#[cfg(test)]
+mod home_claim_tests {
+    use super::home_claim_applies;
+
+    #[test]
+    fn a_home_claim_applies_only_to_its_own_repository() {
+        assert!(home_claim_applies(Some("a"), "a"));
+        assert!(
+            !home_claim_applies(Some("a"), "b"),
+            "token for repo A against repo B"
+        );
+        assert!(
+            !home_claim_applies(None, "a"),
+            "a token without a repository claim"
+        );
     }
 }

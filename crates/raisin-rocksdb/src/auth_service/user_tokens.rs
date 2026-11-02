@@ -162,6 +162,7 @@ impl AuthService {
             family: session.token_family.clone(),
             generation: session.token_generation,
             home: access_claims.home.clone(),
+            repository: access_claims.repository.clone(),
         };
 
         let refresh_token = encode(
@@ -308,12 +309,13 @@ impl AuthService {
         let new_generation = session.token_generation + 1;
 
         // Generate new access token
-        // Note: repository is None for refreshed tokens - they rely on connection context
+        // The repository scope is preserved from the refresh token, so a
+        // refreshed session keeps its home claim bound to that repository.
         let access_claims = AuthClaims {
             sub: identity.identity_id.clone(),
             email: identity.email.clone(),
             tenant_id: identity.tenant_id.clone(),
-            repository: None, // Refreshed tokens don't preserve repository scope
+            repository: old_refresh_claims.repository.clone(),
             home,
             sid: session.session_id.clone(),
             auth_strategy: session.strategy_id.clone(),
@@ -357,6 +359,7 @@ impl AuthService {
             family: session.token_family.clone(),
             generation: new_generation,
             home: access_claims.home.clone(),
+            repository: access_claims.repository.clone(),
         };
 
         let refresh_token = encode(

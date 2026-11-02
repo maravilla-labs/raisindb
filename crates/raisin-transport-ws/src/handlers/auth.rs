@@ -142,7 +142,7 @@ where
 
     // Validate JWT cryptographically and extract user identity
     // SECURITY: Must use proper signature verification to prevent token forgery
-    let (user_id, email, home) = {
+    let (user_id, email, home, token_repo) = {
         #[cfg(feature = "storage-rocksdb")]
         {
             if let Some(ref auth_service) = state.rocksdb_auth_service {
@@ -152,13 +152,18 @@ where
                     .map_err(|e| {
                         WsError::AuthError(crate::auth::AuthError::InvalidToken(e.to_string()))
                     })?;
-                (claims.sub, Some(claims.email), claims.home)
+                (
+                    claims.sub,
+                    Some(claims.email),
+                    claims.home,
+                    claims.repository,
+                )
             } else if state.config.dev_mode {
                 // Insecure fallback: decode-only (dev-mode only)
                 warn!("Using insecure JWT decode — no auth service available (dev-mode)");
-                let (uid, email, _, _, home) = decode_identity_jwt(&payload.token)
+                let (uid, email, _, repo, home) = decode_identity_jwt(&payload.token)
                     .map_err(|e| WsError::AuthError(crate::auth::AuthError::InvalidToken(e)))?;
-                (uid, email, home)
+                (uid, email, home, repo)
             } else {
                 return Err(WsError::AuthError(crate::auth::AuthError::InvalidToken(
                     "Authentication service not available".to_string(),
@@ -170,9 +175,9 @@ where
             if state.config.dev_mode {
                 // Insecure fallback: decode-only without rocksdb feature (dev-mode only)
                 warn!("Using insecure JWT decode — no storage-rocksdb feature (dev-mode)");
-                let (uid, email, _, _, home) = decode_identity_jwt(&payload.token)
+                let (uid, email, _, repo, home) = decode_identity_jwt(&payload.token)
                     .map_err(|e| WsError::AuthError(crate::auth::AuthError::InvalidToken(e)))?;
-                (uid, email, home)
+                (uid, email, home, repo)
             } else {
                 return Err(WsError::AuthError(crate::auth::AuthError::InvalidToken(
                     "JWT authentication requires storage-rocksdb feature or --dev-mode".to_string(),
@@ -221,8 +226,13 @@ where
     if let Some(ref e) = email {
         auth_context = auth_context.with_email(e.clone());
     }
+    // A home claim applies only to the repository the token was issued for
+    // (fail closed); the user node resolved in this repository replaces it
+    // in with_permissions.
     if let Some(ref h) = home {
-        auth_context = auth_context.with_home(h.clone());
+        if raisin_models::auth::home_claim_applies(token_repo.as_deref(), &repo_id) {
+            auth_context = auth_context.with_home(h.clone());
+        }
     }
     auth_context = auth_context.with_permissions(resolved);
 

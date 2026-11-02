@@ -333,8 +333,12 @@ impl AuthContext {
         self.email = permissions.email.clone();
         // Capture the local user node ID (workspace-specific)
         self.local_user_id = Some(permissions.user_id.clone());
-        // The home resolved in this repository: the only source of user_key.
+        // The home resolved in this repository: the only source of user_key,
+        // and it replaces whatever home a token claimed.
         self.resolved_home = permissions.home.clone();
+        if let Some(home) = &permissions.home {
+            self.home = Some(home.clone());
+        }
         self.resolved_permissions = Some(Arc::new(permissions));
         self
     }
@@ -623,6 +627,17 @@ mod tests {
         // repo B, where no user node was resolved) yields no key.
         let claim_only = AuthContext::for_user("u1").with_home(format!("/users/internal/{key}"));
         assert_eq!(claim_only.user_key(), None);
+
+        // The resolved home replaces a claimed one.
+        let mut p = ResolvedPermissions::empty("node-1");
+        p.home = Some(format!("/users/internal/{key}"));
+        let ctx = AuthContext::for_user("u1")
+            .with_home("/users/internal/someone-else")
+            .with_permissions(p);
+        assert_eq!(
+            ctx.home.as_deref(),
+            Some(format!("/users/internal/{key}").as_str())
+        );
 
         // Only the exact keyed shape.
         for home in [
