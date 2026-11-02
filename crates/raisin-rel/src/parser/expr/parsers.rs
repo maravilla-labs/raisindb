@@ -200,12 +200,19 @@ fn parse_relation_types(input: Span) -> PResult<Vec<String>> {
 }
 
 /// Parse depth range: min..max
+///
+/// `DEPTH min..max` is a range of hops; `DEPTH n` alone means exactly `n`
+/// hops (`n..n`), as `*n` does in Cypher. The single form is what the
+/// built-in `authenticated_user` role writes for friends-of-friends
+/// (`VIA 'FRIENDS_WITH' DEPTH 2`); before it parsed, that rule failed closed
+/// on every evaluation and logged a parse error.
 fn parse_depth_range(input: Span) -> PResult<(u32, u32)> {
     let (input, min) = parse_i64(input)?;
-    let (input, _) = dotdot(input)?;
-    let (input, max) = parse_i64(input)?;
-
-    Ok((input, (min as u32, max as u32)))
+    if let Ok((input, _)) = dotdot(input) {
+        let (input, max) = parse_i64(input)?;
+        return Ok((input, (min as u32, max as u32)));
+    }
+    Ok((input, (min as u32, min as u32)))
 }
 
 /// Parse direction: OUTGOING | INCOMING | ANY

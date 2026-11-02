@@ -341,6 +341,36 @@ fn test_relates_simple() {
     }
 }
 
+/// `DEPTH n` (no range) is exactly n hops. The built-in authenticated_user
+/// role writes `DEPTH 2` and failed to parse before this form existed.
+#[test]
+fn test_relates_with_single_depth() {
+    let e = parse("node.created_by RELATES auth.local_user_id VIA 'FRIENDS_WITH' DEPTH 2");
+    if let Expr::Relates {
+        min_depth,
+        max_depth,
+        ..
+    } = e
+    {
+        assert_eq!((min_depth, max_depth), (2, 2));
+    } else {
+        panic!("Expected Relates, got {:?}", e);
+    }
+    let e = parse("a RELATES b VIA 'X' DEPTH 3 DIRECTION OUTGOING");
+    if let Expr::Relates {
+        min_depth,
+        max_depth,
+        direction,
+        ..
+    } = e
+    {
+        assert_eq!((min_depth, max_depth), (3, 3));
+        assert_eq!(direction, RelDirection::Outgoing);
+    } else {
+        panic!("Expected Relates, got {:?}", e);
+    }
+}
+
 #[test]
 fn test_relates_with_depth() {
     let e = parse("node.created_by RELATES auth.local_user_id VIA 'FRIENDS_WITH' DEPTH 1..2");
