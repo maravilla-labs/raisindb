@@ -77,9 +77,10 @@ where
         if let Some(email) = email {
             auth_context = auth_context.with_email(email);
         }
-        if let Some(home) = home {
-            auth_context = auth_context.with_home(home);
-        }
+        // The home is the user node resolved in this connection's repository
+        // (with_permissions below). The token's home claim is not trusted: a
+        // token names no repository here, so the claim fails closed.
+        let _ = home;
         if let Some(perms) = resolved_permissions {
             debug!(
                 "Resolved {} permissions for user {} (roles: {:?})",

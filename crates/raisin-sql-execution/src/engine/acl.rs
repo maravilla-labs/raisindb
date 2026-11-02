@@ -641,18 +641,55 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     // User CRUD
     // =========================================================================
 
-    async fn acl_create_user(&self, stmt: &CreateUser) -> Result<RowStream, Error> {
-        let scope = self.acl_scope();
-        let path = if let Some(ref folder) = stmt.folder {
-            format!("{}/{}", folder.trim_end_matches('/'), stmt.user_id)
-        } else {
-            format!("/users/{}", stmt.user_id)
-        };
-
+    /// The home path of the user `user_id`: `/users/<user_id>` (users
+    /// created before keyed homes), else the `raisin:User` whose `user_id`
+    /// property is `user_id` (a keyed home under /users/internal). When
+    /// neither exists, the legacy path (callers then report "not found").
+    async fn user_path(&self, scope: StorageScope<'_>, user_id: &str) -> Result<String, Error> {
+        let legacy = format!("/users/{}", user_id);
         if self
             .storage
             .nodes()
-            .get_by_path(scope, &path, None)
+            .get_by_path(scope, &legacy, None)
+            .await?
+            .is_some()
+        {
+            return Ok(legacy);
+        }
+        let found = self
+            .storage
+            .nodes()
+            .find_by_property(
+                scope,
+                "user_id",
+                &PropertyValue::String(user_id.to_string()),
+            )
+            .await?
+            .into_iter()
+            .find(|n| n.node_type == "raisin:User");
+        Ok(found.map(|n| n.path).unwrap_or(legacy))
+    }
+
+    async fn acl_create_user(&self, stmt: &CreateUser) -> Result<RowStream, Error> {
+        let scope = self.acl_scope();
+        // Without IN FOLDER the user gets a keyed home: the write path names a
+        // home under /users/internal by a freshly minted key (the user id is
+        // kept in `user_id`, which ALTER / DROP / GRANT look up).
+        let path = if let Some(ref folder) = stmt.folder {
+            format!("{}/{}", folder.trim_end_matches('/'), stmt.user_id)
+        } else {
+            format!(
+                "{}/{}",
+                raisin_models::auth::user_key::USER_HOMES_ROOT,
+                stmt.user_id
+            )
+        };
+
+        let existing = self.user_path(scope, &stmt.user_id).await?;
+        if self
+            .storage
+            .nodes()
+            .get_by_path(scope, &existing, None)
             .await?
             .is_some()
         {
@@ -713,7 +750,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
     async fn acl_alter_user(&self, stmt: &AlterUser) -> Result<RowStream, Error> {
         let scope = self.acl_scope();
-        let path = format!("/users/{}", stmt.user_id);
+        let path = self.user_path(scope, &stmt.user_id).await?;
         let mut node = self
             .storage
             .nodes()
@@ -781,7 +818,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
     async fn acl_drop_user(&self, stmt: &DropUser) -> Result<RowStream, Error> {
         let scope = self.acl_scope();
-        let path = format!("/users/{}", stmt.user_id);
+        let path = self.user_path(scope, &stmt.user_id).await?;
         let deleted = self
             .storage
             .nodes()
@@ -862,7 +899,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
     async fn acl_describe_user(&self, stmt: &DescribeUser) -> Result<RowStream, Error> {
         let scope = self.acl_scope();
-        let path = format!("/users/{}", stmt.user_id);
+        let path = self.user_path(scope, &stmt.user_id).await?;
         let node = self
             .storage
             .nodes()
@@ -890,7 +927,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     async fn acl_grant(&self, stmt: &Grant) -> Result<RowStream, Error> {
         let scope = self.acl_scope();
         let (path, label) = match &stmt.target {
-            GrantTarget::User(id) => (format!("/users/{}", id), format!("User '{}'", id)),
+            GrantTarget::User(id) => (self.user_path(scope, id).await?, format!("User '{}'", id)),
             GrantTarget::Group(id) => (format!("/groups/{}", id), format!("Group '{}'", id)),
         };
 
@@ -932,7 +969,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     async fn acl_revoke(&self, stmt: &Revoke) -> Result<RowStream, Error> {
         let scope = self.acl_scope();
         let (path, label) = match &stmt.target {
-            RevokeTarget::User(id) => (format!("/users/{}", id), format!("User '{}'", id)),
+            RevokeTarget::User(id) => (self.user_path(scope, id).await?, format!("User '{}'", id)),
             RevokeTarget::Group(id) => (format!("/groups/{}", id), format!("Group '{}'", id)),
         };
 
@@ -1122,7 +1159,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         stmt: &ShowPermissionsFor,
     ) -> Result<RowStream, Error> {
         let scope = self.acl_scope();
-        let path = format!("/users/{}", stmt.user_id);
+        let path = self.user_path(scope, &stmt.user_id).await?;
         let user_node = self
             .storage
             .nodes()
@@ -1201,7 +1238,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         stmt: &ShowEffectiveRolesFor,
     ) -> Result<RowStream, Error> {
         let scope = self.acl_scope();
-        let path = format!("/users/{}", stmt.user_id);
+        let path = self.user_path(scope, &stmt.user_id).await?;
         let user_node = self
             .storage
             .nodes()
