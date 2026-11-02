@@ -24,12 +24,12 @@
 //!   the authoritative branch (`main`, where `raisin:access_control` lives)
 //!   through the repository, the transaction or a cascade
 //!   ([`stage_retire_on_person_delete`]), staged in the SAME batch as the
-//!   tombstones, so a rolled-back delete retires nothing. Branch prunes,
-//!   merges, displacements, deletes on other branches and the replication
-//!   apply never retire. And a key is never retired while a live home with it
-//!   exists anywhere in the tenant ([`live_home_exists`]).
-//! - Imports refuse a retired home that has no live home in the tenant,
-//!   with its subtree and its relations:
+//!   tombstones, so a rolled-back delete retires nothing. It retires whatever
+//!   copies exist on other branches. Branch prunes, merges, displacements,
+//!   deletes on other branches and the replication apply never retire.
+//! - Imports refuse a retired home, with its subtree and its relations,
+//!   unless the living person is right there on `main` at HEAD of the target
+//!   repository ([`retired_and_gone`]):
 //!   package install (`jobs::handlers::package_install`), backup restore
 //!   (`management::backup`) and any write that would keep a carried key
 //!   (`crate::user_homes`). A minted key is never a retired one.
@@ -133,12 +133,18 @@ pub fn stage_retire(
 /// Refuse writing `node` when it is a user home (or anything below one) whose
 /// key is retired: used by the branch copy and merge writers, which bypass
 /// the create funnel.
-pub fn reject_retired_home(db: &DB, tenant_id: &str, workspace: &str, node: &Node) -> Result<()> {
+pub fn reject_retired_home(
+    db: &DB,
+    tenant_id: &str,
+    repo_id: &str,
+    workspace: &str,
+    node: &Node,
+) -> Result<()> {
     if workspace != USER_WORKSPACE {
         return Ok(());
     }
     if let Some(key) = raisin_models::auth::user_key::user_key_of_path(&node.path) {
-        if retired_and_gone(db, tenant_id, key)? {
+        if retired_and_gone(db, tenant_id, repo_id, key)? {
             return Err(Error::Conflict(format!(
                 "user key {key} is retired (its person was deleted): the home cannot come back"
             )));
@@ -147,57 +153,66 @@ pub fn reject_retired_home(db: &DB, tenant_id: &str, workspace: &str, node: &Nod
     Ok(())
 }
 
-/// Is there a live home with `user_key` anywhere in the tenant (any branch of
-/// any repository), other than `except` (`(repo, branch, node_id)`, the node
-/// being deleted)? Reads the newest PATH_INDEX entry of
-/// `/users/internal/<key>` in `raisin:access_control` per branch.
+/// The authoritative branch: `raisin:access_control` is pinned to `main`.
+pub const AUTHORITATIVE_BRANCH: &str = "main";
+
+/// Is there a live home with `user_key` on the AUTHORITATIVE copy: repository
+/// `repo_id`, branch `main`, at its HEAD (newest PATH_INDEX entry of
+/// `/users/internal/<key>` at or below HEAD), other than node `except`?
+///
+/// Copies on other branches, other revisions and entries above HEAD never
+/// count: a surviving copy of a deleted person must not veto anything.
 pub fn live_home_exists(
     db: &DB,
     tenant_id: &str,
+    repo_id: &str,
     user_key: &str,
-    except: Option<(&str, &str, &str)>,
+    except: Option<&str>,
 ) -> Result<bool> {
     let cf_branches = cf_handle(db, cf::BRANCHES)?;
     let cf_path = cf_handle(db, cf::PATH_INDEX)?;
-    let tenant_prefix = KeyBuilder::new().push(tenant_id).build_prefix();
+    let head = db
+        .get_cf(
+            cf_branches,
+            crate::keys::branch_key(tenant_id, repo_id, AUTHORITATIVE_BRANCH),
+        )
+        .map_err(|e| Error::storage(format!("branch read: {e}")))?
+        .and_then(|bytes| rmp_serde::from_slice::<raisin_context::Branch>(&bytes).ok())
+        .map(|b| b.head);
     let home = raisin_models::auth::user_key::user_home_for_key(user_key);
-    for item in crate::prefix_scan(db, cf_branches, &tenant_prefix) {
-        let (k, _) = item.map_err(|e| Error::storage(format!("branch scan: {e}")))?;
-        if !k.starts_with(&tenant_prefix) {
+    let prefix = crate::keys::path_index_key_prefix(
+        tenant_id,
+        repo_id,
+        AUTHORITATIVE_BRANCH,
+        USER_WORKSPACE,
+        &home,
+    );
+    for item in crate::prefix_scan(db, cf_path, &prefix) {
+        let (k, value) = item.map_err(|e| Error::storage(format!("path scan: {e}")))?;
+        if !k.starts_with(&prefix) {
             break;
         }
-        // {tenant}\0{repo}\0branches\0{branch}
-        let parts: Vec<&[u8]> = k.split(|b| *b == 0).collect();
-        if parts.len() < 4 || parts[2] != b"branches" {
-            continue;
+        if let Some(head) = &head {
+            match crate::keys::extract_revision_from_key(&k) {
+                Ok(rev) if &rev > head => continue, // above HEAD: not live
+                Ok(_) => {}
+                Err(_) => continue,
+            }
         }
-        let repo = String::from_utf8_lossy(parts[1]).to_string();
-        let branch = String::from_utf8_lossy(parts[3]).to_string();
-        let prefix =
-            crate::keys::path_index_key_prefix(tenant_id, &repo, &branch, USER_WORKSPACE, &home);
-        let newest = crate::prefix_scan(db, cf_path, &prefix)
-            .next()
-            .transpose()
-            .map_err(|e| Error::storage(format!("path scan: {e}")))?;
-        let Some((pk, value)) = newest else {
-            continue;
-        };
-        if !pk.starts_with(&prefix) || value.as_ref() == crate::keys::TOMBSTONE_VALUE {
-            continue;
+        // The newest entry at or below HEAD decides.
+        if value.as_ref() == crate::keys::TOMBSTONE_VALUE {
+            return Ok(false);
         }
-        let node_id = String::from_utf8_lossy(&value).to_string();
-        if except.is_some_and(|(r, b, id)| r == repo && b == branch && id == node_id) {
-            continue;
-        }
-        return Ok(true);
+        let node_id = String::from_utf8_lossy(&value);
+        return Ok(except != Some(node_id.as_ref()));
     }
     Ok(false)
 }
 
-/// Stage the retirement of a deleted person's key: only for a delete of a
-/// keyed home on `main` (where users live), and only when no other live home
-/// with that key exists in the tenant (a copy on another branch or in another
-/// repository is a living person, never erased by mistake).
+/// Stage the retirement of a deleted person's key. Only a real deletion on
+/// the authoritative copy retires: a delete of a keyed home on `main`. It
+/// retires no matter what copies exist on other branches; it does not when
+/// another live home with the key is on `main` at HEAD (a recreate in place).
 #[allow(clippy::too_many_arguments)]
 pub fn stage_retire_on_person_delete(
     batch: &mut WriteBatch,
@@ -208,33 +223,37 @@ pub fn stage_retire_on_person_delete(
     workspace: &str,
     node: &Node,
 ) -> Result<()> {
-    if branch != "main" {
+    if branch != AUTHORITATIVE_BRANCH {
         return Ok(());
     }
     let Some(key) = home_key(workspace, node) else {
         return Ok(());
     };
-    if live_home_exists(db, tenant_id, key, Some((repo_id, branch, &node.id)))? {
+    if live_home_exists(db, tenant_id, repo_id, key, Some(&node.id))? {
         tracing::warn!(
             user_key = %key,
-            "Deleted a user home whose key still has a live home in the tenant; not retired"
+            "Deleted a user home whose key has another live home on main; not retired"
         );
         return Ok(());
     }
     stage_retire(batch, db, tenant_id, workspace, node)
 }
 
-/// Is `user_key` retired AND without any live home in the tenant? The test
-/// an import applies before it leaves a home out: a stale or wrong ledger
-/// entry can never erase a living person.
-pub fn retired_and_gone(db: &DB, tenant_id: &str, user_key: &str) -> Result<bool> {
+/// Should an import into `repo_id` leave out a home with `user_key`? Yes when
+/// the key is retired, unless the living person is right there: a live home
+/// with that key on `main` at HEAD of `repo_id` (then this is an update of a
+/// living person; logged as a warning). A mistaken retirement is corrected
+/// only by the administrator's un-retire, never automatically.
+pub fn retired_and_gone(db: &DB, tenant_id: &str, repo_id: &str, user_key: &str) -> Result<bool> {
     if !is_retired(db, tenant_id, user_key)? {
         return Ok(false);
     }
-    if live_home_exists(db, tenant_id, user_key, None)? {
+    if live_home_exists(db, tenant_id, repo_id, user_key, None)? {
         tracing::warn!(
             user_key = %user_key,
-            "A retired user key has a live home in the tenant; it is not treated as retired"
+            repo_id = %repo_id,
+            "A retired user key has a live home on main; not skipped (un-retire it if the \
+             retirement was a mistake)"
         );
         return Ok(false);
     }
@@ -399,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_person_delete_on_main_without_a_live_copy_retires() {
+    fn only_a_person_delete_on_main_retires_whatever_copies_exist_elsewhere() {
         let (_d, s) = db();
         let db = s.db().as_ref();
         let n = home(KEY);
@@ -421,34 +440,53 @@ mod tests {
         db.write(b).unwrap();
         assert!(!is_retired(db, "t", KEY).unwrap());
 
-        // A delete on another branch (a scratch branch) does not retire.
+        // A delete on a scratch branch retires nothing.
         let mut b = WriteBatch::default();
         stage_retire_on_person_delete(&mut b, db, "t", "r1", "scratch", USER_WORKSPACE, &n)
             .unwrap();
         db.write(b).unwrap();
         assert!(!is_retired(db, "t", KEY).unwrap());
 
-        // A live home with the key elsewhere in the tenant: not retired.
-        put_live_home(db, "t", "r2", "main", KEY, b"other-id");
+        // Copies on other branches and in other repositories never veto: the
+        // delete on main retires (the deleted node itself is no live copy).
+        put_live_home(db, "t", "r1", "scratch", KEY, b"copy");
+        put_live_home(db, "t", "r2", "main", KEY, b"other-repo");
+        put_live_home(db, "t", "r1", "main", KEY, b"n");
         let mut b = WriteBatch::default();
         stage_retire_on_person_delete(&mut b, db, "t", "r1", "main", USER_WORKSPACE, &n).unwrap();
         db.write(b).unwrap();
-        assert!(!is_retired(db, "t", KEY).unwrap());
-
-        // The home being deleted itself does not count as a live copy.
-        let (_d2, s2) = super::tests::db();
-        let db2 = s2.db().as_ref();
-        put_live_home(db2, "t", "r1", "main", KEY, b"n");
-        let mut b = WriteBatch::default();
-        stage_retire_on_person_delete(&mut b, db2, "t", "r1", "main", USER_WORKSPACE, &n).unwrap();
-        db2.write(b).unwrap();
-        assert!(is_retired(db2, "t", KEY).unwrap());
+        assert!(is_retired(db, "t", KEY).unwrap());
+        // The delete tombstones the home's path on main.
+        db.put_cf(
+            cf_handle(db, cf::PATH_INDEX).unwrap(),
+            crate::keys::path_index_key_versioned(
+                "t",
+                "r1",
+                "main",
+                USER_WORKSPACE,
+                &raisin_models::auth::user_key::user_home_for_key(KEY),
+                &raisin_hlc::HLC::new(3, 0),
+            ),
+            crate::keys::TOMBSTONE_VALUE,
+        )
+        .unwrap();
+        // ...and the copies do not make an import into r1 treat the key as alive.
+        assert!(retired_and_gone(db, "t", "r1", KEY).unwrap());
     }
 
     #[test]
-    fn a_live_home_with_a_retired_key_is_not_treated_as_gone_and_unretire_works() {
+    fn a_recreate_on_main_is_not_retired_and_a_living_person_is_not_skipped() {
         let (_d, s) = db();
         let db = s.db().as_ref();
+        // Another live home with the key on main (recreated in place).
+        put_live_home(db, "t", "r1", "main", KEY, b"new-node");
+        let mut b = WriteBatch::default();
+        stage_retire_on_person_delete(&mut b, db, "t", "r1", "main", USER_WORKSPACE, &home(KEY))
+            .unwrap();
+        db.write(b).unwrap();
+        assert!(!is_retired(db, "t", KEY).unwrap());
+
+        // A retired key whose person lives on main of the target: not skipped.
         merge(
             db,
             "t",
@@ -459,13 +497,10 @@ mod tests {
             }],
         )
         .unwrap();
-        assert!(retired_and_gone(db, "t", KEY).unwrap());
-        put_live_home(db, "t", "r9", "main", KEY, b"alive");
-        assert!(
-            !retired_and_gone(db, "t", KEY).unwrap(),
-            "a living person is never skipped"
-        );
+        assert!(!retired_and_gone(db, "t", "r1", KEY).unwrap());
+        assert!(retired_and_gone(db, "t", "r-empty", KEY).unwrap());
 
+        // A mistaken retirement is corrected only by un-retire.
         assert!(unretire(db, "t", KEY, "admin").unwrap());
         assert!(!is_retired(db, "t", KEY).unwrap());
         assert!(!unretire(db, "t", KEY, "admin").unwrap());

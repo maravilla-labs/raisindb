@@ -45,6 +45,7 @@ use raisin_models::nodes::Node;
 pub(crate) fn name_new_user_home(
     db: &rocksdb::DB,
     tenant_id: &str,
+    repo_id: &str,
     workspace: &str,
     node: &mut Node,
     adopt_supplied_key: bool,
@@ -54,7 +55,8 @@ pub(crate) fn name_new_user_home(
     if adopt_supplied_key {
         assign_user_key_name(workspace, node, None, true);
         if let Some(key) = crate::retired_keys::home_key(workspace, node) {
-            if !allow_retired && crate::retired_keys::retired_and_gone(db, tenant_id, key)? {
+            if !allow_retired && crate::retired_keys::retired_and_gone(db, tenant_id, repo_id, key)?
+            {
                 return Err(Error::Validation(format!(
                     "user key {key} is retired (its person was deleted) and cannot be restored"
                 )));
@@ -180,17 +182,17 @@ mod tests {
         let storage = crate::RocksDBStorage::new(dir.path()).unwrap();
         let db = storage.db().as_ref();
         let mut n = node("/users/internal/alice", USER_NODE_TYPE);
-        name_new_user_home(db, "t", USER_WORKSPACE, &mut n, false, false).unwrap();
+        name_new_user_home(db, "t", "r", USER_WORKSPACE, &mut n, false, false).unwrap();
         assert!(is_user_key(&n.name), "{}", n.name);
         assert_eq!(n.path, format!("/users/internal/{}", n.name));
 
         let key = "u_0123456789abcdefABCDEF";
         let mut n = node(&format!("/users/internal/{key}"), USER_NODE_TYPE);
-        name_new_user_home(db, "t", USER_WORKSPACE, &mut n, false, false).unwrap();
+        name_new_user_home(db, "t", "r", USER_WORKSPACE, &mut n, false, false).unwrap();
         assert_ne!(n.name, key, "a supplied key is not adopted");
 
         let mut n = node(&format!("/users/internal/{key}"), USER_NODE_TYPE);
-        name_new_user_home(db, "t", USER_WORKSPACE, &mut n, true, false).unwrap();
+        name_new_user_home(db, "t", "r", USER_WORKSPACE, &mut n, true, false).unwrap();
         assert_eq!(n.name, key, "an import keeps its key");
 
         // A retired key is refused on import, unless the admin override.
@@ -198,8 +200,8 @@ mod tests {
         crate::retired_keys::stage_retire(&mut b, db, "t", USER_WORKSPACE, &n).unwrap();
         db.write(b).unwrap();
         let mut again = node(&format!("/users/internal/{key}"), USER_NODE_TYPE);
-        assert!(name_new_user_home(db, "t", USER_WORKSPACE, &mut again, true, false).is_err());
-        assert!(name_new_user_home(db, "t", USER_WORKSPACE, &mut again, true, true).is_ok());
+        assert!(name_new_user_home(db, "t", "r", USER_WORKSPACE, &mut again, true, false).is_err());
+        assert!(name_new_user_home(db, "t", "r", USER_WORKSPACE, &mut again, true, true).is_ok());
     }
 
     #[test]

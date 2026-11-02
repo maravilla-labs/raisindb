@@ -42,8 +42,9 @@ pub struct PackageInstallHandler<S: Storage + TransactionalStorage> {
     pub(super) retired_keys: Option<RetiredKeysCheck>,
 }
 
-/// `(tenant_id, user_key) -> retired?`
-pub type RetiredKeysCheck = Arc<dyn Fn(&str, &str) -> Result<bool> + Send + Sync>;
+/// `(tenant_id, repo_id, user_key) -> leave the home out?` (retired, and the
+/// living person is not on `main` of `repo_id`).
+pub type RetiredKeysCheck = Arc<dyn Fn(&str, &str, &str) -> Result<bool> + Send + Sync>;
 
 impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     /// Create a new package install handler
@@ -70,6 +71,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     pub(super) fn retired_home_key(
         &self,
         tenant_id: &str,
+        repo_id: &str,
         workspace: &str,
         path: &str,
         stats: &InstallStats,
@@ -83,7 +85,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         let Some(key) = raisin_models::auth::user_key::user_key_of_path(path) else {
             return Ok(None);
         };
-        Ok(check(tenant_id, key)?.then(|| key.to_string()))
+        Ok(check(tenant_id, repo_id, key)?.then(|| key.to_string()))
     }
 
     /// Set the applied-hash recorder.

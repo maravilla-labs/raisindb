@@ -79,7 +79,9 @@ fn package() -> Vec<ContentEntry> {
 fn handler(storage: &Arc<RocksDBStorage>) -> PackageInstallHandler<RocksDBStorage> {
     let db = storage.db().clone();
     PackageInstallHandler::new(storage.clone(), Arc::new(JobRegistry::new())).with_retired_keys(
-        Arc::new(move |t: &str, k: &str| crate::retired_keys::retired_and_gone(&db, t, k)),
+        Arc::new(move |t: &str, r: &str, k: &str| {
+            crate::retired_keys::retired_and_gone(&db, t, r, k)
+        }),
     )
 }
 

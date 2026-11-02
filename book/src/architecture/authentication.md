@@ -220,14 +220,18 @@ The contract:
   (where `raisin:access_control` lives) through the node API, SQL `DELETE`,
   `DROP USER`, the admin console, an erasure or a cascade records its key in
   the tenant's **retired user keys ledger**: the key and the time, no email,
-  no name, no repository. Branch prunes, merges, displacements, deletes on
-  other branches and the replication apply never retire a key, and a key is
-  not retired while a live home with it exists anywhere in the tenant (any
-  branch of any repository). The ledger is tenant storage next to the
-  identities, not repository content, so deleting, recreating or restoring a
-  repository does not lose it. An import leaves a home out only when its
-  key is retired AND no live home with it exists in the tenant, so a stale
-  ledger entry cannot erase a living person.
+  no name, no repository. The decision is made on the authoritative copy
+  only: the delete on `main` retires the key whatever copies exist on other
+  branches or in other repositories (copies never veto). Branch prunes,
+  merges, displacements, deletes on other branches and the replication apply
+  never retire a key. The one exception is a home recreated in place: when
+  another live home with the key is on `main` at HEAD, the key stays. The
+  ledger is tenant storage next to the identities, not repository content,
+  so deleting, recreating or restoring a repository does not lose it. An
+  import into a repository leaves a retired home out unless the living
+  person is right there (a live home with that key on `main` at HEAD of the
+  target: an update, logged as a warning). A mistaken retirement is corrected
+  only by an administrator's un-retire, never automatically.
   - Administrators can list the ledger and un-retire a key retired by
     mistake: `GET /api/raisindb/sys/{tenant}/retired-user-keys`,
     `DELETE /api/raisindb/sys/{tenant}/retired-user-keys/{user_key}` (tenant

@@ -171,6 +171,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         &self,
         entries: Vec<ContentEntry>,
         tenant_id: &str,
+        repo_id: &str,
         stats: &mut InstallStats,
     ) -> Result<Vec<ContentEntry>> {
         let Some(check) = self.retired_keys.clone() else {
@@ -186,7 +187,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 None
             };
             match key {
-                Some(k) if check(tenant_id, &k)? => {
+                Some(k) if check(tenant_id, repo_id, &k)? => {
                     retired.insert(k);
                     if stats.allow_retired_user_keys {
                         keep.push(entry);
@@ -242,7 +243,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         // Deleted persons never come back: a user home whose key is retired
         // (`crate::retired_keys`) is skipped with everything below it, unless
         // an administrator set the explicit override.
-        let entries = self.drop_retired_homes(entries, tenant_id, stats)?;
+        let entries = self.drop_retired_homes(entries, tenant_id, repo_id, stats)?;
 
         let total_entries = entries.len();
         let mut processed = 0;

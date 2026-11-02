@@ -67,7 +67,7 @@ pub(super) async fn write_resolved_node(
     source: (&str, &HLC),
 ) -> Result<()> {
     // A deleted person never comes back through a merge resolution.
-    crate::retired_keys::reject_retired_home(db, tenant_id, workspace, node)?;
+    crate::retired_keys::reject_retired_home(db, tenant_id, repo_id, workspace, node)?;
     let mut normalized = node.clone();
     normalized.has_children = None;
 

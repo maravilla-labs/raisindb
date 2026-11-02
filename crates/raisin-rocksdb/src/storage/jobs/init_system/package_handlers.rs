@@ -114,5 +114,7 @@ fn retired_keys_check(
     storage: &Arc<RocksDBStorage>,
 ) -> crate::jobs::handlers::package_install::RetiredKeysCheck {
     let db = storage.db().clone();
-    Arc::new(move |tenant: &str, key: &str| crate::retired_keys::retired_and_gone(&db, tenant, key))
+    Arc::new(move |tenant: &str, repo: &str, key: &str| {
+        crate::retired_keys::retired_and_gone(&db, tenant, repo, key)
+    })
 }

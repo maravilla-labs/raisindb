@@ -37,11 +37,12 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // 1a. A user home is named by a freshly minted key; only a content import
     // by a system principal keeps the key it carries (see `crate::user_homes`).
     {
-        let (tenant_for_keys, _, _) = metadata::extract_metadata(tx)?;
+        let (tenant_for_keys, repo_for_keys, _) = metadata::extract_metadata(tx)?;
         let system_import = tx.is_system_content_import()?;
         crate::user_homes::name_new_user_home(
             &tx.db,
             &tenant_for_keys,
+            &repo_for_keys,
             workspace,
             &mut normalized_node,
             system_import,

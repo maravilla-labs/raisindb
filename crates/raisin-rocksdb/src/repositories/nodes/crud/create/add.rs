@@ -31,7 +31,7 @@ impl NodeRepositoryImpl {
 
         // A user home created here is named by its minted key.
         crate::user_homes::name_new_user_home(
-            &self.db, tenant_id, workspace, &mut node, false, false,
+            &self.db, tenant_id, repo_id, workspace, &mut node, false, false,
         )?;
 
         // CRITICAL: Normalize parent field from path before saving

@@ -66,6 +66,7 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         None => crate::user_homes::name_new_user_home(
             &tx.db,
             &tenant_id,
+            &repo_id,
             workspace,
             &mut normalized_node,
             system_import,

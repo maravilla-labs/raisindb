@@ -108,10 +108,16 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         for rel in &doc.relations {
             // An endpoint in a retired home (a deleted person) is skipped.
             if self
-                .retired_home_key(tenant_id, &rel.from.workspace, &rel.from.path, stats)?
+                .retired_home_key(
+                    tenant_id,
+                    repo_id,
+                    &rel.from.workspace,
+                    &rel.from.path,
+                    stats,
+                )?
                 .is_some()
                 || self
-                    .retired_home_key(tenant_id, &rel.to.workspace, &rel.to.path, stats)?
+                    .retired_home_key(tenant_id, repo_id, &rel.to.workspace, &rel.to.path, stats)?
                     .is_some()
             {
                 stats.relations_skipped_retired += 1;
