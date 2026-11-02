@@ -71,10 +71,7 @@ pub async fn add_relation(
     // 2. Get or allocate the single transaction HLC (all operations in tx share same revision)
     let revision = tx.get_or_allocate_transaction_revision()?;
 
-    tracing::warn!(
-        "🔍 RELATION DEBUG: add_relation called, allocated revision={}",
-        revision
-    );
+    tracing::debug!("add_relation: transaction revision={}", revision);
 
     // 2. Serialize relation data for indexes
     let forward_relation_bytes = rmp_serde::to_vec(&relation)

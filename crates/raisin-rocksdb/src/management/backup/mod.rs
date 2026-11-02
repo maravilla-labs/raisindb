@@ -13,10 +13,13 @@
 //! - revisions.json: Revision history
 //! - trees.json: Content-addressed trees
 //! - nodetypes.json: NodeType schemas
+//! - relations.jsonl: Graph relations live at each branch HEAD (see
+//!   [`relations`]; absent in backups of older releases)
 
 mod export;
 mod helpers;
 mod import;
+mod relations;
 
 use crate::RocksDBStorage;
 use raisin_error::Result;
@@ -84,6 +87,13 @@ pub async fn backup_repository(
         writeln!(&mut nodes_writer)
             .map_err(|e| raisin_error::Error::storage(format!("Failed to write newline: {}", e)))?;
     }
+
+    // 2b. Export graph relations (RELATION_INDEX is keyed by node id and is
+    // not part of the node records).
+    tracing::info!("Exporting relations...");
+    let rels = relations::export_relations(storage, tenant_id, repo_id).await?;
+    relations::write_relations(&repo_backup_dir.join(relations::RELATIONS_FILE), &rels)?;
+    tracing::info!("Exported {} relations", rels.len());
 
     // 3. Export branches
     tracing::info!("Exporting branches...");
@@ -242,6 +252,15 @@ pub async fn restore_repository(
     tracing::info!("Importing nodes...");
     let nodes_file = repo_backup_dir.join("nodes.jsonl");
     import::import_nodes_from_jsonl(storage, tenant_id, repo_id, &nodes_file).await?;
+
+    // 8. Import graph relations (node ids are preserved, so the endpoints are
+    // written back unchanged). Older backups have no relations file.
+    let relations_file = repo_backup_dir.join(relations::RELATIONS_FILE);
+    if relations_file.exists() {
+        let rels = relations::read_relations(&relations_file)?;
+        let n = relations::import_relations(storage, tenant_id, repo_id, &rels)?;
+        tracing::info!("Imported {} relations", n);
+    }
 
     let duration_ms = start.elapsed().as_millis() as u64;
     tracing::info!("Restore complete in {}ms", duration_ms);

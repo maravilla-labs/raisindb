@@ -88,6 +88,7 @@ pub(crate) use nodes::{
 
 // Re-export relation helpers for job handlers
 pub(crate) use relations::collect_incoming_relations;
+pub(crate) use relations::helpers::put_full_relation_to_batch;
 pub(crate) use relations::helpers::{
     deserialize_full_relation, deserialize_relation_ref, get_relation_cf,
     is_tombstone as is_relation_tombstone, packed_adjacency_cleanup_puts, read_packed_relations_at,

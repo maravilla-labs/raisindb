@@ -509,3 +509,80 @@ mod tests {
         assert!(!is_tombstone(b"data"));
     }
 }
+
+/// Stage one relation's three versioned entries (forward, reverse, global)
+/// into `batch`, exactly as `RelationRepository::add_relation` writes them:
+/// the forward value describes the target, the reverse value the SOURCE, the
+/// global value the whole relation.
+///
+/// For writers that restore relations in bulk (backup restore) and own their
+/// batch. It does not touch the packed adjacency snapshot: reads merge the
+/// versioned index first and treat the snapshot as a fallback only.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn put_full_relation_to_batch(
+    db: &DB,
+    batch: &mut rocksdb::WriteBatch,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    revision: &HLC,
+    relation: &FullRelation,
+) -> Result<()> {
+    use crate::keys::{
+        relation_forward_key_versioned, relation_global_key_versioned,
+        relation_reverse_key_versioned,
+    };
+    let cf = get_relation_cf(db)?;
+    let forward = relation.to_relation_ref();
+    let reverse = RelationRef::new(
+        relation.source_id.clone(),
+        relation.source_workspace.clone(),
+        relation.source_node_type.clone(),
+        relation.relation_type.clone(),
+        relation.weight,
+    );
+    batch.put_cf(
+        cf,
+        relation_forward_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            &relation.source_workspace,
+            &relation.source_id,
+            &relation.relation_type,
+            revision,
+            &relation.target_id,
+        ),
+        serialize_relation_ref(&forward)?,
+    );
+    batch.put_cf(
+        cf,
+        relation_reverse_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            &relation.target_workspace,
+            &relation.target_id,
+            &relation.relation_type,
+            revision,
+            &relation.source_id,
+        ),
+        serialize_relation_ref(&reverse)?,
+    );
+    batch.put_cf(
+        cf,
+        relation_global_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            &relation.relation_type,
+            revision,
+            &relation.source_workspace,
+            &relation.source_id,
+            &relation.target_workspace,
+            &relation.target_id,
+        ),
+        serialize_full_relation(relation)?,
+    );
+    Ok(())
+}

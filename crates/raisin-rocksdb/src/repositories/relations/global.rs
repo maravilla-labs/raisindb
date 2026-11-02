@@ -23,7 +23,7 @@ pub(super) async fn scan_relations_global(
     branch: &str,
     relation_type_filter: Option<&str>,
 ) -> Result<Vec<(String, String, String, String, FullRelation)>> {
-    tracing::info!("🔵 RocksDB scan_relations_global");
+    tracing::debug!("RocksDB scan_relations_global");
     tracing::debug!(
         "   tenant={}, repo={}, branch={}, type_filter={:?}",
         tenant_id,
@@ -144,10 +144,7 @@ struct ScanStats {
 
 impl ScanStats {
     fn log_results(&self, result_count: usize) {
-        tracing::info!(
-            "   ✓ Scan complete: {} total keys scanned",
-            self.scanned_keys
-        );
+        tracing::debug!("   Scan complete: {} total keys scanned", self.scanned_keys);
         tracing::debug!(
             "   Skipped: {} rev, {} tombstone, {} duplicate, {} invalid",
             self.skipped_revision,
@@ -155,15 +152,18 @@ impl ScanStats {
             self.skipped_duplicate,
             self.skipped_invalid
         );
-        tracing::info!("   ✓ Returning {} unique relationships", result_count);
+        tracing::debug!("   Returning {} unique relationships", result_count);
 
+        // An empty result is normal (a type nobody used yet, every edge
+        // removed); it is the NEIGHBORS fallback's every-miss path, so it is
+        // not worth a warning.
         if result_count == 0 && self.scanned_keys > 0 {
-            tracing::warn!(
-                "   ⚠️  Scanned {} keys but found 0 valid relationships!",
+            tracing::debug!(
+                "   Scanned {} keys but found 0 live relationships",
                 self.scanned_keys
             );
         } else if result_count == 0 {
-            tracing::warn!("   ⚠️  No keys found with this prefix!");
+            tracing::debug!("   No keys found with this prefix");
         }
     }
 }
