@@ -35,6 +35,7 @@ allowed_children:
   # /config.
   - raisin:SecurityConfig
   - raisin:StewardshipConfig
+  - raisin:MessagingConfig
   # User-owned subtrees under /users/internal/<slug>.
   - raisin:Profile
   - raisin:ProfileData

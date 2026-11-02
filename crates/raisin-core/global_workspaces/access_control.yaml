@@ -13,6 +13,7 @@ allowed_node_types:
   - raisin:Folder
   - raisin:SecurityConfig
   - raisin:StewardshipConfig
+  - raisin:MessagingConfig
   - raisin:RelationType
   - raisin:EntityCircle
   - raisin:StewardshipOverride
@@ -29,6 +30,7 @@ allowed_root_node_types:
   - raisin:AclFolder
   - raisin:SecurityConfig
   - raisin:StewardshipConfig
+  - raisin:MessagingConfig
   - raisin:RelationType
   - raisin:EntityCircle
   - raisin:StewardshipOverride
