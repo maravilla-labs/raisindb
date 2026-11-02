@@ -61,6 +61,10 @@ impl NodeRepositoryImpl {
         let ctx = crate::tombstones::TombstoneContext::new(tenant_id, repo_id, branch, workspace);
         let cfs = crate::tombstones::TombstoneColumnFamilies::from_db(&self.db)?;
         crate::tombstones::add_node_tombstones(&mut batch, &self.db, &ctx, &cfs, &node, &revision)?;
+        // A deleted person never comes back (`crate::retired_keys`).
+        crate::retired_keys::stage_retire_on_person_delete(
+            &mut batch, &self.db, tenant_id, repo_id, branch, workspace, &node,
+        )?;
 
         // Unique index tombstones (async — needs NodeType lookup to find the
         // unique properties), not covered by the shared module.

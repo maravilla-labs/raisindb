@@ -369,7 +369,7 @@ pub async fn restore_repository_with_options(
             return false;
         };
         // A ledger read error is a refusal: fail closed.
-        let retired = crate::retired_keys::is_retired(&db, tenant_id, key).unwrap_or(true);
+        let retired = crate::retired_keys::retired_and_gone(&db, tenant_id, key).unwrap_or(true);
         if !retired {
             return false;
         }

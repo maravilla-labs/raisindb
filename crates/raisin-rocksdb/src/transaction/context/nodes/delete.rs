@@ -233,6 +233,11 @@ pub async fn delete_node(tx: &RocksDBTransaction, workspace: &str, node_id: &str
     let cfs = TombstoneColumnFamilies::from_arc_db(&tx.db)?;
 
     add_node_tombstones(&mut batch, &tx.db, &ctx, &cfs, &node, &revision)?;
+    // A deleted person never comes back (`crate::retired_keys`): only this
+    // real delete path retires a key, in the same batch.
+    crate::retired_keys::stage_retire_on_person_delete(
+        &mut batch, &tx.db, &tenant_id, &repo_id, &branch, workspace, &node,
+    )?;
     crate::transaction::context::translations::write::tombstone_own_writes(
         tx,
         &mut batch,

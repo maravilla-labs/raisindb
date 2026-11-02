@@ -221,6 +221,17 @@ pub(crate) fn auth_routes(state: &AppState) -> Router<AppState> {
                 .delete(crate::handlers::identity_users::delete_identity_user)
                 .layer(from_fn_with_state(state.clone(), require_auth_middleware)),
         )
+        // Retired user keys ledger (deleted persons): list, un-retire.
+        .route(
+            "/api/raisindb/sys/{tenant_id}/retired-user-keys",
+            get(crate::handlers::retired_user_keys::list_retired_user_keys)
+                .layer(from_fn_with_state(state.clone(), require_auth_middleware)),
+        )
+        .route(
+            "/api/raisindb/sys/{tenant_id}/retired-user-keys/{user_key}",
+            axum::routing::delete(crate::handlers::retired_user_keys::unretire_user_key)
+                .layer(from_fn_with_state(state.clone(), require_auth_middleware)),
+        )
         .route(
             "/api/raisindb/sys/{tenant_id}/identity-users/{identity_id}/link",
             post(crate::handlers::identity_users::link_identity_user)

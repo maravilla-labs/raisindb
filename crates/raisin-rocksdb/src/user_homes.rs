@@ -54,7 +54,7 @@ pub(crate) fn name_new_user_home(
     if adopt_supplied_key {
         assign_user_key_name(workspace, node, None, true);
         if let Some(key) = crate::retired_keys::home_key(workspace, node) {
-            if !allow_retired && crate::retired_keys::is_retired(db, tenant_id, key)? {
+            if !allow_retired && crate::retired_keys::retired_and_gone(db, tenant_id, key)? {
                 return Err(Error::Validation(format!(
                     "user key {key} is retired (its person was deleted) and cannot be restored"
                 )));

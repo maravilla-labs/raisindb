@@ -86,6 +86,8 @@ mod handlers {
     pub mod replication;
     pub mod repo;
     pub mod repositories;
+    #[cfg(feature = "storage-rocksdb")]
+    pub mod retired_user_keys;
     pub mod revisions;
     pub mod scheduler;
     #[cfg(feature = "storage-rocksdb")]

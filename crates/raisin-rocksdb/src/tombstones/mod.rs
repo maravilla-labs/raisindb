@@ -171,10 +171,6 @@ pub fn add_node_tombstones_with_parent(
 ) -> Result<()> {
     let is_published = node.published_at.is_some();
 
-    // 0. A deleted keyed user home retires its key, in the same batch
-    //    (`crate::retired_keys`): a deleted person never comes back.
-    crate::retired_keys::stage_retire(batch, db, ctx.tenant_id, ctx.workspace, node)?;
-
     // 1. NODES - Tombstone node data
     core_tombstones::tombstone_node_data(batch, ctx, cfs, node, revision);
 

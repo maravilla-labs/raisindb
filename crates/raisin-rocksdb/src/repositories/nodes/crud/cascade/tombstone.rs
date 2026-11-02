@@ -64,6 +64,10 @@ impl NodeRepositoryImpl {
         let ctx = TombstoneContext::new(tenant_id, repo_id, branch, workspace);
         let cfs = TombstoneColumnFamilies::from_db(&self.db)?;
 
-        add_node_tombstones(batch, &self.db, &ctx, &cfs, node, revision)
+        add_node_tombstones(batch, &self.db, &ctx, &cfs, node, revision)?;
+        // A deleted person never comes back (`crate::retired_keys`).
+        crate::retired_keys::stage_retire_on_person_delete(
+            batch, &self.db, tenant_id, repo_id, branch, workspace, node,
+        )
     }
 }
