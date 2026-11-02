@@ -13,6 +13,9 @@ allowed_children:
   # Workflow human tasks are created at {assignee}/inbox/task-* - a user's
   # inbox folder holds chat artifacts AND inbox tasks.
   - raisin:InboxTask
+  # `inbox/chats` (the documented tree, docs/developer/messaging/architecture.md): handle-chat creates it as a plain
+  # folder on a user's first chat (`ensureChatsFolder`).
+  - raisin:Folder
 versionable: false
 publishable: false
 auditable: false
