@@ -15,11 +15,41 @@
 //! - nodetypes.json: NodeType schemas
 //! - relations.jsonl: Graph relations live at each branch HEAD (see
 //!   [`relations`]; absent in backups of older releases)
+//! - retired_user_keys.jsonl: the tenant's retired user keys ledger (keys and
+//!   times only, see [`crate::retired_keys`]); a restore merges it (union)
+//!   and leaves out every user home whose key is retired
 
 mod export;
 mod helpers;
 mod import;
 mod relations;
+
+/// File name of the retired user keys section of a repository backup.
+const RETIRED_KEYS_FILE: &str = "retired_user_keys.jsonl";
+
+/// Options of a restore.
+#[derive(Debug, Clone, Default)]
+pub struct RestoreOptions {
+    /// Explicit admin override: restore user homes whose key is retired
+    /// (deleted persons). Off by default; deliberate disaster recovery only,
+    /// audit-logged with `actor`.
+    pub allow_retired_user_keys: bool,
+    /// Who asked for the override (for the audit log).
+    pub actor: Option<String>,
+}
+
+/// What a restore left out or added.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreReport {
+    /// Keys of user homes not restored because the key is retired (keys only).
+    pub skipped_retired_keys: Vec<String>,
+    /// Nodes left out with them (the homes and everything below them).
+    pub nodes_skipped_retired: usize,
+    /// Relations left out because an endpoint was left out.
+    pub relations_skipped_retired: usize,
+    /// Ledger entries of the backup that were new to the tenant ledger.
+    pub retired_keys_merged: usize,
+}
 
 use crate::RocksDBStorage;
 use raisin_error::Result;
@@ -94,6 +124,23 @@ pub async fn backup_repository(
     let rels = relations::export_relations(storage, tenant_id, repo_id).await?;
     relations::write_relations(&repo_backup_dir.join(relations::RELATIONS_FILE), &rels)?;
     tracing::info!("Exported {} relations", rels.len());
+
+    // 2c. Export the tenant's retired user keys ledger (keys and times only).
+    let ledger = crate::retired_keys::list(storage.db(), tenant_id)?;
+    {
+        let mut w =
+            std::fs::File::create(repo_backup_dir.join(RETIRED_KEYS_FILE)).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to create ledger file: {}", e))
+            })?;
+        for entry in &ledger {
+            serde_json::to_writer(&mut w, entry).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to write ledger entry: {}", e))
+            })?;
+            writeln!(&mut w).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to write newline: {}", e))
+            })?;
+        }
+    }
 
     // 3. Export branches
     tracing::info!("Exporting branches...");
@@ -183,13 +230,49 @@ pub async fn backup_repository(
     })
 }
 
-/// Restore a repository from backup
+/// Restore a repository from backup (no ledger override; the report is
+/// logged).
 pub async fn restore_repository(
     storage: &RocksDBStorage,
     tenant_id: &str,
     repo_id: &str,
     src: &Path,
 ) -> Result<()> {
+    let report = restore_repository_with_options(
+        storage,
+        tenant_id,
+        repo_id,
+        src,
+        &RestoreOptions::default(),
+    )
+    .await?;
+    if !report.skipped_retired_keys.is_empty() {
+        tracing::warn!(
+            skipped_retired_keys = report.skipped_retired_keys.len(),
+            keys = ?report.skipped_retired_keys,
+            nodes = report.nodes_skipped_retired,
+            relations = report.relations_skipped_retired,
+            "Restore left out user homes whose key is retired (deleted persons)"
+        );
+    }
+    Ok(())
+}
+
+/// Restore a repository from backup.
+///
+/// The backup's retired keys are MERGED into the tenant ledger first (union,
+/// never a replacement), then every user home whose key the ledger knows as
+/// retired is left out with everything below it and its relations, unless
+/// `options.allow_retired_user_keys` (an administrator's explicit override,
+/// audit-logged).
+pub async fn restore_repository_with_options(
+    storage: &RocksDBStorage,
+    tenant_id: &str,
+    repo_id: &str,
+    src: &Path,
+    options: &RestoreOptions,
+) -> Result<RestoreReport> {
+    let mut report = RestoreReport::default();
     let start = std::time::Instant::now();
 
     tracing::info!("Starting restore of repository {}/{}", tenant_id, repo_id);
@@ -248,16 +331,92 @@ pub async fn restore_repository(
         import::import_trees(storage, tenant_id, repo_id, &trees_file).await?;
     }
 
-    // 7. Import nodes (last, as they may reference other data)
+    // 6b. Merge the backup's retired keys into the tenant ledger (union).
+    let ledger_file = repo_backup_dir.join(RETIRED_KEYS_FILE);
+    if ledger_file.exists() {
+        let text = std::fs::read_to_string(&ledger_file).map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to read ledger file: {}", e))
+        })?;
+        let mut entries = Vec::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let entry: crate::retired_keys::RetiredUserKey =
+                serde_json::from_str(line).map_err(|e| {
+                    raisin_error::Error::storage(format!("Failed to parse ledger: {}", e))
+                })?;
+            if entry.v > crate::retired_keys::RETIRED_KEY_LINE_VERSION {
+                return Err(raisin_error::Error::Validation(format!(
+                    "restore refused: {} has format v{}",
+                    RETIRED_KEYS_FILE, entry.v
+                )));
+            }
+            entries.push(entry);
+        }
+        report.retired_keys_merged = crate::retired_keys::merge(storage.db(), tenant_id, &entries)?;
+    }
+
+    // 7. Import nodes (last, as they may reference other data), leaving out
+    // the homes of deleted persons (retired keys) with their subtrees.
     tracing::info!("Importing nodes...");
     let nodes_file = repo_backup_dir.join("nodes.jsonl");
-    import::import_nodes_from_jsonl(storage, tenant_id, repo_id, &nodes_file).await?;
+    let db = storage.db().clone();
+    let skipped_keys = std::sync::Mutex::new(std::collections::BTreeSet::<String>::new());
+    let restored_keys = std::sync::Mutex::new(std::collections::BTreeSet::<String>::new());
+    let skip = |n: &raisin_models::nodes::Node| -> bool {
+        if n.workspace.as_deref() != Some(raisin_models::auth::user_key::USER_WORKSPACE) {
+            return false;
+        }
+        let Some(key) = raisin_models::auth::user_key::user_key_of_path(&n.path) else {
+            return false;
+        };
+        // A ledger read error is a refusal: fail closed.
+        let retired = crate::retired_keys::is_retired(&db, tenant_id, key).unwrap_or(true);
+        if !retired {
+            return false;
+        }
+        if options.allow_retired_user_keys {
+            restored_keys
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key.to_string());
+            return false;
+        }
+        skipped_keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_string());
+        true
+    };
+    let skipped_ids =
+        import::import_nodes_from_jsonl(storage, tenant_id, repo_id, &nodes_file, &skip).await?;
+    report.nodes_skipped_retired = skipped_ids.len();
+    report.skipped_retired_keys = skipped_keys
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner())
+        .into_iter()
+        .collect();
+    let restored = restored_keys
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner());
+    if !restored.is_empty() {
+        crate::retired_keys::audit_override(
+            tenant_id,
+            "backup restore",
+            options.actor.as_deref().unwrap_or("unknown"),
+            &restored.into_iter().collect::<Vec<_>>(),
+        );
+    }
 
     // 8. Import graph relations (node ids are preserved, so the endpoints are
     // written back unchanged). Older backups have no relations file.
     let relations_file = repo_backup_dir.join(relations::RELATIONS_FILE);
     if relations_file.exists() {
-        let rels = relations::read_relations(&relations_file)?;
+        let mut rels = relations::read_relations(&relations_file)?;
+        let before = rels.len();
+        rels.retain(|r| {
+            !skipped_ids.contains(&r.relation.source_id)
+                && !skipped_ids.contains(&r.relation.target_id)
+        });
+        report.relations_skipped_retired = before - rels.len();
         let n = relations::import_relations(storage, tenant_id, repo_id, &rels)?;
         tracing::info!("Imported {} relations", n);
     }
@@ -265,7 +424,7 @@ pub async fn restore_repository(
     let duration_ms = start.elapsed().as_millis() as u64;
     tracing::info!("Restore complete in {}ms", duration_ms);
 
-    Ok(())
+    Ok(report)
 }
 
 /// Backup all repositories for a tenant

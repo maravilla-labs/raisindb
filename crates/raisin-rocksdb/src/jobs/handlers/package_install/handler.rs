@@ -37,7 +37,13 @@ pub struct PackageInstallHandler<S: Storage + TransactionalStorage> {
     /// Records what content this install applied, so a later release can be
     /// seen as an update. See [`AppliedHashRecorder`].
     pub(super) applied_recorder: Option<AppliedHashRecorder>,
+    /// Answers "is this user key retired in this tenant?" (the tenant ledger,
+    /// `crate::retired_keys`). `None` (tests on other storage): no check.
+    pub(super) retired_keys: Option<RetiredKeysCheck>,
 }
+
+/// `(tenant_id, user_key) -> retired?`
+pub type RetiredKeysCheck = Arc<dyn Fn(&str, &str) -> Result<bool> + Send + Sync>;
 
 impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     /// Create a new package install handler
@@ -48,7 +54,36 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             binary_callback: None,
             binary_store_callback: None,
             applied_recorder: None,
+            retired_keys: None,
         }
+    }
+
+    /// Check user homes against the tenant's retired keys ledger.
+    pub fn with_retired_keys(mut self, check: RetiredKeysCheck) -> Self {
+        self.retired_keys = Some(check);
+        self
+    }
+
+    /// The retired key of the user home that holds `path` (the home itself or
+    /// anything below it) in `workspace`, when the ledger knows it as retired
+    /// and no admin override is on.
+    pub(super) fn retired_home_key(
+        &self,
+        tenant_id: &str,
+        workspace: &str,
+        path: &str,
+        stats: &InstallStats,
+    ) -> Result<Option<String>> {
+        if stats.allow_retired_user_keys || workspace != "raisin:access_control" {
+            return Ok(None);
+        }
+        let Some(check) = &self.retired_keys else {
+            return Ok(None);
+        };
+        let Some(key) = raisin_models::auth::user_key::user_key_of_path(path) else {
+            return Ok(None);
+        };
+        Ok(check(tenant_id, key)?.then(|| key.to_string()))
     }
 
     /// Set the applied-hash recorder.
@@ -244,6 +279,18 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
 
         // Initialize stats
         let mut stats = InstallStats::default();
+        // Explicit admin override of the retired keys ledger (set only by an
+        // administrator's install request; see raisin_rocksdb::retired_keys).
+        stats.allow_retired_user_keys = context
+            .metadata
+            .get("allow_retired_user_keys")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        stats.retired_keys_override_actor = context
+            .metadata
+            .get("retired_keys_override_actor")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
 
         // Phase 0: Install nested .rap dependencies FIRST (15-20%)
         self.report_progress(&job.id, 0.15, "Installing dependencies")
@@ -535,6 +582,9 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             relations_existing: stats.relations_existing,
             relations_updated: stats.relations_updated,
             relations_unresolved: std::mem::take(&mut stats.relations_unresolved_list),
+            skipped_retired_keys: stats.skipped_retired_keys.len(),
+            skipped_retired_key_list: std::mem::take(&mut stats.skipped_retired_keys),
+            relations_skipped_retired: stats.relations_skipped_retired,
         };
 
         Ok(Some(serde_json::to_value(result).unwrap_or_default()))

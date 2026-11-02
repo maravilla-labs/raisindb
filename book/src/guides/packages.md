@@ -630,6 +630,11 @@ relations:
   relations whose endpoint does not exist, as `ws:path -[TYPE]-> ws:path`).
 - A user's home path is its stable key (`/users/internal/<user_key>`, see
   Authentication), so relations between users need nothing beyond paths.
+- A home whose key is retired (the person was deleted) is never installed:
+  it is skipped with its subtree and relations and reported as
+  `skipped_retired_keys` / `skipped_retired_key_list` (keys only) and
+  `relations_skipped_retired`. Administrators can override with
+  `?allow_retired_user_keys=true` (audit-logged; see Authentication).
   `raisin:access_control` is exportable; credentials are not in it (identity,
   session and provider records are never exported).
 

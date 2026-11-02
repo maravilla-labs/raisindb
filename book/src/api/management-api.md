@@ -159,8 +159,15 @@ POST /management/backup/{tenant}
 ```
 
 Writes one directory per repository, `<path>/<tenant>/<repo>/`:
-`metadata.json`, `nodes.jsonl`, `relations.jsonl`, `branches.json`,
-`workspaces.json`, `revisions.json`, `trees.jsonl`, `nodetypes.json`.
+`metadata.json`, `nodes.jsonl`, `relations.jsonl`,
+`retired_user_keys.jsonl`, `branches.json`, `workspaces.json`,
+`revisions.json`, `trees.jsonl`, `nodetypes.json`.
+
+`retired_user_keys.jsonl` is the tenant's retired user keys ledger (`v`,
+`key`, `retired_at`; no personal data). A restore merges it into the tenant
+ledger (union) and leaves out every user home whose key is retired, with its
+subtree and relations, unless the explicit administrator override
+`RestoreOptions::allow_retired_user_keys` is set (audit-logged).
 
 `relations.jsonl` holds every graph relation live at each branch HEAD, one
 versioned JSON object per line (`v`, `branch`, `source_id`,

@@ -101,9 +101,22 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             doc.relations.len()
         ))?;
         tx.set_auth_context(AuthContext::system())?;
+        tx.set_content_import(true)?;
+        tx.set_retired_keys_override(stats.allow_retired_user_keys)?;
 
         let mut wrote = false;
         for rel in &doc.relations {
+            // An endpoint in a retired home (a deleted person) is skipped.
+            if self
+                .retired_home_key(tenant_id, &rel.from.workspace, &rel.from.path, stats)?
+                .is_some()
+                || self
+                    .retired_home_key(tenant_id, &rel.to.workspace, &rel.to.path, stats)?
+                    .is_some()
+            {
+                stats.relations_skipped_retired += 1;
+                continue;
+            }
             match self
                 .install_one_relation(tx.as_ref(), tenant_id, repo_id, branch, rel, install_mode)
                 .await?

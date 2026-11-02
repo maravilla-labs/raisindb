@@ -138,7 +138,86 @@ fn describe_entry(entry: &ContentEntry) -> String {
     }
 }
 
+/// The workspace and the node path an entry writes (or the archive path for
+/// files that do not name one; a home is found inside it either way).
+fn entry_location(entry: &ContentEntry) -> (&str, &str) {
+    match entry {
+        ContentEntry::NodeDef {
+            workspace, node, ..
+        } => (workspace, &node.path),
+        ContentEntry::BinaryFile {
+            workspace,
+            zip_path,
+            ..
+        } => (workspace, zip_path),
+        ContentEntry::TranslationFile {
+            workspace,
+            base_node_yaml_path,
+            ..
+        } => (workspace, base_node_yaml_path),
+    }
+}
+
+/// The node-path part of `path` from its `/users/internal/` on (archive paths
+/// carry a `content/<workspace>` prefix).
+fn home_part(path: &str) -> &str {
+    path.find("/users/internal/").map_or(path, |i| &path[i..])
+}
+
 impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
+    /// Remove the entries of user homes whose key is retired. With the admin
+    /// override on, nothing is removed and the restored keys are audit-logged.
+    fn drop_retired_homes(
+        &self,
+        entries: Vec<ContentEntry>,
+        tenant_id: &str,
+        stats: &mut InstallStats,
+    ) -> Result<Vec<ContentEntry>> {
+        let Some(check) = self.retired_keys.clone() else {
+            return Ok(entries);
+        };
+        let mut keep = Vec::with_capacity(entries.len());
+        let mut retired: std::collections::BTreeSet<String> = Default::default();
+        for entry in entries {
+            let (workspace, path) = entry_location(&entry);
+            let key = if workspace == "raisin:access_control" {
+                raisin_models::auth::user_key::user_key_of_path(home_part(path)).map(str::to_string)
+            } else {
+                None
+            };
+            match key {
+                Some(k) if check(tenant_id, &k)? => {
+                    retired.insert(k);
+                    if stats.allow_retired_user_keys {
+                        keep.push(entry);
+                    }
+                }
+                _ => keep.push(entry),
+            }
+        }
+        if stats.allow_retired_user_keys {
+            if !retired.is_empty() {
+                crate::retired_keys::audit_override(
+                    tenant_id,
+                    "package install",
+                    stats
+                        .retired_keys_override_actor
+                        .as_deref()
+                        .unwrap_or("unknown"),
+                    &retired.into_iter().collect::<Vec<_>>(),
+                );
+            }
+        } else if !retired.is_empty() {
+            tracing::warn!(
+                skipped = retired.len(),
+                keys = ?retired,
+                "Package install skipped user homes whose key is retired (deleted persons)"
+            );
+            stats.skipped_retired_keys = retired.into_iter().collect();
+        }
+        Ok(keep)
+    }
+
     /// Install sorted content entries in batches
     ///
     /// Entries are pre-sorted by the dependency graph (topological order).
@@ -160,6 +239,11 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         binary_store: Option<&super::super::types::BinaryStorageCallback>,
         stats: &mut InstallStats,
     ) -> Result<()> {
+        // Deleted persons never come back: a user home whose key is retired
+        // (`crate::retired_keys`) is skipped with everything below it, unless
+        // an administrator set the explicit override.
+        let entries = self.drop_retired_homes(entries, tenant_id, stats)?;
+
         let total_entries = entries.len();
         let mut processed = 0;
 
@@ -183,6 +267,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             tx.set_branch(branch)?;
             tx.set_actor("package-install")?;
             tx.set_content_import(true)?;
+            tx.set_retired_keys_override(stats.allow_retired_user_keys)?;
             tx.set_message(&format!("Package install batch ({} items)", batch.len()))?;
             tx.set_auth_context(AuthContext::system())?;
 
@@ -385,6 +470,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 tx.set_branch(branch)?;
                 tx.set_actor("package-install")?;
                 tx.set_content_import(true)?;
+                tx.set_retired_keys_override(stats.allow_retired_user_keys)?;
                 tx.set_message("Package install: resolve deferred references")?;
                 tx.set_auth_context(AuthContext::system())?;
 

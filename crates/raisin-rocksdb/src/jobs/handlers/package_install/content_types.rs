@@ -66,6 +66,16 @@ pub(super) struct InstallStats {
     pub relations_unresolved: usize,
     /// `ws:path -[type]-> ws:path` of each unresolved relation.
     pub relations_unresolved_list: Vec<String>,
+    /// The explicit admin override of the retired keys ledger is on.
+    pub allow_retired_user_keys: bool,
+    /// Who set the override (for the audit log).
+    pub retired_keys_override_actor: Option<String>,
+    /// Keys of user homes skipped because they are retired (deleted persons),
+    /// with everything below them and their relations. Keys only, never
+    /// personal data.
+    pub skipped_retired_keys: Vec<String>,
+    /// Relations skipped because an endpoint is in a retired home.
+    pub relations_skipped_retired: usize,
     /// Per-entry rejections, one message each.
     ///
     /// Content entries no longer abort the install on the first bad node, so

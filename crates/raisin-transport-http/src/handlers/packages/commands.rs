@@ -94,6 +94,7 @@ pub async fn handle_package_command(
                 &branch,
                 &package_path,
                 install_query.mode,
+                install_query.allow_retired_user_keys,
                 auth_context,
             )
             .await?;

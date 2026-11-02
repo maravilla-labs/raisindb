@@ -113,6 +113,11 @@ pub struct InstallQuery {
     /// Target branch (defaults to "main" when omitted).
     #[serde(default)]
     pub branch: Option<String>,
+    /// Explicit admin override: restore user homes whose key is retired
+    /// (persons that were deleted). Off by default; deliberate disaster
+    /// recovery only, audit-logged. See `raisin_rocksdb::retired_keys`.
+    #[serde(default)]
+    pub allow_retired_user_keys: bool,
 }
 
 /// SSE events for package installation progress

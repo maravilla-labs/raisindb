@@ -30,7 +30,9 @@ impl NodeRepositoryImpl {
         let add_start = std::time::Instant::now();
 
         // A user home created here is named by its minted key.
-        crate::user_homes::name_new_user_home(workspace, &mut node, false);
+        crate::user_homes::name_new_user_home(
+            &self.db, tenant_id, workspace, &mut node, false, false,
+        )?;
 
         // CRITICAL: Normalize parent field from path before saving
         node.parent = Node::extract_parent_name_from_path(&node.path);

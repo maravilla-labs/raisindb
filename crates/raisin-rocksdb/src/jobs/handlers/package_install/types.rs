@@ -352,6 +352,16 @@ pub struct PackageInstallResult {
     /// each as `workspace:path -[TYPE]-> workspace:path`.
     #[serde(default)]
     pub relations_unresolved: Vec<String>,
+    /// How many user homes were skipped because their key is retired (the
+    /// person was deleted), with their subtree and relations.
+    #[serde(default)]
+    pub skipped_retired_keys: usize,
+    /// The retired keys skipped (keys only, no personal data).
+    #[serde(default)]
+    pub skipped_retired_key_list: Vec<String>,
+    /// Relations skipped because an endpoint is in a retired home.
+    #[serde(default)]
+    pub relations_skipped_retired: usize,
 }
 
 // ============================================================================

@@ -83,6 +83,15 @@ pub fn user_key_from_home(home: &str) -> Option<&str> {
     is_user_key(rest).then_some(rest)
 }
 
+/// The key of the keyed home that holds `path`: the home itself
+/// (`/users/internal/<key>`) or anything below it
+/// (`/users/internal/<key>/inbox/...`). `None` elsewhere.
+pub fn user_key_of_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix(USER_HOMES_ROOT)?.strip_prefix('/')?;
+    let seg = rest.split('/').next()?;
+    is_user_key(seg).then_some(seg)
+}
+
 /// The keyed home path for `key`: `/users/internal/<key>`.
 pub fn user_home_for_key(key: &str) -> String {
     format!("{}/{}", USER_HOMES_ROOT, key)
@@ -254,6 +263,15 @@ mod tests {
             None
         );
         assert_eq!(user_key_from_home(""), None);
+        assert_eq!(
+            user_key_of_path(&format!("/users/internal/{key}")),
+            Some(key)
+        );
+        assert_eq!(
+            user_key_of_path(&format!("/users/internal/{key}/inbox/x")),
+            Some(key)
+        );
+        assert_eq!(user_key_of_path(&format!("/users/x/{key}")), None);
         // Only /users/internal/<key>, nothing deeper, nothing elsewhere.
         assert_eq!(user_key_from_home(&format!("/users/{key}")), None);
         assert_eq!(

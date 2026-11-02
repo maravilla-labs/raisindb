@@ -58,6 +58,9 @@ impl NodeRepositoryImpl {
             scope.workspace,
         );
 
+        // A deleted person never comes back through a merge or a branch copy.
+        crate::retired_keys::reject_retired_home(&self.db, t, w, src_node)?;
+
         // Same id on the target branch -> Added vs Modified.
         let old_dst = self.get_impl(t, r, b, w, &src_node.id, false).await?;
         let operation = if old_dst.is_some() {

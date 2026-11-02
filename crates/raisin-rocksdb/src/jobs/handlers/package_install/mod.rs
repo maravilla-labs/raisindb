@@ -61,11 +61,13 @@ mod nested;
 mod nested_element_install_tests;
 mod relations;
 #[cfg(test)]
+mod retired_keys_install_tests;
+#[cfg(test)]
 mod role_install_tests;
 pub(in crate::jobs::handlers) mod translation;
 mod types;
 
-pub use self::handler::PackageInstallHandler;
+pub use self::handler::{PackageInstallHandler, RetiredKeysCheck};
 pub use self::manifest::{
     AllowedNodeTypesPatch, PackageDependency, PackageManifest, PackageMigration, PackageProvides,
     WorkspacePatch,

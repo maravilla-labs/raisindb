@@ -382,6 +382,14 @@ pub trait TransactionalContext: Send + Sync {
         Ok(())
     }
 
+    /// Explicit admin override for a content import: user homes whose key is
+    /// retired (the person was deleted) may be restored. Off by default;
+    /// honoured only for a content import by a system principal. Deliberate
+    /// disaster recovery only: it brings deleted persons back.
+    fn set_retired_keys_override(&self, _allow: bool) -> Result<()> {
+        Ok(())
+    }
+
     /// Check if schema validation is enabled.
     ///
     /// Returns true (default) if schema validation is enabled,

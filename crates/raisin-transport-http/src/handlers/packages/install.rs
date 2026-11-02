@@ -56,6 +56,7 @@ pub async fn install_package(
         branch,
         &package_name,
         query.mode,
+        query.allow_retired_user_keys,
         auth_context,
     )
     .await
@@ -129,9 +130,29 @@ pub(super) async fn install_package_impl(
     branch: &str,
     package_path: &str,
     mode: InstallMode,
+    allow_retired_user_keys: bool,
     auth_context: Option<AuthContext>,
 ) -> Result<InstallResponse, ApiError> {
     let workspace = "packages";
+    // The override of the retired keys ledger is an administrator's
+    // deliberate act; package installs already require one, this says so
+    // where it matters and names the actor for the audit log.
+    let override_actor = if allow_retired_user_keys {
+        match auth_context.as_ref() {
+            Some(a) if a.is_system || a.permissions().is_some_and(|p| p.is_system_admin) => {
+                Some(a.actor_id())
+            }
+            _ => {
+                return Err(ApiError::new(
+                    axum::http::StatusCode::FORBIDDEN,
+                    "FORBIDDEN",
+                    "allow_retired_user_keys requires an administrator",
+                ))
+            }
+        }
+    } else {
+        None
+    };
 
     let node_service =
         state.node_service_for_context(tenant_id, repo, branch, workspace, auth_context);
@@ -211,6 +232,7 @@ pub(super) async fn install_package_impl(
         &node.id,
         &resource_key,
         Some(mode),
+        override_actor,
     )
     .await
     .map(|Json(resp)| resp)
@@ -376,6 +398,7 @@ async fn create_install_job(
     node_id: &str,
     resource_key: &str,
     install_mode: Option<InstallMode>,
+    retired_keys_override_actor: Option<String>,
 ) -> Result<Json<InstallResponse>, ApiError> {
     #[cfg(feature = "storage-rocksdb")]
     {
@@ -397,6 +420,16 @@ async fn create_install_job(
         metadata.insert("package_name".to_string(), serde_json::json!(package_name));
         if let Some(mode) = install_mode {
             metadata.insert("install_mode".to_string(), serde_json::json!(mode));
+        }
+        if let Some(actor) = retired_keys_override_actor {
+            metadata.insert(
+                "allow_retired_user_keys".to_string(),
+                serde_json::json!(true),
+            );
+            metadata.insert(
+                "retired_keys_override_actor".to_string(),
+                serde_json::json!(actor),
+            );
         }
 
         let job_context = raisin_storage::jobs::JobContext {

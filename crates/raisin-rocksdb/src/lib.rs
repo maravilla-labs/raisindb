@@ -70,6 +70,7 @@ pub mod one_time_token;
 mod prefix_transform;
 pub mod replication;
 pub mod repositories;
+pub mod retired_keys;
 pub mod secret_store;
 pub mod security;
 pub mod spatial;

@@ -63,9 +63,14 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // move one (see `crate::user_homes`).
     let system_import = tx.is_system_content_import()?;
     match &existing_node {
-        None => {
-            crate::user_homes::name_new_user_home(workspace, &mut normalized_node, system_import)
-        }
+        None => crate::user_homes::name_new_user_home(
+            &tx.db,
+            &tenant_id,
+            workspace,
+            &mut normalized_node,
+            system_import,
+            system_import && tx.is_retired_keys_override(),
+        )?,
         Some(prior) => {
             crate::user_homes::reject_user_home_move(
                 workspace,

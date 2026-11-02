@@ -119,6 +119,11 @@ pub struct RocksDBTransaction {
     /// `raisin_models::auth::user_key`).
     pub(super) content_import: Arc<Mutex<bool>>,
 
+    /// Explicit admin override of the retired user keys ledger for this
+    /// content import (default: false). Only honoured together with a system
+    /// content import.
+    pub(super) retired_keys_override: Arc<Mutex<bool>>,
+
     /// Owner token for CREATE path reservations held by this transaction.
     ///
     /// `add_node` reserves each created path in the shared registry on
@@ -225,6 +230,7 @@ impl RocksDBTransaction {
             validate_schema: Arc::new(Mutex::new(true)), // Default: validation enabled
             trusted_import: Arc::new(Mutex::new(false)),
             content_import: Arc::new(Mutex::new(false)),
+            retired_keys_override: Arc::new(Mutex::new(false)),
             path_reservation_owner,
             reserved_create_paths: Arc::new(Mutex::new(HashSet::new())),
             vaulted_secrets: Arc::new(Mutex::new(HashMap::new())),
@@ -495,6 +501,21 @@ impl RocksDBTransaction {
             .auth_context
             .as_ref()
             .is_some_and(|a| a.is_system))
+    }
+
+    /// Is the admin override of the retired keys ledger set?
+    pub(in crate::transaction) fn is_retired_keys_override(&self) -> bool {
+        *self
+            .retired_keys_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(super) fn set_retired_keys_override_enabled(&self, enabled: bool) {
+        *self
+            .retired_keys_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = enabled;
     }
 
     pub(super) fn set_content_import_enabled(&self, enabled: bool) {

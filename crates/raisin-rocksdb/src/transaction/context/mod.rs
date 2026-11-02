@@ -631,6 +631,11 @@ impl TransactionalContext for RocksDBTransaction {
         Ok(())
     }
 
+    fn set_retired_keys_override(&self, allow: bool) -> Result<()> {
+        self.set_retired_keys_override_enabled(allow);
+        Ok(())
+    }
+
     /// Add a relationship from source node to target node within the transaction
     ///
     /// Creates both forward (outgoing) and reverse (incoming) index entries.

@@ -50,8 +50,9 @@ pub fn create_package_install_handler(
         })
     });
 
-    let mut builder =
-        PackageInstallHandler::new(storage, job_registry).with_applied_recorder(recorder);
+    let mut builder = PackageInstallHandler::new(storage.clone(), job_registry)
+        .with_applied_recorder(recorder)
+        .with_retired_keys(retired_keys_check(&storage));
     if let Some(callback) = binary_retrieval {
         builder = builder.with_binary_callback(callback.clone());
     }
@@ -106,4 +107,12 @@ pub fn create_package_create_from_selection_handler(
         builder = builder.with_binary_retrieval_callback(callback.clone());
     }
     Arc::new(builder)
+}
+
+/// The tenant ledger check package installs consult (`crate::retired_keys`).
+fn retired_keys_check(
+    storage: &Arc<RocksDBStorage>,
+) -> crate::jobs::handlers::package_install::RetiredKeysCheck {
+    let db = storage.db().clone();
+    Arc::new(move |tenant: &str, key: &str| crate::retired_keys::is_retired(&db, tenant, key))
 }

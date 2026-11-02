@@ -209,10 +209,34 @@ The contract:
   claim is only a fallback when no user node was resolved, and only for a
   token issued for exactly this repository (a token without a `repository`
   claim never supplies a home). Refreshed tokens keep their `repository`.
-- **Open risk: retired keys.** Deleting a user leaves no tombstone of its
-  key. A fresh mint cannot collide in practice (131 random bits), but a
-  package carrying a deleted person's home can recreate it on install. Keep
-  packages with user data as private as backups.
+- **A deleted person never comes back.** Deleting a user home (node API,
+  SQL `DELETE`, `DROP USER`, admin console, erasure, a cascade, a branch
+  prune, a merge, the replication apply: every delete goes through one
+  tombstone funnel) records its key in the tenant's **retired user keys
+  ledger**: the key and the time, no email, no name, no repository. The
+  ledger is tenant storage next to the identities, not repository content,
+  so deleting, recreating or restoring a repository does not lose it.
+  - A package install (any mode) skips a home whose key is retired, with
+    everything below it and every relation on it, and reports
+    `skipped_retired_keys` (count) and `skipped_retired_key_list` (keys only)
+    in its result; `relations_skipped_retired` counts the relations.
+  - A backup carries the ledger (`retired_user_keys.jsonl`); a restore merges
+    it into the tenant ledger (union, never a replacement) and then leaves
+    out every retired home with its subtree and relations
+    (`RestoreReport::skipped_retired_keys`).
+  - Branch copies and merges refuse a retired home; a write that would keep
+    a carried key refuses a retired one; a freshly minted key is never a
+    retired one.
+  - **Override, for deliberate disaster recovery only:**
+    `POST /api/repos/{repo}/packages/{name}/install?allow_retired_user_keys=true`
+    (administrators only) or `RestoreOptions::allow_retired_user_keys`. It is
+    off by default and logged as an audit event (target `raisin::audit`) with
+    the actor and the restored keys. **GDPR:** restoring a deleted person
+    re-creates personal data that was erased; do it only when the deletion
+    itself was the mistake, and record why.
+- **Returning by email is a new person.** Someone who was deleted and signs
+  up again with the same address gets a new home with a new key; nothing
+  links the two. What the ledger refuses is bringing the OLD home back.
 - **Who can see it.** The built-in `authenticated_user` role lets every
   signed-in user read every `raisin:User` node (`display_name` field only)
   and friends read profiles, so a key is visible to other users; it is an

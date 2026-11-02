@@ -28,7 +28,8 @@ pub(super) async fn import_nodes_from_jsonl(
     tenant_id: &str,
     repo_id: &str,
     file: &Path,
-) -> Result<()> {
+    skip: &(dyn Fn(&Node) -> bool + Sync),
+) -> Result<std::collections::HashSet<String>> {
     use std::io::BufRead;
 
     let file_handle = std::fs::File::open(file)
@@ -42,6 +43,18 @@ pub(super) async fn import_nodes_from_jsonl(
             .map_err(|e| raisin_error::Error::storage(format!("Failed to parse node: {}", e)))?;
         nodes.push(node);
     }
+    // Nodes the caller refuses (homes of deleted persons and everything below
+    // them) are not written; their ids are returned so their relations can be
+    // left out too.
+    let mut skipped = std::collections::HashSet::new();
+    nodes.retain(|n| {
+        if skip(n) {
+            skipped.insert(n.id.clone());
+            false
+        } else {
+            true
+        }
+    });
     let pathless: Vec<&str> = nodes
         .iter()
         .filter(|n| n.path.is_empty())
@@ -114,7 +127,7 @@ pub(super) async fn import_nodes_from_jsonl(
     }
 
     tracing::info!("Imported {} nodes", count);
-    Ok(())
+    Ok(skipped)
 }
 
 /// Import branches from JSON file

@@ -161,7 +161,9 @@ impl NodeRepositoryImpl {
             node.id = nanoid::nanoid!();
         }
         // A user home created here is named by its minted key.
-        crate::user_homes::name_new_user_home(workspace, &mut node, false);
+        crate::user_homes::name_new_user_home(
+            &self.db, tenant_id, workspace, &mut node, false, false,
+        )?;
         let path = node.path.clone();
         let path = path.as_str();
 
