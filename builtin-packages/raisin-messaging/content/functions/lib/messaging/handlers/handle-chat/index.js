@@ -17,6 +17,18 @@
  * Trigger: process-chat fires on raisin:Message creation in outbox paths
  *          with status "pending" and supported message_type values.
  *
+ * Stable person keys: a user's home is `/users/internal/<user_key>`, where
+ * user_key is `u_` + 22 base62 characters minted by the engine (homes created
+ * before keys keep an email-slug path and have no key). Messages carry
+ * `sender_key` / `recipient_key` and conversations `participant_keys`
+ * (aligned with `participants`), always taken from the RESOLVED homes, null
+ * for a party without a key (agents, visitors, legacy homes); a key the client
+ * wrote into the outbox node is dropped. A recipient may be named by its key
+ * (`recipient_key`, or a key in `recipient_id`). The copies a PERSON reads
+ * (both conversation copies and both message copies in user homes) carry no
+ * home path: ids and keys only. Agent-side copies keep the paths the agent
+ * runtime works with.
+ *
  * Visitors (anonymous chat sessions, /visitors/<key> in raisin:access_control)
  * are a third kind of party besides users and agents. Their outbox is written
  * only by the server (the WebSocket transport, after the agent's anonymous
@@ -56,8 +68,16 @@ export async function handle_chat(input) {
 
   // 2. Extract sender/recipient hints from node
   const body = props.body ?? {};
+  // The outbox the message sits in names its sender: a sender_path written
+  // into the message must agree with it, or the message is refused (it could
+  // otherwise speak for someone else's home).
+  const outboxHome = entityPathFromOutboxPath(nodePath);
+  const claimedSender = body.sender_path || props.sender_path;
+  if (outboxHome && claimedSender && claimedSender !== outboxHome) {
+    throw new Error('Sender not found: sender_path does not match the outbox');
+  }
   const senderHint = {
-    path: body.sender_path || props.sender_path || entityPathFromOutboxPath(nodePath),
+    path: outboxHome || claimedSender,
     id: props.sender_id || body.sender_id,
     email: body.sender_email,
   };
@@ -65,6 +85,7 @@ export async function handle_chat(input) {
     path: body.recipient_path || props.recipient_path,
     id: props.recipient_id || body.recipient_id,
     email: body.recipient_email,
+    key: props.recipient_key || body.recipient_key,
   };
 
   // 3. Resolve sender: agent first (if ai workspace or agent: prefix), then user
@@ -87,6 +108,7 @@ export async function handle_chat(input) {
   const subject = props.subject || body.subject || 'Chat';
   const isIntermediate = AI_INTERMEDIATE_TYPES.has(messageType);
   const participants = [sender.id, recipient.id].sort();
+  const participantKeys = participants.map((id) => (id === sender.id ? sender.key : recipient.key) ?? null);
   const participantDetails = {
     [sender.id]: { display_name: sender.displayName },
     [recipient.id]: { display_name: recipient.displayName },
@@ -101,7 +123,10 @@ export async function handle_chat(input) {
   const recipientConvPath = `${recipientChats}/${conversationId}`;
 
   // 8. Upsert conversations
-  const convBase = { conversationId, subject, participants, participantDetails, streamChannel, agentMeta };
+  const convBase = {
+    conversationId, subject, participants, participantDetails, participantKeys, streamChannel, agentMeta,
+    keys: { [sender.id]: sender.key ?? null, [recipient.id]: recipient.key ?? null },
+  };
 
   // A conversation belongs to the two parties that started it. Before this
   // check, a second person who reused a thread id (`body.thread_id`) with the
@@ -111,10 +136,10 @@ export async function handle_chat(input) {
   // refused here for everyone, not only for visitors.
   await assertSameHuman(sender, recipient, `${(sender.isAgent ? senderChats : recipientChats)}/${conversationId}`);
 
-  await upsertConversation(sender.workspace, senderConvPath, convBase, body, sender.id, recipient.id,
+  await upsertConversation(sender.workspace, senderConvPath, forReader(convBase, sender), body, sender.id, recipient.id,
     /* incrementUnread */ false, /* updateLastMessage */ !isIntermediate);
 
-  await upsertConversation(recipient.workspace, recipientConvPath, convBase, body, sender.id, recipient.id,
+  await upsertConversation(recipient.workspace, recipientConvPath, forReader(convBase, recipient), body, sender.id, recipient.id,
     /* incrementUnread */ !isIntermediate, /* updateLastMessage */ !isIntermediate);
 
   // 9. Create message copies in both conversations
@@ -123,30 +148,31 @@ export async function handle_chat(input) {
   const messageText = body.message_text || body.content || '';
 
   const baseMessageProps = buildMessageProps(props, body, {
-    messageType, senderId: sender.id, senderPath: sender.path,
-    recipientId: recipient.id, recipientPath: recipient.path,
+    messageType, senderId: sender.id, senderPath: sender.path, senderKey: sender.key ?? null,
+    recipientId: recipient.id, recipientPath: recipient.path, recipientKey: recipient.key ?? null,
     conversationId, createdAt, messageText,
   });
 
   const senderMessagePath = `${senderConvPath}/${messageSlug}`;
 
+  const deliveredProps = {
+    ...baseMessageProps,
+    status: 'delivered',
+    delivered_at: new Date().toISOString(),
+    sender_message_path: senderMessagePath,
+  };
   await createMessageCopyIdempotent(recipient.workspace, recipientConvPath, {
     slug: messageSlug,
     name: messageSlug,
     node_type: 'raisin:Message',
-    properties: {
-      ...baseMessageProps,
-      status: 'delivered',
-      delivered_at: new Date().toISOString(),
-      sender_message_path: senderMessagePath,
-    },
+    properties: readableBy(recipient, deliveredProps),
   });
 
   await createMessageCopyIdempotent(sender.workspace, senderConvPath, {
     slug: messageSlug,
     name: messageSlug,
     node_type: 'raisin:Message',
-    properties: { ...baseMessageProps, status: 'sent' },
+    properties: readableBy(sender, { ...baseMessageProps, status: 'sent' }),
   });
 
   // 10. Create notification for human recipients (not agents, not AI
@@ -177,12 +203,64 @@ function extractAgentName(id, path) {
   return null;
 }
 
-function entityPathFromOutboxPath(nodePath) {
-  const parts = nodePath.split('/');
-  if (parts.length > 2 && (parts[1] === 'users' || parts[1] === 'agents' || parts[1] === 'visitors')) {
-    return `/${parts[1]}/${parts[2]}`;
+const ENTITY_ROOTS = new Set(['users', 'agents', 'visitors']);
+
+/**
+ * The home of the entity whose outbox holds `nodePath`: everything before the
+ * `outbox` segment. Homes may be nested (`/users/internal/<slug>`), so the
+ * home is NOT simply the first two segments.
+ *
+ *   /users/internal/alice/outbox/msg-1  -> /users/internal/alice
+ *   /agents/site/outbox/msg-1           -> /agents/site
+ *   /visitors/<key>/outbox/msg-1        -> /visitors/<key>
+ */
+export /** A user key: `u_` + 22 base62 (raisin_models::auth::user_key). */
+const USER_KEY = /^u_[0-9A-Za-z]{22}$/;
+const USER_HOMES_ROOT = '/users/internal';
+
+export function isUserKey(value) {
+  return typeof value === 'string' && USER_KEY.test(value);
+}
+
+/** The key of a keyed home (`/users/internal/u_…`), else null. */
+export function userKeyFromHome(path) {
+  if (typeof path !== 'string') return null;
+  const last = path.replace(/\/+$/, '').split('/').pop();
+  return isUserKey(last) ? last : null;
+}
+
+/** Fields that name a home path: never in a copy a person reads. */
+const PATH_FIELDS = ['sender_path', 'recipient_path', 'sender_message_path', 'participant_paths'];
+
+/**
+ * The message properties as `reader` may see them: a person's copy (a user
+ * or visitor home) carries ids and keys, no home path; an agent's copy keeps
+ * the paths the agent runtime works with.
+ */
+export function readableBy(reader, props) {
+  if (reader.isAgent) return props;
+  const out = { ...props };
+  for (const field of PATH_FIELDS) delete out[field];
+  if (out.data && typeof out.data === 'object') {
+    out.data = { ...out.data };
+    for (const field of PATH_FIELDS) delete out.data[field];
   }
-  return null;
+  return out;
+}
+
+/** The conversation context as `reader`'s copy holds it (no human home path in a person's copy). */
+function forReader(convBase, reader) {
+  if (reader.isAgent || !convBase.agentMeta?.human_sender_path) return convBase;
+  const { human_sender_path: _dropped, ...agentMeta } = convBase.agentMeta;
+  return { ...convBase, agentMeta };
+}
+
+export function entityPathFromOutboxPath(nodePath) {
+  const parts = String(nodePath || '').split('/');
+  if (parts.length < 4 || parts[0] !== '' || !ENTITY_ROOTS.has(parts[1])) return null;
+  const outbox = parts.indexOf('outbox', 2);
+  if (outbox < 3 || outbox === parts.length - 1) return null;
+  return parts.slice(0, outbox).join('/');
 }
 
 async function resolveSender(triggerWorkspace, hint) {
@@ -197,7 +275,7 @@ async function resolveSender(triggerWorkspace, hint) {
     if (agent) return agent;
   }
   // Fall back to user in raisin:access_control
-  const user = await resolveUser('raisin:access_control', hint.path, hint.id, hint.email);
+  const user = await resolveUser('raisin:access_control', hint.path, hint.id, hint.email, hint.key);
   return user;
 }
 
@@ -206,7 +284,7 @@ async function resolveRecipient(hint) {
     return resolveVisitor(hint.path, hint.id);
   }
   // Try user first
-  const user = await resolveUser('raisin:access_control', hint.path, hint.id, hint.email);
+  const user = await resolveUser('raisin:access_control', hint.path, hint.id, hint.email, hint.key);
   if (user) return user;
   // Fall back to agent
   return resolveAgent(hint.path, hint.id);
@@ -261,13 +339,31 @@ async function resolveAgent(agentPath, agentId) {
   };
 }
 
-async function resolveUser(workspace, userPath, userId, email) {
+async function resolveUser(workspace, userPath, userId, email, userKey) {
   if (isAgentId(userId)) return null;
+  if (!isUserKey(userKey)) userKey = null;
+  // A key given as the id names the keyed home.
+  if (!userKey && isUserKey(userId)) {
+    userKey = userId;
+    userId = null;
+  }
+  if (typeof userId !== 'string' || !userId) userId = null;
+  if (typeof userPath !== 'string' || !userPath) userPath = null;
+  if (typeof email !== 'string' || !email) email = null;
 
-  // Handle user_id that's actually a path
-  if (userId && typeof userId === 'string' && userId.startsWith('/users/')) {
+  // Handle user_id that's actually a path (flat or nested home)
+  if (userId && userId.startsWith('/users/')) {
     userPath = userId;
     userId = null;
+  }
+  // A path into a user's outbox names the home.
+  if (userPath) userPath = entityPathFromOutboxPath(userPath) || userPath;
+
+  // By key: the home is /users/internal/<key>.
+  if (userKey) {
+    const node = await raisin.nodes.get(workspace, `${USER_HOMES_ROOT}/${userKey}`);
+    if (node && (!node.node_type || node.node_type === 'raisin:User')) return userNodeToEntity(node, workspace);
+    return null;
   }
 
   // By user_id property
@@ -281,16 +377,21 @@ async function resolveUser(workspace, userPath, userId, email) {
     if (rows.length > 0) return userNodeToEntity(rows[0], workspace);
   }
 
-  // By path
+  // By path (only a raisin:User node is a user)
   if (userPath) {
     const node = await raisin.nodes.get(workspace, userPath);
-    if (node) return userNodeToEntity(node, workspace);
+    if (node && (!node.node_type || node.node_type === 'raisin:User')) return userNodeToEntity(node, workspace);
   }
 
-  // By node ID
-  if (userId) {
-    const node = await raisin.nodes.getById(workspace, userId);
-    if (node) return userNodeToEntity(node, workspace);
+  // By node ID (the runtime may throw on an id that is not a node id)
+  if (userId && typeof raisin.nodes.getById === 'function') {
+    let node = null;
+    try {
+      node = await raisin.nodes.getById(workspace, userId);
+    } catch (_) {
+      node = null;
+    }
+    if (node && (!node.node_type || node.node_type === 'raisin:User')) return userNodeToEntity(node, workspace);
   }
 
   // By email
@@ -314,6 +415,7 @@ function userNodeToEntity(node, workspace) {
     path: node.path,
     displayName: p.display_name || node.name || node.id,
     workspace,
+    key: userKeyFromHome(node.path),
     isAgent: false,
     properties: p,
   };
@@ -456,6 +558,10 @@ async function upsertConversation(workspace, convPath, ctx, body, senderId, reci
     recipient_display_name: recipientDetail.display_name,
     created_at: now,
   };
+  if (ctx.keys) {
+    lastMessage.sender_key = ctx.keys[senderId] ?? null;
+    lastMessage.recipient_key = ctx.keys[recipientId] ?? null;
+  }
 
   const existing = await raisin.nodes.get(workspace, convPath);
 
@@ -470,6 +576,7 @@ async function upsertConversation(workspace, convPath, ctx, body, senderId, reci
       updated_at: now,
       ...ctx.agentMeta,
     };
+    if (ctx.participantKeys) props.participant_keys = ctx.participantKeys;
     if (updateLastMessage) props.last_message = lastMessage;
 
     const parentPath = convPath.split('/').slice(0, -1).join('/');
@@ -498,6 +605,7 @@ async function upsertConversation(workspace, convPath, ctx, body, senderId, reci
     unread_count: unreadCount,
     updated_at: now,
   };
+  if (ctx.participantKeys) updates.participant_keys = ctx.participantKeys;
   if (updateLastMessage) {
     updates.subject = ctx.subject;
     updates.last_message = lastMessage;
@@ -515,7 +623,9 @@ function buildMessageProps(originalProps, body, ctx) {
   const base = { ...originalProps };
 
   // Strip fields that shouldn't propagate to inbox copies
-  for (const key of ['sender_email', 'recipient_email', 'sender_display_name', 'recipient_display_name', 'participant_paths']) {
+  // Keys are never taken from the outbox node: only from the resolved homes.
+  for (const key of ['sender_email', 'recipient_email', 'sender_display_name', 'recipient_display_name', 'participant_paths',
+    'sender_key', 'recipient_key', 'participant_keys']) {
     delete base[key];
   }
 
@@ -526,6 +636,8 @@ function buildMessageProps(originalProps, body, ctx) {
   base.sender_path = ctx.senderPath;
   base.recipient_id = ctx.recipientId;
   base.recipient_path = ctx.recipientPath;
+  base.sender_key = ctx.senderKey;
+  base.recipient_key = ctx.recipientKey;
   base.conversation_id = ctx.conversationId;
   base.created_at = ctx.createdAt;
 
@@ -534,6 +646,9 @@ function buildMessageProps(originalProps, body, ctx) {
   const merged = { ...body };
   delete merged.sender_email;
   delete merged.recipient_email;
+  delete merged.sender_key;
+  delete merged.recipient_key;
+  delete merged.participant_keys;
   if (typeof originalData === 'object' && originalData !== null) {
     Object.assign(merged, originalData);
   }
@@ -570,6 +685,8 @@ function buildAgentMetadata(sender, recipient) {
   };
   if (humanSenderId) meta.human_sender_id = humanSenderId;
   if (humanSenderPath) meta.human_sender_path = humanSenderPath;
+  const human = sender.isAgent ? recipient : sender;
+  meta.human_sender_key = human.key ?? null;
   return meta;
 }
 
@@ -577,23 +694,27 @@ function buildAgentMetadata(sender, recipient) {
 
 async function copyToSentFolder(workspace, node) {
   const nodePath = node?.path ?? '';
-  const parts = nodePath.split('/');
 
-  // Path: /{users|agents}/{name}/outbox/{slug}
-  if (parts.length < 5 || parts[3] !== 'outbox') return;
-  const entityType = parts[1];
+  // Path: <home>/outbox/{slug}, the home being /{users|agents}/{name} or a
+  // nested one such as /users/internal/{slug}. Only direct outbox children.
+  const home = entityPathFromOutboxPath(nodePath);
+  if (!home || nodePath.split('/').length !== home.split('/').length + 2) return;
+  const entityType = home.split('/')[1];
   // Visitors keep no sent folder: their home is ephemeral, and the delivered
   // copy in the conversation is the record.
   if (entityType !== 'users' && entityType !== 'agents') return;
 
-  const entityName = parts[2];
-  const messageSlug = parts[4];
+  const messageSlug = nodePath.split('/').pop();
   // The sent folder is not provisioned with the entity's home, so ensure it
   // before writing: a node created under a missing parent is stored but never
   // listed as a child of anything.
-  const sentPath = await ensureFolderExists(workspace, `/${entityType}/${entityName}`, 'sent', 'Sent');
+  const sentPath = await ensureFolderExists(workspace, home, 'sent', 'Sent');
 
   const sentProps = { ...(node.properties ?? {}) };
+  // Keys come from resolved homes only (see buildMessageProps).
+  delete sentProps.sender_key;
+  delete sentProps.recipient_key;
+  delete sentProps.participant_keys;
   sentProps.status = 'sent';
   sentProps.sent_at = new Date().toISOString();
 

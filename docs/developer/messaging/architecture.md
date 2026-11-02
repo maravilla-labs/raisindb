@@ -53,6 +53,34 @@ users/{user_id}/inbox/
 
 Conversation nodes store participants, last_message, unread_count, and updated_at to support inbox UIs.
 
+### Chat parties, keys and paths
+
+A user's home is `/users/internal/<user_key>` in `raisin:access_control`, where
+`user_key` is `u_` + 22 base62 characters minted by the engine (see
+`docs/book` "Stable user keys"). Homes created before keys keep their
+email-slug path and have no key. Homes may be nested, so the chat handler
+derives a home from an outbox path by everything before the `outbox` segment
+(`/users/internal/<key>/outbox/msg-1` gives `/users/internal/<key>`); a
+`sender_path` written into the message must agree with that outbox or the
+message is refused.
+
+The chat handler (`lib/messaging/handlers/handle-chat`) writes, next to the
+existing node ids:
+
+| Field | On | Value |
+|---|---|---|
+| `sender_key`, `recipient_key` | message copies, `last_message` | the key of the resolved home, `null` for agents, visitors and legacy homes |
+| `participant_keys` | conversations | aligned with `participants` (same order), `null` where a party has no key |
+| `human_sender_key` | agent conversations | the human party's key, or `null` |
+
+Keys are always taken from the resolved homes; a key the client wrote into
+the outbox node is dropped. A recipient can be named by its key
+(`recipient_key`, or a key in `recipient_id`). The copies a person reads
+(both conversation copies and both message copies in user or visitor homes)
+carry no home path (`sender_path`, `recipient_path`, `sender_message_path`,
+`human_sender_path` are left out); agent-side copies keep them for the agent
+runtime.
+
 ## Message Node Type
 
 Messages are represented as `raisin:Message` nodes with the following schema:
