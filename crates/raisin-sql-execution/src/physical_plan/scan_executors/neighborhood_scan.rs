@@ -30,11 +30,12 @@
 //!
 //! # Limits
 //!
-//! The search runs under [`SCAN_TIME_LIMIT`] and a relation-read ceiling of
-//! [`SCAN_COUNT_CEILING`] (or the caller's `max_nodes`, when that is larger),
-//! like every other scan. `max_nodes` above [`DEFAULT_MAX_NODES`] is honoured
-//! only for a system or system-admin caller; anyone else is held to the
-//! default. Rows are produced chunk by chunk as the search hands nodes out.
+//! The search runs under [`SCAN_TIME_LIMIT`], a fixed relation-read ceiling
+//! and a fixed ceiling on nodes visited (`MAX_VISITED`), none of which a query
+//! can change. `max_nodes`, which counts only nodes the caller may read, can be
+//! set only by a system or system-admin caller; for anyone else the argument is
+//! ignored and the budget is [`DEFAULT_MAX_NODES`]. Rows are produced chunk by
+//! chunk as the search hands nodes out.
 
 use super::helpers::{get_locales_to_use, resolve_node_for_locale};
 use super::node_to_row::node_to_row;
@@ -45,7 +46,7 @@ use crate::physical_plan::graph_access::{
 };
 use crate::physical_plan::graph_budget::GraphBudget;
 use crate::physical_plan::graph_neighborhood::{
-    NeighborhoodParams, NeighborhoodSearch, NodeGate, DEFAULT_MAX_NODES,
+    NeighborhoodParams, NeighborhoodSearch, NodeGate, DEFAULT_MAX_NODES, MAX_MAX_NODES, MAX_VISITED,
 };
 use crate::physical_plan::operators::PhysicalPlan;
 use async_stream::try_stream;
@@ -143,7 +144,9 @@ pub async fn execute_neighborhood_scan<S: Storage + 'static>(
         "IN" => Side::In,
         _ => Side::Both,
     };
-    let max_nodes = effective_max_nodes(*max_nodes, ctx.auth_context.as_ref());
+    let elevated = is_elevated(ctx.auth_context.as_ref());
+    let max_nodes = effective_max_nodes(*max_nodes, elevated);
+    let max_relations = relation_ceiling(elevated);
     let types = relation_types.clone();
     let (min_depth, max_depth) = (*min_depth, *max_depth);
     let ctx = ctx.clone();
@@ -156,7 +159,8 @@ pub async fn execute_neighborhood_scan<S: Storage + 'static>(
             min_depth,
             max_depth,
             max_nodes,
-            budget: GraphBudget::new(SCAN_TIME_LIMIT, SCAN_COUNT_CEILING.max(max_nodes)),
+            max_visited: MAX_VISITED,
+            budget: GraphBudget::new(SCAN_TIME_LIMIT, max_relations),
         };
         let revision = ctx.max_revision;
         let access = StorageAccess::new(&ctx.storage, &tenant_id, &repo_id, &branch, revision.as_ref())
@@ -209,19 +213,32 @@ pub async fn execute_neighborhood_scan<S: Storage + 'static>(
     }))
 }
 
-/// The visited-node budget a caller actually gets.
+/// A system context or a system admin. Only such a caller may name its own
+/// `max_nodes`.
+pub(crate) fn is_elevated(auth: Option<&AuthContext>) -> bool {
+    auth.is_some_and(|a| a.is_system || a.permissions().is_some_and(|p| p.is_system_admin))
+}
+
+/// The readable-node budget a caller actually gets.
 ///
-/// The planner accepts up to `MAX_MAX_NODES`, but only a system context or a
-/// system admin may go past [`DEFAULT_MAX_NODES`]; everyone else, including a
-/// query with no auth context at all, is held to the default. Holding a caller
-/// to a smaller budget never truncates: the search fails at the budget.
-pub(crate) fn effective_max_nodes(requested: usize, auth: Option<&AuthContext>) -> usize {
-    let elevated =
-        auth.is_some_and(|a| a.is_system || a.permissions().is_some_and(|p| p.is_system_admin));
+/// An ordinary caller (including a query with no auth context at all) cannot
+/// choose it: whatever `max_nodes` says, it gets [`DEFAULT_MAX_NODES`]. A
+/// budget the caller could move would let it find, by moving it, where the
+/// search fails.
+pub(crate) fn effective_max_nodes(requested: usize, elevated: bool) -> usize {
     if elevated {
         requested
     } else {
-        requested.min(DEFAULT_MAX_NODES)
+        DEFAULT_MAX_NODES
+    }
+}
+
+/// The relation-read ceiling: fixed per kind of caller, never by the query.
+pub(crate) fn relation_ceiling(elevated: bool) -> usize {
+    if elevated {
+        MAX_MAX_NODES
+    } else {
+        SCAN_COUNT_CEILING
     }
 }
 
@@ -281,7 +298,6 @@ fn insert_neighborhood_columns(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physical_plan::graph_neighborhood::MAX_MAX_NODES;
     use raisin_models::permissions::ResolvedPermissions;
 
     fn user(admin: bool) -> AuthContext {
@@ -300,16 +316,19 @@ mod tests {
     }
 
     #[test]
-    fn only_a_system_or_admin_caller_may_raise_max_nodes() {
+    fn only_a_system_or_admin_caller_may_choose_max_nodes() {
         let big = MAX_MAX_NODES;
-        assert_eq!(
-            effective_max_nodes(big, Some(&user(false))),
-            DEFAULT_MAX_NODES
-        );
-        assert_eq!(effective_max_nodes(big, None), DEFAULT_MAX_NODES);
-        assert_eq!(effective_max_nodes(big, Some(&user(true))), big);
-        assert_eq!(effective_max_nodes(big, Some(&AuthContext::system())), big);
-        // Lowering is always allowed.
-        assert_eq!(effective_max_nodes(10, Some(&user(false))), 10);
+        let plain = is_elevated(Some(&user(false)));
+        assert!(!plain);
+        assert!(!is_elevated(None));
+        assert!(is_elevated(Some(&user(true))));
+        assert!(is_elevated(Some(&AuthContext::system())));
+        // An ordinary caller can neither raise nor lower it.
+        assert_eq!(effective_max_nodes(big, plain), DEFAULT_MAX_NODES);
+        assert_eq!(effective_max_nodes(1, plain), DEFAULT_MAX_NODES);
+        assert_eq!(effective_max_nodes(big, true), big);
+        assert_eq!(effective_max_nodes(1, true), 1);
+        assert_eq!(relation_ceiling(plain), SCAN_COUNT_CEILING);
+        assert_eq!(relation_ceiling(true), MAX_MAX_NODES);
     }
 }

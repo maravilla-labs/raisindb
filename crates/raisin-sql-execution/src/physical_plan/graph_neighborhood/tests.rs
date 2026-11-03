@@ -32,6 +32,7 @@ fn params(side: Side, max_depth: u32) -> NeighborhoodParams {
         min_depth: 1,
         max_depth,
         max_nodes: DEFAULT_MAX_NODES,
+        max_visited: MAX_VISITED,
         budget: GraphBudget::standard(),
     }
 }
@@ -284,29 +285,65 @@ async fn the_deadline_fails_the_search() {
     assert_eq!(g.node_calls.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test]
-async fn the_error_is_the_same_whatever_the_hidden_part_holds() {
-    // Two graphs that differ only in how many hidden nodes hang off `h`: the
-    // caller gets one and the same refusal from both.
-    let mut small = vec![("a", "h", "k"), ("a", "v", "k")];
-    let mut big = small.clone();
-    let names: Vec<String> = (0..40).map(|i| format!("s{i}")).collect();
-    for n in &names {
-        big.push(("h", n.as_str(), "k"));
+/// a -> r1..r3 (readable); every r has `hidden` private nodes behind it, and
+/// each private node leads to one readable leaf.
+fn readable_and_hidden(hidden: usize) -> (FakeGraph, Hide) {
+    let mut edges: Vec<(String, String)> = Vec::new();
+    let mut private = HashSet::new();
+    for r in 1..=3 {
+        edges.push(("a".into(), format!("r{r}")));
+        for h in 0..hidden {
+            let hid = format!("h{r}_{h}");
+            edges.push((format!("r{r}"), hid.clone()));
+            edges.push((hid.clone(), format!("leaf{r}")));
+            private.insert(hid);
+        }
     }
-    small.push(("h", "s0", "k"));
-    let hidden: HashSet<String> = std::iter::once("h".to_string())
-        .chain(names.iter().cloned())
-        .collect();
-    let mut p = params(Side::Out, 2);
-    p.max_nodes = 3;
-    let e1 = neighborhood(&graph(&small), &Hide(hidden.clone()), &start("a"), &p)
-        .await
-        .unwrap_err();
-    let e2 = neighborhood(&graph(&big), &Hide(hidden), &start("a"), &p)
-        .await
-        .unwrap_err();
-    assert_eq!(e1.to_string(), e2.to_string());
+    let mut g = FakeGraph::new();
+    for (x, y) in &edges {
+        g.node(WS, x, "t:P").node(WS, y, "t:P");
+    }
+    for (x, y) in &edges {
+        g.rel(WS, x, y, "k");
+    }
+    (g, Hide(private))
+}
+
+#[tokio::test]
+async fn the_budget_trip_point_does_not_depend_on_hidden_nodes() {
+    // Readable: a, r1..r3, leaf1..leaf3 = 7, whatever hides behind them.
+    for hidden in [1, 5, 40] {
+        let (g, gate) = readable_and_hidden(hidden);
+        let mut p = params(Side::Out, 3);
+        p.max_nodes = 7;
+        let hits = neighborhood(&g, &gate, &start("a"), &p).await.unwrap();
+        assert_eq!(hits.len(), 6, "hidden = {hidden}");
+        p.max_nodes = 6;
+        let err = neighborhood(&g, &gate, &start("a"), &p).await.unwrap_err();
+        assert_generic(&err, TOO_LARGE);
+    }
+}
+
+#[tokio::test]
+async fn hidden_nodes_are_charged_to_the_fixed_ceiling_with_the_same_error() {
+    let (g, gate) = readable_and_hidden(40);
+    let mut p = params(Side::Out, 3);
+    // 7 readable + 120 hidden = 127 visited.
+    p.max_visited = 127;
+    assert_eq!(
+        neighborhood(&g, &gate, &start("a"), &p)
+            .await
+            .unwrap()
+            .len(),
+        6
+    );
+    p.max_visited = 126;
+    let err = neighborhood(&g, &gate, &start("a"), &p).await.unwrap_err();
+    assert_generic(&err, TOO_LARGE);
+    let mut q = params(Side::Out, 3);
+    q.max_nodes = 6;
+    let caller = neighborhood(&g, &gate, &start("a"), &q).await.unwrap_err();
+    assert_eq!(err.to_string(), caller.to_string(), "one text for both");
 }
 
 #[tokio::test]
@@ -394,7 +431,7 @@ impl NodeGate for Counting {
 }
 
 #[tokio::test]
-async fn results_come_out_in_chunks_and_near_levels_are_not_checked() {
+async fn results_come_out_in_chunks_and_every_node_is_checked_once_when_reached() {
     // a -> 600 spokes -> one tail each.
     let mut g = FakeGraph::new();
     g.node(WS, "a", "t:P");
@@ -414,9 +451,8 @@ async fn results_come_out_in_chunks_and_near_levels_are_not_checked() {
         search.next_chunk().await.unwrap().is_none(),
         "nothing at depth 3"
     );
-    // Only the start: depth 1 is neither reported nor next to a reported level.
-    // Depth 2 is checked (it feeds depth 3's via_count).
-    assert_eq!(gate.0.load(Ordering::SeqCst), 1 + 600);
+    // The start, then every spoke and every tail once when reached.
+    assert_eq!(gate.0.load(Ordering::SeqCst), 1 + 600 + 600);
 
     p.min_depth = 2;
     let gate = Open;
@@ -556,6 +592,7 @@ async fn check_random(seed: u64, n: usize, edge_count: usize, undirected: bool, 
                         min_depth,
                         max_depth,
                         max_nodes: DEFAULT_MAX_NODES,
+                        max_visited: MAX_VISITED,
                         budget: GraphBudget::standard(),
                     };
                     let (hits, hide) = if who == 0 {

@@ -37,7 +37,7 @@ use crate::physical_plan::graph_access::Side;
 use crate::physical_plan::graph_access::{RelationAccess, ScannedRelation, StorageAccess};
 use crate::physical_plan::graph_budget::GraphBudget;
 use crate::physical_plan::graph_neighborhood::{
-    neighborhood, NeighborhoodParams, NodeGate, DEFAULT_MAX_NODES, TOO_LARGE, TOO_SLOW,
+    neighborhood, NeighborhoodParams, NodeGate, DEFAULT_MAX_NODES, MAX_VISITED, TOO_LARGE, TOO_SLOW,
 };
 use crate::physical_plan::pgq::types::VariableBinding;
 use raisin_models::nodes::RelationRef as Ref;
@@ -336,6 +336,7 @@ async fn variable_length_and_neighborhood_in_a_real_store() {
             min_depth: 1,
             max_depth: 3,
             max_nodes: DEFAULT_MAX_NODES,
+            max_visited: MAX_VISITED,
             budget: GraphBudget::standard(),
         },
     )
@@ -376,6 +377,7 @@ async fn neighborhood_limits_hold_in_a_real_store() {
         min_depth: 1,
         max_depth: 3,
         max_nodes: DEFAULT_MAX_NODES,
+        max_visited: MAX_VISITED,
         budget,
     };
 
@@ -579,6 +581,7 @@ async fn bench_case(nodes: usize, relations: usize) {
             min_depth: 2,
             max_depth: 2,
             max_nodes: DEFAULT_MAX_NODES,
+            max_visited: MAX_VISITED,
             budget: GraphBudget::standard(),
         },
     )

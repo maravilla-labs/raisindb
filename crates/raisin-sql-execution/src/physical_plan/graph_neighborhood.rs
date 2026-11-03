@@ -25,23 +25,27 @@
 //!
 //! # Limits fail, they do not truncate
 //!
-//! Three limits stop the search, and each one FAILS the query rather than
-//! cutting the result short (a neighbourhood cut short is indistinguishable
-//! from a complete one once it reaches the client, which is the failure shape
-//! the path cap in `pgq::matching::traversal` already refuses):
+//! Every limit FAILS the query rather than cutting the result short (a
+//! neighbourhood cut short is indistinguishable from a complete one once it
+//! reaches the client, which is the failure shape the path cap in
+//! `pgq::matching::traversal` already refuses). There are two kinds:
 //!
-//! * `max_nodes` visited nodes, the start nodes included;
-//! * a ceiling on relations READ from the per-node indexes (every relation a
-//!   seek returns counts, followed or not), carried by a [`GraphBudget`];
-//! * the budget's wall-clock deadline, checked after every seek and every
-//!   visibility check.
+//! * the CALLER's budget, `max_nodes`: it counts only nodes the caller may
+//!   read (the start nodes included). Nodes the caller cannot read are walked
+//!   through but never charged to it, so moving `max_nodes` until the search
+//!   fails measures readable nodes only, which the caller could count anyway;
+//! * FIXED server ceilings no query can change: every node visited, readable or
+//!   not ([`NeighborhoodParams::max_visited`]), every relation READ from the
+//!   per-node indexes and a wall-clock deadline (both in the [`GraphBudget`],
+//!   checked after every seek and every visibility check).
 //!
-//! The error says nothing about how far the search got: no counts, no node
-//! ids. Those numbers include nodes the caller may not read, so printing them
-//! would let a caller measure what row-level security hides. They are logged
-//! at debug level on the server instead.
+//! All of them fail with the same few words and no numbers: no counts, no node
+//! ids. The counts are logged at debug level on the server instead.
 //!
 //! # Visibility
+//!
+//! Every node the search reaches is checked once, when it is first reached, so
+//! the search knows what it may charge to the caller.
 //!
 //! * A START node the caller may not read is dropped before anything is read
 //!   from it. If no start is left the result is empty, exactly as for a start
@@ -62,7 +66,9 @@
 //!
 //! [`NeighborhoodSearch`] hands the result out in chunks of at most
 //! [`CHUNK`] nodes, level by level, so the executor turns each chunk into rows
-//! before the next one is loaded. Only node KEYS are held for a whole level.
+//! before the next one is loaded. Only node KEYS (and whether each is
+//! readable) are held for a whole level; a reported node is loaded again, a
+//! chunk at a time, when it is handed out.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -80,9 +86,13 @@ pub const MAX_DEPTH: u32 = 16;
 /// Default visited-node budget, and the most an ordinary caller gets.
 pub const DEFAULT_MAX_NODES: usize = 200_000;
 
-/// Largest budget a query may name. Only a system or system-admin caller is
-/// given more than [`DEFAULT_MAX_NODES`]; see `neighborhood_scan`.
+/// Largest budget a query may name. Only a system or system-admin caller may
+/// name one at all; everyone else gets [`DEFAULT_MAX_NODES`]. See
+/// `neighborhood_scan`.
 pub const MAX_MAX_NODES: usize = 1_000_000;
+
+/// Fixed ceiling on nodes visited, readable or not. Not caller tunable.
+pub const MAX_VISITED: usize = 1_000_000;
 
 /// How many nodes are checked and handed out at a time.
 pub const CHUNK: usize = 256;
@@ -106,18 +116,19 @@ pub struct NeighborhoodParams {
     pub min_depth: u32,
     /// Deepest hop to follow.
     pub max_depth: u32,
-    /// Visited-node budget, the start nodes included.
+    /// The caller's budget: READABLE nodes visited, the start nodes included.
     pub max_nodes: usize,
-    /// Deadline and relation ceiling.
+    /// Fixed ceiling on every node visited, readable or not.
+    pub max_visited: usize,
+    /// Deadline and relation ceiling (fixed).
     pub budget: GraphBudget,
 }
 
 /// Decides whether the caller may read a node.
 ///
-/// It is asked for every start node (`depth` 0), for every node at or beyond
-/// `min_depth` (to report it) and for the level just before `min_depth` (so
-/// `via_count` counts only readable nodes). Nodes nearer than that are walked
-/// through without being asked about.
+/// It is asked about every node the search reaches, once when it is reached
+/// (start nodes at `depth` 0), and again for a reported node when it is handed
+/// out, to fetch the item.
 pub trait NodeGate: Send + Sync {
     /// What the gate hands back for a readable node (the loaded node, say).
     type Item: Send;
@@ -223,15 +234,16 @@ pub struct NeighborhoodSearch<'a, A: RelationAccess, G: NodeGate> {
     gate: &'a G,
     params: &'a NeighborhoodParams,
     budget: GraphBudget,
+    /// Every node reached, readable or not.
     visited: HashSet<NodeKey>,
-    /// The level being handed out, `(node, via_count)` sorted by node.
-    level: Vec<(NodeKey, u64)>,
+    /// How many of `visited` the caller may read: what `max_nodes` limits.
+    readable_visited: usize,
+    /// The level being handed out, `(node, via_count, readable)` sorted by node.
+    level: Vec<(NodeKey, u64, bool)>,
     /// How much of `level` has been handed out.
     cursor: usize,
     /// Depth of `level`.
     depth: u32,
-    /// Readable nodes of `level`, tracked where the next level needs them.
-    readable: HashSet<NodeKey>,
     done: bool,
 }
 
@@ -254,12 +266,12 @@ impl<'a, A: RelationAccess, G: NodeGate> NeighborhoodSearch<'a, A, G> {
                 .check_time()
                 .map_err(|why| refuse(why, seen.len(), &budget))?;
             if gate.report(&start.0, &start.1, 0).await?.is_some() {
-                level.push((start.clone(), 0));
+                level.push((start.clone(), 0, true));
             }
         }
         level.sort();
-        let visited: HashSet<NodeKey> = level.iter().map(|(k, _)| k.clone()).collect();
-        if visited.len() > params.max_nodes {
+        let visited: HashSet<NodeKey> = level.iter().map(|(k, _, _)| k.clone()).collect();
+        if visited.len() > params.max_nodes || visited.len() > params.max_visited {
             return Err(refuse(Exhausted::Nodes, visited.len(), &budget));
         }
         Ok(Self {
@@ -267,7 +279,7 @@ impl<'a, A: RelationAccess, G: NodeGate> NeighborhoodSearch<'a, A, G> {
             gate,
             params,
             budget,
-            readable: visited.clone(),
+            readable_visited: visited.len(),
             visited,
             cursor: level.len(),
             level,
@@ -281,7 +293,7 @@ impl<'a, A: RelationAccess, G: NodeGate> NeighborhoodSearch<'a, A, G> {
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<Hit<G::Item>>>> {
         loop {
             if self.cursor < self.level.len() {
-                let hits = self.check_chunk().await?;
+                let hits = self.report_chunk().await?;
                 if !hits.is_empty() {
                     return Ok(Some(hits));
                 }
@@ -294,41 +306,36 @@ impl<'a, A: RelationAccess, G: NodeGate> NeighborhoodSearch<'a, A, G> {
         }
     }
 
-    /// Ask the gate about the next [`CHUNK`] nodes of the current level.
-    async fn check_chunk(&mut self) -> Result<Vec<Hit<G::Item>>> {
-        let p = self.params;
-        let depth = self.depth;
-        let report = depth >= p.min_depth;
-        // The next level is reported: its via_count needs to know which nodes
-        // of this one are readable.
-        let feeds_report = depth < p.max_depth && depth + 1 >= p.min_depth;
-        if !report && !feeds_report {
-            // Walked through, never asked about.
+    /// Load the next [`CHUNK`] readable nodes of the current level.
+    async fn report_chunk(&mut self) -> Result<Vec<Hit<G::Item>>> {
+        if self.depth < self.params.min_depth {
+            // Walked through, never reported.
             self.cursor = self.level.len();
             return Ok(Vec::new());
         }
+        let depth = self.depth;
         let end = (self.cursor + CHUNK).min(self.level.len());
         let mut hits = Vec::new();
         for i in self.cursor..end {
+            let (key, via_count, readable) = &self.level[i];
+            if !readable {
+                continue;
+            }
             self.budget
                 .check_time()
                 .map_err(|why| refuse(why, self.visited.len(), &self.budget))?;
-            let (key, via_count) = &self.level[i];
+            // Readable when it was reached; a node that has gone since is
+            // simply not reported.
             let Some(item) = self.gate.report(&key.0, &key.1, depth).await? else {
                 continue;
             };
-            if feeds_report {
-                self.readable.insert(key.clone());
-            }
-            if report {
-                hits.push(Hit {
-                    workspace: key.0.clone(),
-                    id: key.1.clone(),
-                    depth,
-                    via_count: *via_count,
-                    item,
-                });
-            }
+            hits.push(Hit {
+                workspace: key.0.clone(),
+                id: key.1.clone(),
+                depth,
+                via_count: *via_count,
+                item,
+            });
         }
         self.cursor = end;
         Ok(hits)
@@ -340,56 +347,67 @@ impl<'a, A: RelationAccess, G: NodeGate> NeighborhoodSearch<'a, A, G> {
         if self.depth >= p.max_depth || self.level.is_empty() {
             return Ok(false);
         }
-        let frontier: Vec<NodeKey> = std::mem::take(&mut self.level)
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect();
-        let readable = std::mem::take(&mut self.readable);
+        let frontier = std::mem::take(&mut self.level);
+        let next_depth = self.depth + 1;
 
         // node -> (distinct readable frontier nodes reaching it, index of the
-        // last one counted). Frontier nodes are processed one at a time, so
-        // comparing against the last index is enough to count each of them once
-        // even when two relations (or both directions) join the same pair.
-        let mut reached: HashMap<NodeKey, (u64, usize)> = HashMap::new();
-        for (idx, node) in frontier.iter().enumerate() {
+        // last one counted, readable). Frontier nodes are processed one at a
+        // time, so comparing against the last index is enough to count each of
+        // them once even when two relations (or both directions) join the same
+        // pair.
+        let mut reached: HashMap<NodeKey, (u64, usize, bool)> = HashMap::new();
+        for (idx, (node, _, node_readable)) in frontier.iter().enumerate() {
             let next = match step(self.access, node, p.side, &p.types, &mut self.budget).await {
                 Ok(next) => next,
                 Err(StepError::Failed(e)) => return Err(e),
                 Err(StepError::Stopped(why)) => {
-                    return Err(refuse(
-                        why,
-                        self.visited.len() + reached.len(),
-                        &self.budget,
-                    ))
+                    return Err(refuse(why, self.visited.len(), &self.budget))
                 }
             };
-            let counts = readable.contains(node);
             for next in next {
                 if self.visited.contains(&next) {
                     continue;
                 }
-                let entry = reached.entry(next).or_insert((0, usize::MAX));
-                if counts && entry.1 != idx {
-                    entry.0 += 1;
-                    entry.1 = idx;
+                if !reached.contains_key(&next) {
+                    // First time reached: decide once whether the caller may
+                    // read it, which decides what it is charged to.
+                    self.budget
+                        .check_time()
+                        .map_err(|why| refuse(why, self.visited.len(), &self.budget))?;
+                    let readable = self
+                        .gate
+                        .report(&next.0, &next.1, next_depth)
+                        .await?
+                        .is_some();
+                    if readable {
+                        self.readable_visited += 1;
+                        if self.readable_visited > p.max_nodes {
+                            return Err(refuse(Exhausted::Nodes, self.visited.len(), &self.budget));
+                        }
+                    }
+                    if self.visited.len() + reached.len() + 1 > p.max_visited {
+                        return Err(refuse(Exhausted::Nodes, self.visited.len(), &self.budget));
+                    }
+                    reached.insert(next.clone(), (0, usize::MAX, readable));
                 }
-            }
-            if self.visited.len() + reached.len() > p.max_nodes {
-                return Err(refuse(
-                    Exhausted::Nodes,
-                    self.visited.len() + reached.len(),
-                    &self.budget,
-                ));
+                if let Some(entry) = reached.get_mut(&next) {
+                    if *node_readable && entry.1 != idx {
+                        entry.0 += 1;
+                        entry.1 = idx;
+                    }
+                }
             }
         }
 
-        let mut level: Vec<(NodeKey, u64)> =
-            reached.into_iter().map(|(k, (n, _))| (k, n)).collect();
+        let mut level: Vec<(NodeKey, u64, bool)> = reached
+            .into_iter()
+            .map(|(k, (n, _, readable))| (k, n, readable))
+            .collect();
         level.sort();
-        self.visited.extend(level.iter().map(|(k, _)| k.clone()));
+        self.visited.extend(level.iter().map(|(k, _, _)| k.clone()));
         self.level = level;
         self.cursor = 0;
-        self.depth += 1;
+        self.depth = next_depth;
         Ok(!self.level.is_empty())
     }
 }

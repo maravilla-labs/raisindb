@@ -710,6 +710,29 @@ async fn a_graph_table_pin_on_a_hidden_node_answers_like_a_missing_one() {
     }
 }
 
+/// An ordinary caller cannot choose `max_nodes`: neither a smaller nor a
+/// larger value changes what it gets.
+#[tokio::test]
+async fn max_nodes_is_ignored_for_an_ordinary_caller() {
+    let (storage, _tmp) = storage().await;
+    social(&storage).await;
+    let bob = engine(&storage, Some(owner_scoped_user("bob")));
+    let q =
+        |n: &str| format!("SELECT id FROM NEIGHBORS('me', 'OUT', depth => 3, types => 'KNOWS'{n})");
+    let plain = ok(&bob, &q("")).await.len();
+    assert_eq!(plain, 6);
+    for n in [
+        ", max_nodes => 1",
+        ", max_nodes => 3",
+        ", max_nodes => 1000000",
+    ] {
+        assert_eq!(ok(&bob, &q(n)).await.len(), plain, "{n}");
+    }
+    // The system caller can lower it, and is refused past it.
+    let system = engine(&storage, None);
+    assert!(run(&system, &q(", max_nodes => 3")).await.is_err());
+}
+
 // ---------------------------------------------------------------------------
 // Against a brute-force oracle
 // ---------------------------------------------------------------------------
