@@ -324,6 +324,33 @@ async fn the_original_form_is_unchanged() {
     );
 }
 
+/// The one-hop form falls back to the global index only for a start that is NOT
+/// in the query's workspace; a node that is here and has no relations is empty.
+#[tokio::test]
+async fn the_one_hop_form_still_finds_a_node_in_another_workspace() {
+    let (storage, _tmp) = storage().await;
+    social(&storage).await;
+    create(&storage, "loner", "bob").await;
+    let engine = engine(&storage, None);
+
+    for start in ["me", "social:/me"] {
+        let rows = ok(
+            &engine,
+            &format!("SELECT id FROM NEIGHBORS('{start}', 'OUT', 'KNOWS')"),
+        )
+        .await;
+        assert_eq!(rows.len(), 3, "{start}");
+    }
+    let none = ok(&engine, "SELECT id FROM NEIGHBORS('loner', 'OUT', 'KNOWS')").await;
+    assert!(none.is_empty());
+    let none = ok(
+        &engine,
+        "SELECT id FROM NEIGHBORS('social:/loner', 'BOTH', NULL)",
+    )
+    .await;
+    assert!(none.is_empty());
+}
+
 #[tokio::test]
 async fn the_result_composes_with_ordinary_sql() {
     let (storage, _tmp) = storage().await;

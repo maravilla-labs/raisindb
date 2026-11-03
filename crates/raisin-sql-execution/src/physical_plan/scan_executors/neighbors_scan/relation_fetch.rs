@@ -10,7 +10,39 @@
 
 use raisin_error::Error;
 use raisin_hlc::HLC;
-use raisin_storage::{RelationRepository, Storage};
+use raisin_storage::{NodeRepository, RelationRepository, Storage, StorageScope};
+
+/// Whether the node exists in `workspace` at the query's revision.
+///
+/// The global-index fallback below exists for a start id that lives in a
+/// DIFFERENT workspace than the one the query defaulted to. When the node is
+/// right here, an empty answer is the truth (it has no relations) and scanning
+/// every relation of the repository to rediscover that costs O(all relations)
+/// for every connection-less node.
+async fn start_exists_here<S: Storage>(
+    storage: &std::sync::Arc<S>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    ids: [&str; 2],
+    max_revision: Option<&HLC>,
+) -> bool {
+    for id in ids {
+        if let Ok(Some(_)) = storage
+            .nodes()
+            .get(
+                StorageScope::new(tenant_id, repo_id, branch, workspace),
+                id,
+                max_revision,
+            )
+            .await
+        {
+            return true;
+        }
+    }
+    false
+}
 
 /// Fetch outgoing relations for a source node, with fallback to global index.
 pub(super) async fn fetch_outgoing_relations<S: Storage>(
@@ -55,8 +87,19 @@ pub(super) async fn fetch_outgoing_relations<S: Storage>(
         result = fetch(source_node_id).await?;
     }
 
-    // Fallback: use global index
-    if result.is_empty() {
+    // Fallback: use global index, unless the node is here and simply has none.
+    if result.is_empty()
+        && !start_exists_here(
+            storage,
+            tenant_id,
+            repo_id,
+            branch,
+            source_workspace,
+            [effective_source_id, source_node_id],
+            max_revision_opt,
+        )
+        .await
+    {
         if let Ok(global_rels) = storage
             .relations()
             .scan_relations_global(
@@ -130,8 +173,19 @@ pub(super) async fn fetch_incoming_relations<S: Storage>(
         result = fetch(source_node_id).await?;
     }
 
-    // Fallback: use global index
-    if result.is_empty() {
+    // Fallback: use global index, unless the node is here and simply has none.
+    if result.is_empty()
+        && !start_exists_here(
+            storage,
+            tenant_id,
+            repo_id,
+            branch,
+            source_workspace,
+            [effective_source_id, source_node_id],
+            max_revision_opt,
+        )
+        .await
+    {
         if let Ok(global_rels) = storage
             .relations()
             .scan_relations_global(
