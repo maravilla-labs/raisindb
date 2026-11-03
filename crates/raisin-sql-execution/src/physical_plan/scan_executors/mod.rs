@@ -67,11 +67,11 @@ pub use vector_scan::execute_vector_scan;
 
 /// Maximum time allowed for a scan operation before stopping.
 /// Queries will return whatever results were found within this time.
-const SCAN_TIME_LIMIT: Duration = Duration::from_secs(3);
+pub(crate) const SCAN_TIME_LIMIT: Duration = Duration::from_secs(3);
 
 /// Maximum number of nodes to check during a scan.
 /// Acts as a hard ceiling to prevent CPU-intensive runaway scans.
-const SCAN_COUNT_CEILING: usize = 200_000;
+pub(crate) const SCAN_COUNT_CEILING: usize = 200_000;
 
 /// How often to check elapsed time during scanning.
 /// We only check every N items to minimize Instant::now() syscall overhead.
