@@ -138,8 +138,16 @@ pub(super) fn vector_function_keywords() -> Vec<KeywordInfo> {
             keyword: "NEIGHBORS".into(),
             category: KeywordCategory::TableFunction,
             description: "Graph traversal to find connected nodes.".into(),
-            syntax: Some("NEIGHBORS(node_id, direction, depth)".into()),
-            example: Some("SELECT * FROM NEIGHBORS('node-123', 'outbound', 2)".into()),
+            syntax: Some(
+                "NEIGHBORS(node_id, 'OUT'|'IN'|'BOTH' [, relation_type] [, depth => n] \
+                 [, min_depth => m] [, types => 'A,B'] [, max_nodes => k])"
+                    .into(),
+            ),
+            example: Some(
+                "SELECT id, depth, via_count FROM NEIGHBORS('node-123', 'OUT', depth => 2, \
+                 min_depth => 2, types => 'KNOWS')"
+                    .into(),
+            ),
         },
         KeywordInfo {
             keyword: "CYPHER".into(),

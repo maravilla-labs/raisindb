@@ -21,7 +21,9 @@ use raisin_storage::Storage;
 use super::matches_label;
 use super::pushdown::resolve_seek;
 use super::seek::{NodeSeek, SeekHints};
-use super::selectors::{apply_selector, selector_over_bound_endpoints, PathSemantics};
+use super::selectors::{
+    apply_selector, selector_over_bound_endpoints, PathRestrictor, PathSelector, PathSemantics,
+};
 use super::traversal::{build_adjacency, enumerate_paths, TraversalParams, MAX_PATHS};
 use crate::physical_plan::executor::ExecutionError;
 use crate::physical_plan::graph_access::{
@@ -163,6 +165,33 @@ pub(crate) async fn execute_variable_length_with<A: RelationAccess>(
     }
     let Some(source_var) = source_var else {
         return Ok(vec![]);
+    };
+
+    // A shortest-path selector between two pinned nodes is answered by the
+    // shared BFS instead of by enumerating every path: bind both ends up front
+    // and the loop below takes `selector_over_bound_endpoints`.
+    //
+    // Only when that fast path will actually apply (default ACYCLIC restrictor,
+    // at most one minimum hop): otherwise each pair would fall back to
+    // enumerating the same paths again and the result would repeat.
+    let fast_path_applies =
+        semantics.restrictor == PathRestrictor::Acyclic && params.min_depth <= 1;
+    let bindings = match (&seeded_starts, semantics.selector) {
+        (Some(starts), Some(PathSelector::AnyShortest | PathSelector::AllShortest))
+            if fast_path_applies =>
+        {
+            match pinned_targets(access, hints, target_pattern).await? {
+                Some(targets) => bind_endpoint_pairs(
+                    source_var,
+                    source_pattern,
+                    target_pattern,
+                    starts,
+                    &targets,
+                ),
+                None => bindings,
+            }
+        }
+        _ => bindings,
     };
 
     let mut budget = MAX_PATHS;
@@ -412,6 +441,66 @@ async fn seeded_graph<A: RelationAccess>(
         .collect();
     starts.sort();
     Ok(Some(SeededGraph { adjacency, starts }))
+}
+
+/// The nodes a pinned target variable names, when it is pinned and resolvable.
+async fn pinned_targets<A: RelationAccess>(
+    access: &A,
+    hints: &SeekHints,
+    target_pattern: &NodePattern,
+) -> Result<Option<Vec<SeekNode>>> {
+    let Some(seek) = hints.seek_for(target_pattern.variable.as_ref()) else {
+        return Ok(None);
+    };
+    Ok(resolve_seek(access, seek).await?.map(|nodes| {
+        nodes
+            .into_iter()
+            .filter(|n| matches_label(&target_pattern.labels, &n.node_type))
+            .collect()
+    }))
+}
+
+/// One binding per (start, target) pair that can be asked about directly.
+///
+/// A start that is its own target is left out: a zero-length "shortest path" is
+/// not what the enumeration returns for it, and the fast path must not answer a
+/// question differently from the route it replaces.
+fn bind_endpoint_pairs(
+    source_var: &str,
+    source_pattern: &NodePattern,
+    target_pattern: &NodePattern,
+    starts: &[(GraphNodeId, String)],
+    targets: &[SeekNode],
+) -> Vec<VariableBinding> {
+    let Some(target_var) = target_pattern.variable.as_ref() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ((ws, id), node_type) in starts {
+        if !matches_label(&source_pattern.labels, node_type) {
+            continue;
+        }
+        for target in targets {
+            if &target.workspace == ws && &target.id == id {
+                continue;
+            }
+            let mut binding = VariableBinding::new();
+            binding.bind_node(
+                source_var.to_string(),
+                NodeInfo::new(id.clone(), ws.clone(), node_type.clone()),
+            );
+            binding.bind_node(
+                target_var.clone(),
+                NodeInfo::new(
+                    target.id.clone(),
+                    target.workspace.clone(),
+                    target.node_type.clone(),
+                ),
+            );
+            out.push(binding);
+        }
+    }
+    out
 }
 
 /// Enumerate paths from the pinned start nodes that match the source labels.

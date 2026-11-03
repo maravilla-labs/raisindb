@@ -410,3 +410,97 @@ async fn a_pinned_query_answers_where_the_unpinned_one_hits_the_path_cap() {
     let ok = var_rows(&g, &p, &p.hints).await.unwrap();
     assert_eq!(ok.len(), 3);
 }
+
+/// Rows of a variable-length run as a sorted Vec, so multiplicity counts.
+async fn var_list(
+    g: &FakeGraph,
+    p: &Parsed,
+    hints: &SeekHints,
+) -> Result<Vec<(String, String, usize)>, String> {
+    var_rows_multi(g, p, hints).await
+}
+
+async fn var_rows_multi(
+    g: &FakeGraph,
+    p: &Parsed,
+    hints: &SeekHints,
+) -> Result<Vec<(String, String, usize)>, String> {
+    let bindings = execute_variable_length_with(
+        g,
+        &p.source,
+        &p.rel,
+        &p.target,
+        &p.semantics,
+        vec![VariableBinding::new()],
+        hints,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let mut rows: Vec<_> = bindings
+        .iter()
+        .map(|b| {
+            (
+                id_of(b, "a"),
+                id_of(b, "b"),
+                b.get_path("r").map(|x| x.length()).unwrap_or(usize::MAX),
+            )
+        })
+        .collect();
+    rows.sort();
+    Ok(rows)
+}
+
+#[tokio::test]
+async fn shortest_between_two_pinned_nodes_matches_the_global_route() {
+    let patterns = [
+        "ANY SHORTEST p = (a)-[r:k]->{1,4}(b)",
+        "ALL SHORTEST p = (a)-[r:k|f]->{1,3}(b)",
+        "ANY SHORTEST p = (a)<-[r:k]-{1,3}(b)",
+        "ALL SHORTEST p = (a:P)-[r]->{1,3}(b:Q)",
+    ];
+    for (seed, n, e) in [(31, 8, 14), (32, 25, 60), (33, 40, 120)] {
+        let g = random_graph(seed, n, e);
+        for pat in patterns {
+            for pick in 0..5u64 {
+                let ida = format!("n{:03}", (pick * 3 + seed) % n as u64);
+                let idb = format!("n{:03}", (pick * 7 + seed + 1) % n as u64);
+                let p = parse(pat, &format!("a.id = '{ida}' AND b.id = '{idb}'"));
+                let keep = |r: Result<Vec<(String, String, usize)>, String>| {
+                    r.map(|v| {
+                        v.into_iter()
+                            .filter(|x| x.0 == ida && x.1 == idb && ida != idb)
+                            .collect::<Vec<_>>()
+                    })
+                };
+                let global = var_list(&g, &p, &SeekHints::none()).await;
+                let seeked = var_list(&g, &p, &p.hints).await;
+                assert_eq!(keep(seeked), keep(global), "seed {seed} {pat} {ida}->{idb}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn shortest_between_two_pinned_nodes_does_not_enumerate_paths() {
+    // A complete graph on 30 nodes: roughly 30^4 paths of length <= 4 from any
+    // node, far past the 10,000 path cap. The shortest path is one hop.
+    let mut g = FakeGraph::new();
+    for i in 0..30 {
+        g.node(WS, &format!("c{i}"), "t:P");
+    }
+    for i in 0..30 {
+        for j in 0..30 {
+            if i != j {
+                g.rel(WS, &format!("c{i}"), &format!("c{j}"), "k");
+            }
+        }
+    }
+    let p = parse(
+        "ANY SHORTEST p = (a)-[r:k]->{1,4}(b)",
+        "a.id = 'c0' AND b.id = 'c17'",
+    );
+    let err = var_list(&g, &p, &SeekHints::none()).await.unwrap_err();
+    assert!(err.contains("path cap"), "{err}");
+    let rows = var_list(&g, &p, &p.hints).await.unwrap();
+    assert_eq!(rows, vec![("c0".into(), "c17".into(), 1)]);
+}
