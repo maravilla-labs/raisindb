@@ -317,7 +317,30 @@ against a source that resolved to nothing — returning zero rows, which reads a
 "this node has no relations" rather than as an error. On an older server, pass a
 bare node id.
 
-Walking more than one hop? Address each next node by its **`id`**, not its
+Walking more than one hop? Use the **set form** instead of chaining calls: any
+named argument returns each node within `depth` hops once, with its shortest
+`depth` and `via_count` (distinct nodes one level closer that reach it, which is
+the mutual-connection count at depth 2):
+
+```sql
+-- friends of friends, with how many friends they share with me
+SELECT id, via_count
+FROM NEIGHBORS('social:/people/ann', 'OUT', depth => 2, min_depth => 2, types => 'KNOWS')
+ORDER BY via_count DESC
+
+-- is bob within three hops?
+SELECT depth FROM NEIGHBORS('social:/people/ann', 'OUT', depth => 3, types => 'KNOWS')
+WHERE id = '<bob node id>'
+```
+
+`depth` is 1 to 16, `types` is `'A'` or `'A,B'`, `min_depth` hides nearer nodes
+(they are still walked through), and `max_nodes` (default 200000) is a budget that
+**fails with an error** rather than returning a partial neighbourhood. In
+`GRAPH_TABLE`, a `WHERE` that pins an endpoint with `a.id = '...'` (top-level
+`AND`, text literal) reads that node's own relations instead of scanning the
+repository. See the book chapter "Graph Queries".
+
+Chaining one-hop calls by hand? Address each next node by its **`id`**, not its
 path: a neighbour row does not say which workspace it came from, and a bare path
 resolves in the default workspace only.
 
