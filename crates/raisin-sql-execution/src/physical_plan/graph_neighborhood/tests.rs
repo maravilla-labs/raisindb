@@ -276,6 +276,7 @@ impl Lcg {
 
 /// Reference implementation written for obviousness, not speed: explicit
 /// distances by repeated relaxation over the whole edge list.
+#[allow(clippy::too_many_arguments)]
 fn oracle(
     nodes: &[String],
     edges: &[(String, String, String)],

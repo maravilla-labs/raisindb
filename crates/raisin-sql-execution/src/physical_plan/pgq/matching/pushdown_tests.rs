@@ -142,8 +142,8 @@ async fn a_pinned_source_reads_only_its_own_relations() {
     assert_eq!(g.global_scans.load(Ordering::SeqCst), 0);
     assert_eq!(
         g.node_read.load(Ordering::SeqCst),
-        7 + 0,
-        "hub's outgoing relations plus nothing else (its incoming side is not needed)"
+        7,
+        "hub's outgoing relations and nothing else (its incoming side is not needed)"
     );
     assert_eq!(
         hop_rows(&seeked),
