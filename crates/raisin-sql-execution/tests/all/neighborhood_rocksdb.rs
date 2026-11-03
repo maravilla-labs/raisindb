@@ -501,8 +501,41 @@ async fn exceeding_the_visited_node_budget_fails_instead_of_truncating() {
     )
     .await
     .expect_err("one node over budget must fail");
-    assert!(err.contains("max_nodes = 6"), "{err}");
-    assert!(err.contains("Partial results are not returned"), "{err}");
+    assert!(
+        err.contains("neighbourhood too large: narrow the query with depth, types or max_nodes"),
+        "{err}"
+    );
+    assert!(
+        !err.chars().any(|c| c.is_ascii_digit()),
+        "no count may appear in the error: {err}"
+    );
+}
+
+/// The planner takes up to 1,000,000; past the default only an admin is
+/// served the larger budget (see `effective_max_nodes`), anyone else is held to
+/// the default, which fails instead of truncating.
+#[tokio::test]
+async fn max_nodes_has_a_hard_maximum_and_an_ordinary_caller_still_runs() {
+    let (storage, _tmp) = storage().await;
+    social(&storage).await;
+    // `social` nodes belong to bob: an ordinary caller who reads all of them.
+    let bob = engine(&storage, Some(owner_scoped_user("bob")));
+    let rows = ok(
+        &bob,
+        "SELECT id FROM NEIGHBORS('me', 'OUT', depth => 3, types => 'KNOWS', max_nodes => 1000000)",
+    )
+    .await;
+    assert_eq!(rows.len(), 6);
+    let err = run(
+        &bob,
+        "SELECT id FROM NEIGHBORS('me', 'OUT', depth => 3, max_nodes => 1000001)",
+    )
+    .await
+    .expect_err("past the maximum");
+    assert!(
+        err.contains("max_nodes must be between 1 and 1000000"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -571,13 +604,15 @@ async fn nodes_the_caller_cannot_read_are_left_out() {
     // alice may read only what she owns: `mid` (bob's) is not reported - the
     // same rule the one-hop form applies - but it is still walked through, so
     // `end` is found. That is the endpoints-only policy GRAPH_TABLE documents.
+    // `end`'s only predecessor is `mid`, which alice cannot read, so its
+    // via_count is 0: hidden nodes are never counted.
     let alice = engine(&storage, Some(owner_scoped_user("alice")));
     let seen = ok(
         &alice,
         "SELECT id, depth, via_count FROM NEIGHBORS('me', 'OUT', depth => 2)",
     )
     .await;
-    assert_eq!(triples(&seen), vec![t("end", 2, 1), t("own", 1, 1)]);
+    assert_eq!(triples(&seen), vec![t("end", 2, 0), t("own", 1, 1)]);
 
     // And the one-hop form agrees on what a hop-1 caller sees.
     let one_hop = ok(&alice, "SELECT id FROM NEIGHBORS('me', 'OUT', NULL)").await;
@@ -588,6 +623,91 @@ async fn nodes_the_caller_cannot_read_are_left_out() {
     let carol = engine(&storage, Some(owner_scoped_user("carol")));
     let none = ok(&carol, "SELECT id FROM NEIGHBORS('me', 'OUT', depth => 2)").await;
     assert!(none.is_empty());
+}
+
+/// A start the caller cannot read answers exactly like a start that does not
+/// exist: no rows, no error, whatever lies behind it.
+#[tokio::test]
+async fn an_unreadable_start_is_indistinguishable_from_a_missing_one() {
+    let (storage, _tmp) = storage().await;
+    owned(&storage).await;
+    // `mid` (bob's) leads to `end` (alice's): walking from it would find a node
+    // alice may read.
+    let alice = engine(&storage, Some(owner_scoped_user("alice")));
+    for start in ["mid", "/mid", "ghost", "/ghost"] {
+        for shape in [
+            "depth => 2",
+            "depth => 2, min_depth => 2",
+            "depth => 2, max_nodes => 1",
+        ] {
+            let rows = run(
+                &alice,
+                &format!("SELECT id, depth, via_count FROM NEIGHBORS('{start}', 'OUT', {shape})"),
+            )
+            .await;
+            assert_eq!(rows.map(|r| r.len()), Ok(0), "{start} {shape}");
+        }
+    }
+    // The walk from `mid` does exist: the system caller is shown it.
+    let system = engine(&storage, None);
+    let rows = ok(
+        &system,
+        "SELECT id FROM NEIGHBORS('mid', 'OUT', depth => 2)",
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+}
+
+/// `via_count` counts readable previous-level nodes only.
+#[tokio::test]
+async fn via_count_never_counts_a_node_the_caller_cannot_read() {
+    let (storage, _tmp) = storage().await;
+    owned(&storage).await;
+    // A second, readable route to `end`, plus a hidden one.
+    create(&storage, "mid2", "bob").await;
+    link(&storage, "own", "end", "KNOWS").await;
+    link(&storage, "me", "mid2", "KNOWS").await;
+    link(&storage, "mid2", "end", "KNOWS").await;
+
+    let q = "SELECT id, depth, via_count FROM NEIGHBORS('me', 'OUT', depth => 2, min_depth => 2)";
+    let system = ok(&engine(&storage, None), q).await;
+    assert_eq!(triples(&system), vec![t("end", 2, 3)]);
+    let alice = ok(&engine(&storage, Some(owner_scoped_user("alice"))), q).await;
+    assert_eq!(triples(&alice), vec![t("end", 2, 1)], "only `own` counts");
+}
+
+/// A GRAPH_TABLE pin on a node the caller cannot read and a pin on a node that
+/// does not exist give the same rows (none), on both the one-hop and the
+/// variable-length route.
+#[tokio::test]
+async fn a_graph_table_pin_on_a_hidden_node_answers_like_a_missing_one() {
+    let (storage, _tmp) = storage().await;
+    owned(&storage).await;
+    let alice = engine(&storage, Some(owner_scoped_user("alice")));
+    for pattern in [
+        "(a:Person)-[r:KNOWS]->(b:Person)",
+        "(a:Person)-[r:KNOWS]->{1,3}(b:Person)",
+        "ANY SHORTEST p = (a:Person)-[:KNOWS]->{1,3}(b:Person)",
+    ] {
+        let mut answers = Vec::new();
+        for pin in ["mid", "ghost"] {
+            let extra = if pattern.starts_with("ANY") {
+                " AND b.id = 'end'"
+            } else {
+                ""
+            };
+            let rows = run(
+                &alice,
+                &format!(
+                    "SELECT * FROM GRAPH_TABLE(MATCH {pattern} WHERE a.id = '{pin}'{extra} \
+                     COLUMNS (a.id AS src, b.id AS dst))"
+                ),
+            )
+            .await;
+            answers.push(rows.map(|r| r.len()));
+        }
+        assert_eq!(answers, vec![Ok(0), Ok(0)], "{pattern}");
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -35,8 +35,9 @@ use super::variable_length::execute_variable_length_with;
 use crate::physical_plan::executor::ExecutionError;
 use crate::physical_plan::graph_access::Side;
 use crate::physical_plan::graph_access::{RelationAccess, ScannedRelation, StorageAccess};
+use crate::physical_plan::graph_budget::GraphBudget;
 use crate::physical_plan::graph_neighborhood::{
-    neighborhood, NeighborhoodParams, NodeGate, DEFAULT_MAX_NODES,
+    neighborhood, NeighborhoodParams, NodeGate, DEFAULT_MAX_NODES, TOO_LARGE, TOO_SLOW,
 };
 use crate::physical_plan::pgq::types::VariableBinding;
 use raisin_models::nodes::RelationRef as Ref;
@@ -335,12 +336,158 @@ async fn variable_length_and_neighborhood_in_a_real_store() {
             min_depth: 1,
             max_depth: 3,
             max_nodes: DEFAULT_MAX_NODES,
+            budget: GraphBudget::standard(),
         },
     )
     .await
     .unwrap();
     assert_eq!(hits.len(), 3);
     assert_eq!(acc.counts(), (0, 3));
+}
+
+/// A ring of `n` nodes `b0 -> b1 -> ...` plus a hub `b0` linked to all of them.
+async fn hub_ring(storage: &Store, n: usize) {
+    for i in 0..n {
+        node(storage, &format!("b{i}")).await;
+    }
+    for i in 0..n {
+        link(storage, &format!("b{i}"), &format!("b{}", (i + 1) % n), "k").await;
+    }
+    for i in 2..n {
+        link(storage, "b0", &format!("b{i}"), "k").await;
+    }
+}
+
+fn shown_without_digits(e: &ExecutionError, text: &str) {
+    let shown = e.to_string();
+    assert!(shown.contains(text), "{shown}");
+    assert!(!shown.chars().any(|c| c.is_ascii_digit()), "{shown}");
+}
+
+#[tokio::test]
+async fn neighborhood_limits_hold_in_a_real_store() {
+    let (storage, _tmp) = storage().await;
+    hub_ring(&storage, 60).await;
+    let acc = access(&storage);
+    let from = [(WS.to_string(), "b0".to_string())];
+    let params = |budget: GraphBudget| NeighborhoodParams {
+        side: Side::Out,
+        types: vec![],
+        min_depth: 1,
+        max_depth: 3,
+        max_nodes: DEFAULT_MAX_NODES,
+        budget,
+    };
+
+    // Enough of everything: the whole ring.
+    let all = neighborhood(&acc, &Open, &from, &params(GraphBudget::standard()))
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 59);
+    let (_, read) = acc.counts();
+
+    // One relation fewer than the search reads: refused, no counts shown.
+    let err = neighborhood(
+        &acc,
+        &Open,
+        &from,
+        &params(GraphBudget::new(
+            std::time::Duration::from_secs(60),
+            read - 1,
+        )),
+    )
+    .await
+    .unwrap_err();
+    shown_without_digits(&err, TOO_LARGE);
+
+    // A deadline that has passed: refused before the first seek.
+    acc.reset();
+    let err = neighborhood(
+        &acc,
+        &Open,
+        &from,
+        &params(GraphBudget::until(Instant::now(), usize::MAX)),
+    )
+    .await
+    .unwrap_err();
+    shown_without_digits(&err, TOO_SLOW);
+    assert_eq!(acc.counts(), (0, 0));
+}
+
+#[tokio::test]
+async fn a_seeded_expansion_over_budget_takes_the_global_route_in_a_real_store() {
+    use super::variable_length::execute_variable_length_budgeted;
+    let (storage, _tmp) = storage().await;
+    hub_ring(&storage, 60).await;
+    let acc = access(&storage);
+    for (pat, wh) in [
+        ("(a)-[r:k]->{1,2}(b)", "a.id = 'b0'"),
+        (
+            "ANY SHORTEST p = (a)-[r:k]->{1,4}(b)",
+            "a.id = 'b5' AND b.id = 'b8'",
+        ),
+    ] {
+        let p = parse(pat, wh);
+        let [PatternElement::Node(s), PatternElement::Relationship(r), PatternElement::Node(t)] =
+            p.pattern.elements.as_slice()
+        else {
+            panic!("not a hop")
+        };
+        let semantics = path_semantics_for(&p.pattern);
+        let run = |budget: GraphBudget| {
+            execute_variable_length_budgeted(
+                &acc,
+                s,
+                r,
+                t,
+                &semantics,
+                vec![VariableBinding::new()],
+                &p.hints,
+                budget,
+            )
+        };
+        let rows = |v: Vec<VariableBinding>| -> BTreeSet<(String, String)> {
+            v.iter()
+                .map(|b| {
+                    (
+                        b.get_node("a").map(|n| n.id.clone()).unwrap_or_default(),
+                        b.get_node("b").map(|n| n.id.clone()).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        };
+        // What the WHERE clause keeps: rows whose pinned variables are the pins.
+        let pin_of = |v: &str| {
+            p.hints
+                .seek_for(Some(&v.to_string()))
+                .and_then(|s| s.ids.clone())
+        };
+        let (pa, pb) = (pin_of("a"), pin_of("b"));
+        let keep = |set: BTreeSet<(String, String)>| -> BTreeSet<(String, String)> {
+            set.into_iter()
+                .filter(|x| pa.as_ref().is_none_or(|ids| ids.contains(&x.0)))
+                .filter(|x| pb.as_ref().is_none_or(|ids| ids.contains(&x.1)))
+                .collect()
+        };
+
+        acc.reset();
+        let seeded = keep(rows(run(GraphBudget::standard()).await.unwrap()));
+        assert_eq!(acc.counts().0, 0, "{pat}: within budget, no global scan");
+        assert!(!seeded.is_empty(), "{pat}: the fixture should match");
+
+        for budget in [
+            GraphBudget::new(std::time::Duration::from_secs(60), 1),
+            GraphBudget::until(Instant::now(), usize::MAX),
+        ] {
+            acc.reset();
+            let fallback = keep(rows(run(budget).await.unwrap()));
+            assert!(
+                acc.counts().0 > 0,
+                "{pat}: over budget, the global route ran"
+            );
+            assert_eq!(fallback, seeded, "{pat}: same answer either way");
+        }
+    }
 }
 
 /// Builds `nodes` nodes with about `relations` relations (a hub-free random
@@ -432,6 +579,7 @@ async fn bench_case(nodes: usize, relations: usize) {
             min_depth: 2,
             max_depth: 2,
             max_nodes: DEFAULT_MAX_NODES,
+            budget: GraphBudget::standard(),
         },
     )
     .await

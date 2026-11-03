@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::Ordering;
 
+use std::time::{Duration, Instant};
+
 use super::*;
 use crate::physical_plan::graph_access::fake::FakeGraph;
 
@@ -30,6 +32,7 @@ fn params(side: Side, max_depth: u32) -> NeighborhoodParams {
         min_depth: 1,
         max_depth,
         max_nodes: DEFAULT_MAX_NODES,
+        budget: GraphBudget::standard(),
     }
 }
 
@@ -220,6 +223,16 @@ async fn each_visited_node_costs_one_index_seek_never_a_scan() {
     assert_eq!(g.global_scans.load(Ordering::SeqCst), 0);
 }
 
+/// No digit of any count, and nothing but the fixed text.
+fn assert_generic(err: &ExecutionError, text: &str) {
+    let shown = err.to_string();
+    assert!(shown.contains(text), "{shown}");
+    assert!(
+        !shown.chars().any(|c| c.is_ascii_digit()),
+        "the error must not carry counts: {shown}"
+    );
+}
+
 #[tokio::test]
 async fn the_visited_budget_fails_it_does_not_truncate() {
     let g = graph(&[("a", "b", "k"), ("a", "c", "k"), ("a", "d", "k")]);
@@ -231,9 +244,96 @@ async fn the_visited_budget_fails_it_does_not_truncate() {
 
     p.max_nodes = 3;
     let err = neighborhood(&g, &Open, &start("a"), &p).await.unwrap_err();
-    let text = err.to_string();
-    assert!(text.contains("max_nodes = 3"), "{text}");
-    assert!(text.contains("Partial results are not returned"), "{text}");
+    assert_generic(&err, TOO_LARGE);
+}
+
+#[tokio::test]
+async fn the_relation_ceiling_counts_every_relation_read() {
+    // a has 3 followed and 3 unfollowed relations; b, c, d have none.
+    let g = graph(&[
+        ("a", "b", "k"),
+        ("a", "c", "k"),
+        ("a", "d", "k"),
+        ("a", "x", "f"),
+        ("a", "y", "f"),
+        ("a", "z", "f"),
+    ]);
+    let mut p = params(Side::Out, 2);
+    p.types = vec!["k".to_string()];
+
+    p.budget = GraphBudget::new(Duration::from_secs(60), 6);
+    assert_eq!(
+        run(&g, "a", &p).await.len(),
+        3,
+        "six relations read: at the ceiling"
+    );
+
+    p.budget = GraphBudget::new(Duration::from_secs(60), 5);
+    let err = neighborhood(&g, &Open, &start("a"), &p).await.unwrap_err();
+    assert_generic(&err, TOO_LARGE);
+}
+
+#[tokio::test]
+async fn the_deadline_fails_the_search() {
+    let g = graph(&[("a", "b", "k"), ("b", "c", "k")]);
+    let mut p = params(Side::Out, 2);
+    p.budget = GraphBudget::until(Instant::now(), 1_000);
+    let err = neighborhood(&g, &Open, &start("a"), &p).await.unwrap_err();
+    assert_generic(&err, TOO_SLOW);
+    // Nothing was read from the index once the clock had run out.
+    assert_eq!(g.node_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn the_error_is_the_same_whatever_the_hidden_part_holds() {
+    // Two graphs that differ only in how many hidden nodes hang off `h`: the
+    // caller gets one and the same refusal from both.
+    let mut small = vec![("a", "h", "k"), ("a", "v", "k")];
+    let mut big = small.clone();
+    let names: Vec<String> = (0..40).map(|i| format!("s{i}")).collect();
+    for n in &names {
+        big.push(("h", n.as_str(), "k"));
+    }
+    small.push(("h", "s0", "k"));
+    let hidden: HashSet<String> = std::iter::once("h".to_string())
+        .chain(names.iter().cloned())
+        .collect();
+    let mut p = params(Side::Out, 2);
+    p.max_nodes = 3;
+    let e1 = neighborhood(&graph(&small), &Hide(hidden.clone()), &start("a"), &p)
+        .await
+        .unwrap_err();
+    let e2 = neighborhood(&graph(&big), &Hide(hidden), &start("a"), &p)
+        .await
+        .unwrap_err();
+    assert_eq!(e1.to_string(), e2.to_string());
+}
+
+#[tokio::test]
+async fn an_unreadable_start_is_the_same_as_a_missing_one() {
+    let g = graph(&[("a", "b", "k"), ("b", "c", "k")]);
+    // The real gate answers `None` for a node that does not exist, too.
+    let gate = Hide(["a".to_string(), "ghost".to_string()].into());
+    let hidden = neighborhood(&g, &gate, &start("a"), &params(Side::Out, 3))
+        .await
+        .unwrap();
+    let missing = neighborhood(&g, &gate, &start("ghost"), &params(Side::Out, 3))
+        .await
+        .unwrap();
+    assert!(hidden.is_empty());
+    assert!(missing.is_empty());
+    assert_eq!(
+        g.node_calls.load(Ordering::SeqCst),
+        0,
+        "nothing is read from a start the caller cannot read"
+    );
+    // Even a budget the walk would blow is not reached: nothing is walked.
+    let mut tight = params(Side::Out, 3);
+    tight.max_nodes = 1;
+    assert!(neighborhood(&g, &gate, &start("a"), &tight)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -252,9 +352,82 @@ async fn a_hidden_node_is_not_reported_but_is_walked_through() {
         .unwrap();
     assert_eq!(
         rows(&hits),
-        vec![("v".into(), 1, 1), ("only".into(), 2, 1), ("t".into(), 2, 2)],
-        "h is left out, but `only` (reachable only through h) is still found and          t counts both intermediates: endpoints-only, as GRAPH_TABLE"
+        vec![
+            ("v".into(), 1, 1),
+            ("only".into(), 2, 0),
+            ("t".into(), 2, 1)
+        ],
+        "h is left out, `only` (reachable only through h) is still found, and \
+         via_count counts readable intermediates only"
     );
+}
+
+#[tokio::test]
+async fn via_count_excludes_hidden_nodes_even_below_min_depth() {
+    // The level before min_depth is never reported, but its readability still
+    // decides via_count.
+    let g = graph(&[
+        ("a", "h1", "k"),
+        ("a", "h2", "k"),
+        ("a", "v", "k"),
+        ("h1", "t", "k"),
+        ("h2", "t", "k"),
+        ("v", "t", "k"),
+    ]);
+    let gate = Hide(["h1".to_string(), "h2".to_string()].into());
+    let mut p = params(Side::Out, 2);
+    p.min_depth = 2;
+    let hits = neighborhood(&g, &gate, &start("a"), &p).await.unwrap();
+    assert_eq!(rows(&hits), vec![("t".into(), 2, 1)]);
+    let open = neighborhood(&g, &Open, &start("a"), &p).await.unwrap();
+    assert_eq!(rows(&open), vec![("t".into(), 2, 3)]);
+}
+
+/// Counts the nodes the gate is asked about.
+struct Counting(std::sync::atomic::AtomicUsize);
+impl NodeGate for Counting {
+    type Item = ();
+    async fn report(&self, _: &str, _: &str, _: u32) -> Result<Option<()>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(()))
+    }
+}
+
+#[tokio::test]
+async fn results_come_out_in_chunks_and_near_levels_are_not_checked() {
+    // a -> 600 spokes -> one tail each.
+    let mut g = FakeGraph::new();
+    g.node(WS, "a", "t:P");
+    for i in 0..600 {
+        let s = format!("s{i:03}");
+        let t = format!("t{i:03}");
+        g.node(WS, &s, "t:P").node(WS, &t, "t:P");
+        g.rel(WS, "a", &s, "k").rel(WS, &s, &t, "k");
+    }
+    let mut p = params(Side::Out, 3);
+    p.min_depth = 3;
+    let gate = Counting(Default::default());
+    let mut search = NeighborhoodSearch::start(&g, &gate, &start("a"), &p)
+        .await
+        .unwrap();
+    assert!(
+        search.next_chunk().await.unwrap().is_none(),
+        "nothing at depth 3"
+    );
+    // Only the start: depth 1 is neither reported nor next to a reported level.
+    // Depth 2 is checked (it feeds depth 3's via_count).
+    assert_eq!(gate.0.load(Ordering::SeqCst), 1 + 600);
+
+    p.min_depth = 2;
+    let gate = Open;
+    let mut search = NeighborhoodSearch::start(&g, &gate, &start("a"), &p)
+        .await
+        .unwrap();
+    let mut sizes = Vec::new();
+    while let Some(chunk) = search.next_chunk().await.unwrap() {
+        sizes.push(chunk.len());
+    }
+    assert_eq!(sizes, vec![CHUNK, CHUNK, 600 - 2 * CHUNK]);
 }
 
 // ---- oracle ---------------------------------------------------------------
@@ -317,12 +490,16 @@ fn oracle(
         }
     }
     let mut out = BTreeMap::new();
+    if hidden.contains(start) {
+        return out;
+    }
     for n in nodes {
         if let Some(&d) = dist.get(n.as_str()) {
             if d >= 1 && d >= min_depth && !hidden.contains(n) {
                 let via = dist
                     .iter()
                     .filter(|(_, &x)| x == d - 1)
+                    .filter(|(u, _)| !hidden.contains(**u))
                     .filter(|(u, _)| adj.get(*u).is_some_and(|s| s.contains(n.as_str())))
                     .count() as u64;
                 out.insert(n.clone(), (d, via));
@@ -379,6 +556,7 @@ async fn check_random(seed: u64, n: usize, edge_count: usize, undirected: bool, 
                         min_depth,
                         max_depth,
                         max_nodes: DEFAULT_MAX_NODES,
+                        budget: GraphBudget::standard(),
                     };
                     let (hits, hide) = if who == 0 {
                         (
