@@ -13,7 +13,12 @@ use raisin_sql::ast::{Direction, NodePattern, RelationshipPattern};
 use raisin_storage::{RelationRepository, Storage};
 
 use super::matches_label;
+use super::pushdown::{pinned_end, resolve_seek, side_for};
+use super::seek::SeekHints;
 use crate::physical_plan::executor::ExecutionError;
+use crate::physical_plan::graph_access::{
+    node_relations, RelationAccess, ScannedRelation, StorageAccess,
+};
 use crate::physical_plan::pgq::context::PgqContext;
 use crate::physical_plan::pgq::types::{NodeInfo, RelationInfo, VariableBinding};
 
@@ -31,16 +36,23 @@ fn matches_relation_type(types: &[String], relation_type: &str) -> bool {
 
 /// Match a single-hop pattern: (source)-[rel]->(target)
 ///
-/// This function scans the global relation index and filters by:
+/// Reads the candidate relations, then filters by:
 /// 1. Relationship type (if specified)
 /// 2. Source node label (if specified)
 /// 3. Target node label (if specified)
+///
+/// The candidates come from the global relation index, O(relations of the
+/// type), UNLESS `hints` pins one endpoint to a known node, in which case they
+/// come from that node's own relation index, O(its degree). The `WHERE` clause
+/// is still evaluated by the caller against every binding returned, so the
+/// narrowing can only drop relations that could never have passed it.
 ///
 /// # Arguments
 ///
 /// * `source_pattern` - Pattern for the source node
 /// * `rel_pattern` - Pattern for the relationship
 /// * `target_pattern` - Pattern for the target node
+/// * `hints` - Endpoints the `WHERE` clause pins to known nodes
 /// * `storage` - Storage backend
 /// * `context` - PGQ execution context
 ///
@@ -51,8 +63,71 @@ pub async fn match_single_hop<S: Storage>(
     source_pattern: &NodePattern,
     rel_pattern: &RelationshipPattern,
     target_pattern: &NodePattern,
+    hints: &SeekHints,
     storage: &Arc<S>,
     context: &PgqContext,
+) -> Result<Vec<VariableBinding>> {
+    let access = StorageAccess::new(
+        storage,
+        &context.tenant_id,
+        &context.repo_id,
+        &context.branch,
+        context.revision.as_ref(),
+    );
+    match_single_hop_with(&access, source_pattern, rel_pattern, target_pattern, hints).await
+}
+
+/// The candidate relations for one hop.
+async fn candidate_relations<A: RelationAccess>(
+    access: &A,
+    source_pattern: &NodePattern,
+    rel_pattern: &RelationshipPattern,
+    target_pattern: &NodePattern,
+    hints: &SeekHints,
+) -> Result<Vec<ScannedRelation>> {
+    if let Some((end, seek)) = pinned_end(hints, source_pattern, target_pattern) {
+        if let Some(nodes) = resolve_seek(access, seek).await? {
+            let types = rel_pattern.types.clone();
+            let accept = move |t: &str| matches_relation_type(&types, t);
+            let relations = node_relations(
+                access,
+                &nodes,
+                side_for(end, rel_pattern.direction),
+                &accept,
+            )
+            .await?;
+            tracing::debug!(
+                "PGQ: single hop seeked {} node(s) through the per-node index: {} relations",
+                nodes.len(),
+                relations.len()
+            );
+            return Ok(relations);
+        }
+    }
+
+    // Only a single-typed pattern can push its filter into storage:
+    // `scan_relations_global` takes one `Option<&str>`. A multi-type alternation
+    // such as `-[:road|walk]->` must therefore scan UNFILTERED and be filtered
+    // in memory by the caller. Taking `types.first()` - as this once did -
+    // silently dropped every `walk` edge and returned a strict subset of the
+    // truth with no error anywhere, on a documented feature. Same defect, same
+    // fix as `variable_length::scan_relations`.
+    let relation_type_filter = match rel_pattern.types.as_slice() {
+        [single] => Some(single.as_str()),
+        _ => None,
+    };
+    let relations = access.global_scan(relation_type_filter).await?;
+    tracing::debug!("PGQ: Found {} relations in global index", relations.len());
+    Ok(relations)
+}
+
+/// [`match_single_hop`] over any [`RelationAccess`].
+pub(crate) async fn match_single_hop_with<A: RelationAccess>(
+    access: &A,
+    source_pattern: &NodePattern,
+    rel_pattern: &RelationshipPattern,
+    target_pattern: &NodePattern,
+    hints: &SeekHints,
 ) -> Result<Vec<VariableBinding>> {
     tracing::debug!(
         "PGQ: Matching single-hop pattern {:?}-[{:?}]->{:?}",
@@ -61,31 +136,8 @@ pub async fn match_single_hop<S: Storage>(
         target_pattern.labels
     );
 
-    // Only a single-typed pattern can push its filter into storage:
-    // `scan_relations_global` takes one `Option<&str>`. A multi-type alternation
-    // such as `-[:road|walk]->` must therefore scan UNFILTERED and be filtered
-    // in memory below. Taking `types.first()` — as this did — silently dropped
-    // every `walk` edge and returned a strict subset of the truth with no error
-    // anywhere, on a documented feature. Same defect, same fix as
-    // `variable_length::scan_relations`.
-    let relation_type_filter = match rel_pattern.types.as_slice() {
-        [single] => Some(single.as_str()),
-        _ => None,
-    };
-
-    // Scan global relation index
-    // Returns: Vec<(src_workspace, src_id, tgt_workspace, tgt_id, FullRelation)>
-    let relations = storage
-        .relations()
-        .scan_relations_global(
-            raisin_storage::BranchScope::new(&context.tenant_id, &context.repo_id, &context.branch),
-            relation_type_filter,
-            context.revision.as_ref(),
-        )
-        .await
-        .map_err(|e| ExecutionError::Backend(e.to_string()))?;
-
-    tracing::debug!("PGQ: Found {} relations in global index", relations.len());
+    let relations =
+        candidate_relations(access, source_pattern, rel_pattern, target_pattern, hints).await?;
 
     // Filter and create bindings
     let mut bindings = Vec::with_capacity(relations.len());

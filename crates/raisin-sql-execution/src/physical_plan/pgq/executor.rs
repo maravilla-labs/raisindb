@@ -11,7 +11,7 @@ use super::context::PgqContext;
 use super::filter::filter_bindings;
 use super::matching::{
     analyze_pattern, execute_variable_length_pattern, match_single_hop, match_single_node,
-    path_semantics_for, PathSemantics, PatternStructure,
+    path_semantics_for, PathSemantics, PatternStructure, SeekHints,
 };
 use super::projection::project_columns;
 use super::types::{PgqRow, VariableBinding};
@@ -97,7 +97,11 @@ impl<S: Storage> PgqExecutor<S> {
         warn_on_deprecated_quantifiers(&query);
 
         // 1. Execute MATCH clause
-        let bindings = self.execute_match(&query.match_clause).await?;
+        // What the WHERE clause pins to a known node, so the matcher can read
+        // that node's own relations instead of the whole relation index. The
+        // clause itself is still evaluated below, unchanged.
+        let hints = SeekHints::from_where(query.where_clause.as_ref().map(|w| &w.expression));
+        let bindings = self.execute_match(&query.match_clause, &hints).await?;
         tracing::debug!("PGQ: MATCH produced {} bindings", bindings.len());
 
         if bindings.is_empty() {
@@ -130,7 +134,11 @@ impl<S: Storage> PgqExecutor<S> {
     }
 
     /// Execute MATCH clause
-    async fn execute_match(&self, match_clause: &MatchClause) -> Result<Vec<VariableBinding>> {
+    async fn execute_match(
+        &self,
+        match_clause: &MatchClause,
+        hints: &SeekHints,
+    ) -> Result<Vec<VariableBinding>> {
         let mut all_bindings = Vec::new();
 
         for pattern in &match_clause.patterns {
@@ -161,21 +169,29 @@ impl<S: Storage> PgqExecutor<S> {
                             &target,
                             &semantics,
                             vec![VariableBinding::new()],
+                            hints,
                             &self.storage,
                             &self.context,
                         )
                         .await?
                     } else {
                         // Single hop: (a)-[:TYPE]->(b)
-                        match_single_hop(&source, &rel, &target, &self.storage, &self.context)
-                            .await?
+                        match_single_hop(
+                            &source,
+                            &rel,
+                            &target,
+                            hints,
+                            &self.storage,
+                            &self.context,
+                        )
+                        .await?
                     }
                 }
 
                 PatternStructure::Chain(elements) => {
                     reject_unsupported_path_semantics(&semantics, "a multi-hop chain")?;
                     // Multi-hop chain - execute incrementally
-                    self.execute_chain(&elements).await?
+                    self.execute_chain(&elements, hints).await?
                 }
             };
 
@@ -186,7 +202,11 @@ impl<S: Storage> PgqExecutor<S> {
     }
 
     /// Execute a chain of patterns: (a)-[r1]->(b)-[r2]->(c)
-    async fn execute_chain(&self, elements: &[PatternElement]) -> Result<Vec<VariableBinding>> {
+    async fn execute_chain(
+        &self,
+        elements: &[PatternElement],
+        hints: &SeekHints,
+    ) -> Result<Vec<VariableBinding>> {
         // Parse chain into segments
         let mut segments = Vec::new();
         let mut i = 0;
@@ -219,6 +239,7 @@ impl<S: Storage> PgqExecutor<S> {
             first_source,
             first_rel,
             first_target,
+            hints,
             &self.storage,
             &self.context,
         )

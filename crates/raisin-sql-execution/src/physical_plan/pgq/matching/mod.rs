@@ -3,6 +3,8 @@
 //! Matches graph patterns against the storage layer.
 
 pub mod path_binding;
+mod pushdown;
+pub mod seek;
 pub mod selectors;
 mod single_hop;
 mod single_node;
@@ -10,6 +12,7 @@ mod traversal;
 mod variable_length;
 
 pub use path_binding::{GraphPath, PathEdge, PathNode};
+pub use seek::{NodeSeek, SeekHints};
 pub use selectors::{
     path_semantics_for, PathRestrictor, PathSelector, PathSemantics, RestrictorExt,
 };
@@ -115,3 +118,6 @@ mod tests {
         assert!(!matches_label(&labels, "Guest"));
     }
 }
+
+#[cfg(test)]
+mod pushdown_tests;

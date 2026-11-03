@@ -57,6 +57,7 @@ pub mod eval;
 pub mod executor;
 pub mod filter;
 pub mod fulltext;
+pub mod graph_access;
 pub mod graph_algo;
 pub mod hash_aggregate;
 pub mod hash_join;
