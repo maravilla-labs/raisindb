@@ -162,6 +162,13 @@ impl<A: RelationAccess> RelationAccess for Counting<A> {
     ) -> impl Future<Output = Result<Option<(String, String)>, ExecutionError>> + Send {
         self.inner.node_by_path(w, p)
     }
+    fn readable(
+        &self,
+        w: &str,
+        id: &str,
+    ) -> impl Future<Output = Result<bool, ExecutionError>> + Send {
+        self.inner.readable(w, id)
+    }
     async fn outgoing(&self, w: &str, id: &str) -> Result<Vec<Ref>, ExecutionError> {
         let r = self.inner.outgoing(w, id).await?;
         self.per_node.fetch_add(r.len(), Ordering::SeqCst);

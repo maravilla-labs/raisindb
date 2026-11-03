@@ -13,7 +13,7 @@ use raisin_sql::ast::{Direction, NodePattern, RelationshipPattern};
 use raisin_storage::{RelationRepository, Storage};
 
 use super::matches_label;
-use super::pushdown::{pinned_end, resolve_seek, side_for};
+use super::pushdown::{pinned_end, resolve_seek, side_for, End};
 use super::seek::SeekHints;
 use crate::physical_plan::executor::ExecutionError;
 use crate::physical_plan::graph_access::{
@@ -74,7 +74,8 @@ pub async fn match_single_hop<S: Storage>(
         &context.branch,
         context.revision.as_ref(),
     )
-    .with_workspace_hint(&context.workspace_id);
+    .with_workspace_hint(&context.workspace_id)
+    .with_auth(context.auth_context.as_ref());
     match_single_hop_with(&access, source_pattern, rel_pattern, target_pattern, hints).await
 }
 
@@ -87,6 +88,21 @@ async fn candidate_relations<A: RelationAccess>(
     hints: &SeekHints,
 ) -> Result<Vec<ScannedRelation>> {
     if let Some((end, seek)) = pinned_end(hints, source_pattern, target_pattern) {
+        // Both ends pinned: the other end is a pin too, and a pin on a node the
+        // caller cannot read (or that does not exist) matches nothing, whichever
+        // end the read starts from.
+        let other = match end {
+            End::Left => hints.seek_for(target_pattern.variable.as_ref()),
+            End::Right => hints.seek_for(source_pattern.variable.as_ref()),
+        };
+        if let Some(other) = other {
+            if resolve_seek(access, other)
+                .await?
+                .is_some_and(|nodes| nodes.is_empty())
+            {
+                return Ok(Vec::new());
+            }
+        }
         if let Some(nodes) = resolve_seek(access, seek).await? {
             let types = rel_pattern.types.clone();
             let accept = move |t: &str| matches_relation_type(&types, t);

@@ -707,7 +707,65 @@ async fn a_graph_table_pin_on_a_hidden_node_answers_like_a_missing_one() {
             answers.push(rows.map(|r| r.len()));
         }
         assert_eq!(answers, vec![Ok(0), Ok(0)], "{pattern}");
+
+        // Even when the pinned node is not returned (only walked from), a pin
+        // on a node alice cannot read matches nothing, like a missing one.
+        let mut unprojected = Vec::new();
+        for pin in ["mid", "ghost"] {
+            let extra = if pattern.starts_with("ANY") {
+                " AND b.id = 'end'"
+            } else {
+                ""
+            };
+            let rows = run(
+                &alice,
+                &format!(
+                    "SELECT * FROM GRAPH_TABLE(MATCH {pattern} WHERE a.id = '{pin}'{extra} \
+                     COLUMNS (b.id AS dst))"
+                ),
+            )
+            .await;
+            unprojected.push(rows.map(|r| r.len()));
+        }
+        assert_eq!(
+            unprojected,
+            vec![Ok(0), Ok(0)],
+            "{pattern} (a not returned)"
+        );
     }
+
+    // The system caller may read `mid`: the pin works.
+    let system = engine(&storage, None);
+    let rows = ok(
+        &system,
+        "SELECT * FROM GRAPH_TABLE(MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE a.id = 'mid' \
+         COLUMNS (b.id AS dst))",
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+}
+
+/// An ordinary caller cannot choose `max_nodes`: neither a smaller nor a
+/// larger value changes what it gets.
+#[tokio::test]
+async fn max_nodes_is_ignored_for_an_ordinary_caller() {
+    let (storage, _tmp) = storage().await;
+    social(&storage).await;
+    let bob = engine(&storage, Some(owner_scoped_user("bob")));
+    let q =
+        |n: &str| format!("SELECT id FROM NEIGHBORS('me', 'OUT', depth => 3, types => 'KNOWS'{n})");
+    let plain = ok(&bob, &q("")).await.len();
+    assert_eq!(plain, 6);
+    for n in [
+        ", max_nodes => 1",
+        ", max_nodes => 3",
+        ", max_nodes => 1000000",
+    ] {
+        assert_eq!(ok(&bob, &q(n)).await.len(), plain, "{n}");
+    }
+    // The system caller can lower it, and is refused past it.
+    let system = engine(&storage, None);
+    assert!(run(&system, &q(", max_nodes => 3")).await.is_err());
 }
 
 /// An ordinary caller cannot choose `max_nodes`: neither a smaller nor a

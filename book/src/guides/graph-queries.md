@@ -125,7 +125,7 @@ the set form:** one row per **distinct node** within `depth` hops.
 | third positional / `types =>` | relation types to follow, `'A'` or `'A,B'` (exact, case sensitive) | every type | giving both is an error unless they agree |
 | `depth =>` | deepest hop to follow | `1` | 1 to 16 |
 | `min_depth =>` | shallowest depth to **report**; nearer nodes are still walked through | `1` | 1 to `depth` |
-| `max_nodes =>` | visited-node budget, the start included | `200000` | 1 to 1,000,000; above 200,000 only for a system or system-admin caller (see below) |
+| `max_nodes =>` | budget of **readable** nodes visited, the start included | `200000` | 1 to 1,000,000; honoured only for a system or system-admin caller, ignored for anyone else (see below) |
 
 | Column | Meaning |
 |---|---|
@@ -168,28 +168,37 @@ the repository. A variable-length `GRAPH_TABLE` pattern enumerates one result pe
 
 ### Limits
 
-Three limits stop the search, and each one **fails the query, it does not
-truncate** it (a neighbourhood cut short is indistinguishable from a complete one
-once it reaches the client, so none is returned):
+Every limit **fails the query, it does not truncate** it (a neighbourhood cut
+short is indistinguishable from a complete one once it reaches the client, so
+none is returned):
 
-| Limit | Value | Error |
+| Limit | Value | Who sets it |
 |---|---|---|
-| visited nodes, the start included | `max_nodes` (default 200,000) | `neighbourhood too large: narrow the query with depth, types or max_nodes` |
-| relations read from the per-node indexes (every relation a seek returns, followed or not) | 200,000, or `max_nodes` when that is larger (the ceiling every scan has) | the same text |
-| wall-clock time | 3 seconds (the time limit every scan has) | `neighbourhood search ran out of time: narrow the query with depth, types or max_nodes` |
+| nodes the caller **may read** visited, the start included | 200,000 | `max_nodes`, for a system context or system admin only |
+| every node visited, readable or not | 1,000,000 | fixed |
+| relations read from the per-node indexes (every relation a seek returns, followed or not) | 200,000 (1,000,000 for a system context or system admin) | fixed |
+| wall-clock time | 3 seconds (the time limit every scan has) | fixed |
 
-`max_nodes` accepts 1 to 1,000,000, but only a system context or a system admin
-is given more than the default 200,000. Any other caller (an ordinary user, an
-anonymous visitor, a query with no auth context) is held to 200,000 whatever it
-asks for: asking for more is not an error, the search simply fails at 200,000.
-Lowering `max_nodes` is always allowed.
+The time limit fails with `neighbourhood search ran out of time: narrow the
+query with depth, types or max_nodes`; every other limit with `neighbourhood too
+large: narrow the query with depth, types or max_nodes`.
+
+An ordinary caller (a user, an anonymous visitor, a query with no auth context)
+cannot choose `max_nodes`: the argument is accepted and ignored, and the budget
+is 200,000. Nodes the caller may not read are walked through but never charged
+to `max_nodes`; they count only against the fixed ceilings. A budget the caller
+could move, counting nodes it cannot see, would let it find out by moving the
+budget how many private nodes a neighbourhood holds.
 
 The errors carry no numbers: not how many nodes were visited, not how many
-relations were read, no node ids. Those counts include nodes the caller may not
-read, so they are logged on the server at debug level only.
+relations were read, no node ids. The counts are logged on the server at debug
+level only.
 
 Rows are produced as the search goes, a few hundred nodes at a time, so a large
-result is not loaded into memory before the first row is returned.
+result is not loaded into memory before the first row is returned. Every node is
+checked against the caller's permissions once when it is reached (that decides
+what it is charged to), and a reported node is loaded again when its row is
+produced.
 
 ### Row-level security
 
@@ -247,14 +256,20 @@ SELECT * FROM GRAPH_TABLE(
   breadth-first search over that expanded part of the graph (so it has the same
   limits), not by enumerating every path; `ALL SHORTEST` still stops at the
   10,000 path cap.
-* In a single hop, a pin that names no existing node falls back to the global
-  scan, so a relation that outlives its node is still found; the rows are the
-  ones the pinned node would have given. In a variable-length pattern a pinned
-  source or `SHORTEST` target that names no existing node gives no rows, exactly
-  like an existing node without relations: whether a pinned id exists never
-  changes the rows or turns an answer into an error. Pin by an id that exists.
-* A pin on the **target** of a variable-length pattern is not used (the path
-  search starts from sources). Write the pattern the other way round, or use
+* **A pin is a read of the pinned node.** A pinned node the caller may not
+  read is dropped before any of its relations is read, and the pin then matches
+  nothing, exactly like a pin on a node that does not exist: same rows (none),
+  no error, no fall-back to the global scan. This holds for every use of a pin:
+  either end of a single hop (and the first hop of a chain), the source of a
+  variable-length pattern, the target of one whose source is pinned, and both
+  ends of `ANY SHORTEST` / `ALL SHORTEST`. A private node can still be walked
+  THROUGH when it is not pinned (the endpoints-only policy of `GRAPH_TABLE`
+  applies to unpinned nodes), and a `WHERE` the matcher cannot use as a pin
+  (under `OR`, say) is evaluated on the global route as before. A relation
+  whose node no longer exists is not reached through a pin either. Pin by an
+  id that exists and that the caller may read.
+* A pin on the **target** of a variable-length pattern is not used to start the
+  read (the path search starts from sources); it is only checked as above. Write the pattern the other way round, or use
   `NEIGHBORS(..., 'IN', ...)`.
 
 ### Recommended query shapes

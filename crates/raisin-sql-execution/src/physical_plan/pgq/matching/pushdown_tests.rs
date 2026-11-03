@@ -185,20 +185,20 @@ async fn a_pin_on_either_end_is_enough_and_both_ends_read_once() {
 }
 
 #[tokio::test]
-async fn an_unknown_id_falls_back_to_the_global_scan() {
+async fn an_unknown_id_reads_nothing() {
     let mut g = FakeGraph::new();
     g.node(WS, "a", "t:P")
         .node(WS, "b", "t:P")
         .rel(WS, "a", "b", "k");
     let p = parse("(a)-[r:k]->(b)", "a.id = 'ghost'");
     let rows = hop(&g, &p, &p.hints).await;
+    assert!(rows.is_empty());
+    assert_eq!(g.read_total(), 0);
     assert_eq!(
         g.global_scans.load(Ordering::SeqCst),
-        1,
-        "exactness over speed"
+        0,
+        "a missing pin must not take a different route than a hidden one"
     );
-    // The filter, not the matcher, removes the non-matching relation.
-    assert_eq!(pinned(hop_rows(&rows), Some("ghost"), None).len(), 0);
 }
 
 #[tokio::test]
@@ -556,4 +556,100 @@ async fn a_shortest_target_naming_no_node_is_empty_like_an_unreachable_one() {
         assert_eq!(var_list(&g, &p, &p.hints).await, Ok(vec![]), "{target}");
     }
     assert_eq!(g.global_scans.load(Ordering::SeqCst), 0);
+}
+
+// ---- a pin on a node the caller cannot read ----------------------------------
+
+/// `h` is hidden and well connected; `ghost` does not exist. Every shape that
+/// uses a pin must answer the two identically, read no relation of `h`, and
+/// never fall back to the global scan.
+#[tokio::test]
+async fn a_hidden_pin_is_indistinguishable_from_a_missing_one_in_every_shape() {
+    let mut g = FakeGraph::new();
+    for id in ["h", "x", "y", "z"] {
+        g.node(WS, id, "t:P");
+    }
+    for (a, b) in [
+        ("h", "x"),
+        ("x", "h"),
+        ("h", "y"),
+        ("y", "z"),
+        ("x", "z"),
+        ("z", "h"),
+    ] {
+        g.rel(WS, a, b, "k");
+    }
+    g.hide(WS, "h");
+
+    let shapes: [(&str, &str); 12] = [
+        ("(a)-[r:k]->(b)", "a.id = '{}'"),
+        ("(a)-[r:k]->(b)", "b.id = '{}'"),
+        ("(a)<-[r:k]-(b)", "a.id = '{}'"),
+        ("(a)-[r:k]-(b)", "a.id = '{}'"),
+        ("(a)-[r:k]->(b)", "a.id = '{}' AND b.id = 'x'"),
+        ("(a)-[r:k]->(b)", "a.id = 'z' AND b.id = '{}'"),
+        ("(a)-[r:k]->(b)", "a.path = '/{}'"),
+        ("(a)-[r:k]->{1,3}(b)", "a.id = '{}'"),
+        ("(a)<-[r:k]-{1,3}(b)", "a.id = '{}'"),
+        ("(a)-[r:k]->{1,3}(b)", "a.id = 'y' AND b.id = '{}'"),
+        (
+            "ANY SHORTEST p = (a)-[r:k]->{1,4}(b)",
+            "a.id = '{}' AND b.id = 'z'",
+        ),
+        (
+            "ALL SHORTEST p = (a)-[r:k]->{1,4}(b)",
+            "a.id = 'y' AND b.id = '{}'",
+        ),
+    ];
+    for (pat, wh) in shapes {
+        let mut answers = Vec::new();
+        for pin in ["h", "ghost"] {
+            let p = parse(pat, &wh.replace("{}", pin));
+            g.reset();
+            let rows: Result<BTreeSet<(String, String)>, String> = if p.rel.quantifier.is_some() {
+                var_rows(&g, &p, &p.hints)
+                    .await
+                    .map(|s| s.into_iter().map(|(a, b, _)| (a, b)).collect())
+            } else {
+                Ok(hop(&g, &p, &p.hints)
+                    .await
+                    .iter()
+                    .map(|b| (id_of(b, "a"), id_of(b, "b")))
+                    .collect())
+            };
+            assert_eq!(g.global_scans.load(Ordering::SeqCst), 0, "{pat} {pin}");
+            if pin == "h" {
+                // Nothing comes back for a pin on h.
+                assert!(rows.as_ref().is_ok_and(|r| r.is_empty()), "{pat}: {rows:?}");
+            }
+            answers.push((rows, g.global_scans.load(Ordering::SeqCst)));
+        }
+        assert_eq!(answers[0], answers[1], "{pat}");
+    }
+}
+
+#[tokio::test]
+async fn an_unreadable_pinned_node_is_dropped_before_its_relations_are_read() {
+    let mut g = FakeGraph::new();
+    g.node(WS, "h", "t:P").node(WS, "x", "t:P");
+    g.rel(WS, "h", "x", "k");
+    g.hide(WS, "h");
+    for (pat, wh) in [
+        ("(a)-[r:k]->(b)", "a.id = 'h'"),
+        ("(a)-[r:k]->{1,3}(b)", "a.id = 'h'"),
+        (
+            "ANY SHORTEST p = (a)-[r:k]->{1,3}(b)",
+            "a.id = 'h' AND b.id = 'x'",
+        ),
+    ] {
+        g.reset();
+        let p = parse(pat, wh);
+        if p.rel.quantifier.is_some() {
+            assert_eq!(var_rows(&g, &p, &p.hints).await, Ok(BTreeSet::new()));
+        } else {
+            assert!(hop(&g, &p, &p.hints).await.is_empty());
+        }
+        assert_eq!(g.node_calls.load(Ordering::SeqCst), 0, "{pat}");
+        assert_eq!(g.read_total(), 0, "{pat}");
+    }
 }

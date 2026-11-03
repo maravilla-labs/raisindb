@@ -28,7 +28,9 @@ use std::future::Future;
 use std::sync::Arc;
 
 use raisin_hlc::HLC;
+use raisin_models::auth::AuthContext;
 use raisin_models::nodes::{FullRelation, RelationRef};
+use raisin_models::permissions::PermissionScope;
 use raisin_storage::{
     BranchScope, NodeRepository, RelationRepository, RepoScope, Storage, StorageScope,
     WorkspaceRepository,
@@ -95,6 +97,11 @@ pub trait RelationAccess: Send + Sync {
         path: &str,
     ) -> impl Future<Output = Result<Option<(String, String)>>> + Send;
 
+    /// Whether the caller may read the node at `(workspace, id)`. `false` for a
+    /// node that does not exist. Used to drop a pinned node the caller cannot
+    /// read BEFORE any relation of it is read (see `pgq::matching::pushdown`).
+    fn readable(&self, workspace: &str, id: &str) -> impl Future<Output = Result<bool>> + Send;
+
     /// The per-node forward index.
     fn outgoing(
         &self,
@@ -122,6 +129,9 @@ pub struct StorageAccess<'a, S: Storage> {
     /// A workspace to ask about even if the repository's workspace list does
     /// not name it (the query's own workspace).
     workspace_hint: Option<&'a str>,
+    /// The caller, for [`RelationAccess::readable`]; `None` reads everything
+    /// (a system or internal caller, as in the scan executors).
+    auth: Option<&'a AuthContext>,
 }
 
 impl<'a, S: Storage> StorageAccess<'a, S> {
@@ -139,7 +149,14 @@ impl<'a, S: Storage> StorageAccess<'a, S> {
             branch,
             revision,
             workspace_hint: None,
+            auth: None,
         }
+    }
+
+    /// Check [`RelationAccess::readable`] against this caller.
+    pub fn with_auth(mut self, auth: Option<&'a AuthContext>) -> Self {
+        self.auth = auth;
+        self
     }
 
     /// Also consider `workspace` when a node has to be located by id or path.
@@ -204,6 +221,34 @@ impl<S: Storage> RelationAccess for StorageAccess<'_, S> {
             .await
             .map_err(backend)?;
         Ok(node.map(|n| (n.id, n.node_type)))
+    }
+
+    async fn readable(&self, workspace: &str, id: &str) -> Result<bool> {
+        let node = self
+            .storage
+            .nodes()
+            .get(self.scope(workspace), id, self.revision)
+            .await
+            .map_err(backend)?;
+        let Some(node) = node else {
+            return Ok(false);
+        };
+        let Some(auth) = self.auth else {
+            return Ok(true);
+        };
+        let scope = PermissionScope::new(workspace, self.branch);
+        Ok(super::scan_executors::helpers::rls_filter_node_graph(
+            &**self.storage,
+            node,
+            auth,
+            &scope,
+            self.tenant_id,
+            self.repo_id,
+            self.branch,
+            self.revision,
+        )
+        .await
+        .is_some())
     }
 
     async fn outgoing(&self, workspace: &str, id: &str) -> Result<Vec<RelationRef>> {
@@ -405,6 +450,8 @@ pub(crate) mod fake {
         pub node_calls: AtomicUsize,
         /// Global scans started.
         pub global_scans: AtomicUsize,
+        /// Nodes the caller may not read.
+        pub hidden: std::collections::HashSet<NodeKey>,
     }
 
     impl FakeGraph {
@@ -420,6 +467,11 @@ pub(crate) mod fake {
         pub fn rel(&mut self, ws: &str, from: &str, to: &str, ty: &str) -> &mut Self {
             self.relations
                 .push((ws.into(), from.into(), ws.into(), to.into(), ty.into()));
+            self
+        }
+
+        pub fn hide(&mut self, ws: &str, id: &str) -> &mut Self {
+            self.hidden.insert((ws.into(), id.into()));
             self
         }
 
@@ -497,6 +549,11 @@ pub(crate) mod fake {
                 .node_type(workspace, id)
                 .await?
                 .map(|t| (id.to_string(), t)))
+        }
+
+        async fn readable(&self, workspace: &str, id: &str) -> Result<bool> {
+            let key = (workspace.to_string(), id.to_string());
+            Ok(self.nodes.contains_key(&key) && !self.hidden.contains(&key))
         }
 
         async fn outgoing(&self, workspace: &str, id: &str) -> Result<Vec<RelationRef>> {

@@ -65,7 +65,8 @@ pub async fn execute_variable_length_pattern<S: Storage>(
         &context.branch,
         context.revision.as_ref(),
     )
-    .with_workspace_hint(&context.workspace_id);
+    .with_workspace_hint(&context.workspace_id)
+    .with_auth(context.auth_context.as_ref());
     execute_variable_length_with(
         &access,
         source_pattern,
@@ -202,20 +203,22 @@ pub(crate) async fn execute_variable_length_budgeted<A: RelationAccess>(
     // enumerating the same paths again and the result would repeat.
     let fast_path_applies =
         semantics.restrictor == PathRestrictor::Acyclic && params.min_depth <= 1;
-    let bindings = match (&seeded_starts, semantics.selector) {
-        (Some(starts), Some(PathSelector::AnyShortest | PathSelector::AllShortest))
-            if fast_path_applies =>
-        {
-            match pinned_targets(access, hints, target_pattern).await? {
-                Some(targets) => bind_endpoint_pairs(
-                    source_var,
-                    source_pattern,
-                    target_pattern,
-                    starts,
-                    &targets,
-                ),
-                None => bindings,
-            }
+    // A pinned target is a pin too: when the source is seeded and the target pin
+    // names nothing the caller may read, nothing can match, whatever the path.
+    let targets = match &seeded_starts {
+        Some(_) => pinned_targets(access, hints, target_pattern).await?,
+        None => None,
+    };
+    if targets.as_ref().is_some_and(|t| t.is_empty()) {
+        return Ok(vec![]);
+    }
+    let bindings = match (&seeded_starts, semantics.selector, &targets) {
+        (
+            Some(starts),
+            Some(PathSelector::AnyShortest | PathSelector::AllShortest),
+            Some(targets),
+        ) if fast_path_applies => {
+            bind_endpoint_pairs(source_var, source_pattern, target_pattern, starts, targets)
         }
         _ => bindings,
     };
@@ -419,9 +422,11 @@ async fn walk_edges<A: RelationAccess>(
 /// are needed; the depth-first search then runs over this partial adjacency and
 /// finds exactly the paths it would have found over the full one.
 ///
-/// A pin that names no existing node gives an EMPTY graph, the same answer as
-/// a node that exists and has no relations: whether a pinned id exists must not
-/// change what the query returns or whether it fails.
+/// A pin that names no existing node, or only nodes the caller may not read,
+/// gives an EMPTY graph, the same answer as a readable node without relations:
+/// whether a pinned id exists must not change what the query returns or
+/// whether it fails. An unreadable pinned node is dropped before any relation
+/// of it is read (see `pushdown::resolve_seek`).
 ///
 /// `Ok(None)` means "use the global route": the expansion grew past
 /// [`SEEK_EXPANSION_LIMIT`] nodes or ran into `budget` (relations read, or its
@@ -494,8 +499,8 @@ async fn seeded_graph<A: RelationAccess>(
 
 /// The nodes a pinned target variable names, when it is pinned.
 ///
-/// A pin that names no existing node is an empty list (no pair to ask about),
-/// not `None`: falling back to enumeration there would make a missing target
+/// A pin that names no existing node, or only nodes the caller may not read,
+/// is an empty list (no pair to ask about), not `None`: falling back to enumeration there would make a missing target
 /// fail at the path cap where an existing one answers, and so tell the two
 /// apart.
 async fn pinned_targets<A: RelationAccess>(

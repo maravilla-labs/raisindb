@@ -62,14 +62,21 @@ pub(super) fn side_for(end: End, direction: Direction) -> Side {
     }
 }
 
-/// Resolve a pin to nodes.
+/// Resolve a pin to the nodes it names that the caller may READ.
 ///
-/// * `Ok(Some(vec![]))`: the pin is contradictory (`a.id = 'x' AND a.id = 'y'`),
-///   so no relation can match, and saying so costs nothing.
-/// * `Ok(Some(nodes))`: read these nodes' relations.
-/// * `Ok(None)`: the pin names no node that exists. A relation can in principle
-///   outlive its node, and the global scan would still return it, so the caller
-///   scans globally to stay exact rather than answering from a guess.
+/// * `Ok(Some(nodes))`: read these nodes' relations. An empty list means no
+///   relation can match: the pin is contradictory (`a.id = 'x' AND a.id =
+///   'y'`), names no existing node, or names only nodes the caller may not
+///   read. The last two are deliberately the same answer: an unreadable pinned
+///   node is dropped before any relation of it is read, so whether it exists
+///   cannot be told from the rows, an error, a count or the access path.
+/// * `Ok(None)`: the seek names neither ids nor paths (not a pin).
+///
+/// Pinning a node is reading it. A node the caller cannot read is still walked
+/// THROUGH when it is not pinned (the endpoints-only policy of `pgq::rls`),
+/// but it cannot be the anchor of a narrowed read. A relation that outlives its
+/// node is not reached through a pin either; the global route (an unpinned
+/// `WHERE`) still sees it.
 pub(super) async fn resolve_seek<A: RelationAccess>(
     access: &A,
     seek: &NodeSeek,
@@ -90,9 +97,11 @@ pub(super) async fn resolve_seek<A: RelationAccess>(
         }
         (None, None) => return Ok(None),
     };
-    if nodes.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(nodes))
+    let mut readable = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        if access.readable(&node.workspace, &node.id).await? {
+            readable.push(node);
+        }
     }
+    Ok(Some(readable))
 }
