@@ -488,6 +488,12 @@ SELECT properties || '{"new_key": "value"}' FROM 'workspace'
 
 The `NEIGHBORS` function takes a direction parameter: `'OUT'` (outgoing), `'IN'` (incoming), or `'BOTH'`.
 
+Used as a table (`FROM NEIGHBORS(...)`) it also has a set form, selected by any named
+argument: `NEIGHBORS(id, 'OUT', depth => 2, min_depth => 2, types => 'KNOWS', max_nodes => 200000)`
+returns each node within `depth` hops once, with its shortest `depth` and `via_count`
+(the mutual-connection count at depth 2). See
+[Graph Queries](../guides/graph-queries.md#neighbourhood-queries-neighbors-with-depth).
+
 ### Full-Text Search Functions
 
 | Function | Signature | Description |
