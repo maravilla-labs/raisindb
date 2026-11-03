@@ -236,19 +236,27 @@ route is materialised. Prefer the set form for neighbourhood questions and keep
 
 ### Measured cost
 
-One node, a random graph, `(a)-[:k]->(b) WHERE a.id = '...'`. "Relations read" is
-what each access path returned from the relation indexes. Timings are the matcher
-alone (no SQL parse, no `WHERE`) on an **unoptimised** build, so read the ratio
-rather than the milliseconds.
+Random graph, one start node of about 10 (10,000 relations) and about 20
+(100,000 relations) outgoing relations, `SELECT ... GRAPH_TABLE(... WHERE a.id = '...')`
+over HTTP against an **unoptimised** `raisin-server` (compare the two columns, not
+the absolute milliseconds). "Before" is the same query on the previous engine.
 
-| Query | 10,000 relations | 100,000 relations |
-|---|---|---|
-| 1 hop, source pinned, before (global scan) | 9,946 read, 54 ms | 99,797 read, 566 ms |
-| 1 hop, source pinned, now (per-node) | 5 read, 0.3 ms | 30 read, 0.6 ms |
-| 1 hop, target pinned, now | 13 read, 0.3 ms | 24 read, 0.5 ms |
-| `{1,2}` hops, source pinned, before | 9,946 read, **fails: path cap** | 99,797 read, **fails: path cap** |
-| `{1,2}` hops, source pinned, now | 54 read, 0.7 ms (54 rows) | 621 read, 7 ms (621 rows) |
-| `NEIGHBORS(..., depth => 2)` | 54 read, 0.5 ms (49 nodes) | 621 read, 5 ms (556 nodes) |
+| Query | 10,000 relations: before | now | 100,000 relations: before | now |
+|---|---|---|---|---|
+| 1 hop, source pinned | 100 ms | 3 ms | 934 ms | 4 ms |
+| 1 hop, target pinned | 100 ms | 3 ms | 932 ms | 3 ms |
+| 2-hop chain `(a)->(m)->(c)`, source pinned | 1,467 ms | 10 ms | 28,274 ms | 53 ms |
+| `{1,2}` hops, source pinned | **error: path cap** | 10 ms (111 rows) | **error: path cap** | 50 ms (666 rows) |
+| `ANY SHORTEST {1,4}`, both ends pinned | **error: path cap** | 76 ms | **error: path cap** | 870 ms |
+| `NEIGHBORS(id, 'OUT', 'T')` of a node with no relations | 69 ms | 2 ms | 684 ms | 2 ms |
+| `NEIGHBORS(id, 'OUT', depth => 2, min_depth => 2)` | not available | 12 ms (98 nodes) | not available | 59 ms (593 nodes) |
+
+The same queries counted at the storage layer (relations the matcher read, before
+`WHERE`): the global scan reads every relation of the type (9,946 and 99,797 here),
+the per-node read 5 and 30 for a one-hop query, 54 and 621 for two hops.
+A 3-hop `NEIGHBORS` from a start in a 5,000-node, 100,000-relation graph reaches
+almost every node and takes about 0.5 s, which is the size of the answer, not of
+the repository.
 
 ## Graph Algorithms
 
