@@ -355,6 +355,11 @@ impl<'a> AnalyzerContext<'a> {
                 ColumnDef::simple("properties", DataType::JsonB),
                 ColumnDef::nullable("relation_type", DataType::Text),
                 ColumnDef::nullable("weight", DataType::Double),
+                // Set form only (`NEIGHBORS(..., depth => n)`); NULL for the
+                // one-row-per-relation form. APPENDED so positional `SELECT *`
+                // consumers of the original columns are not shifted.
+                ColumnDef::nullable("depth", DataType::BigInt),
+                ColumnDef::nullable("via_count", DataType::BigInt),
             ],
             primary_key: vec![],
             indexes: vec![],

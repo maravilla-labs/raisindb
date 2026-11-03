@@ -6,6 +6,7 @@
 use super::super::{
     Error, Expr, Literal, LogicalPlan, PhysicalPlan, PhysicalPlanner, PlanContext, ScanReason,
 };
+use super::neighborhood;
 
 impl PhysicalPlanner {
     /// Plan a `LogicalPlan::Scan` node.
@@ -87,7 +88,9 @@ impl PhysicalPlanner {
         // change exists to close, so a function that has no named arguments
         // REJECTS them rather than ignoring them.
         if let Some(named) = args.iter().find_map(|a| a.name.as_deref()) {
-            if name.eq_ignore_ascii_case("NEIGHBORS") || name.eq_ignore_ascii_case("GRAPH_TABLE") {
+            // NEIGHBORS takes named arguments in its set form (see
+            // `neighborhood.rs`); GRAPH_TABLE has none.
+            if name.eq_ignore_ascii_case("GRAPH_TABLE") {
                 return Err(Error::Validation(format!(
                     "{name} takes positional arguments only; '{named} => ...' is not                      an argument of {name}."
                 )));
@@ -95,12 +98,18 @@ impl PhysicalPlanner {
         }
 
         if name.eq_ignore_ascii_case("NEIGHBORS") {
+            // Only the positional arguments are start, direction, relation type;
+            // named ones (the set form) are read by `neighborhood::parse`.
+            let positional: Vec<&raisin_sql::analyzer::TypedExpr> = args
+                .iter()
+                .filter(|a| a.name.is_none())
+                .map(|a| &a.value)
+                .collect();
             // Expect 3 arguments: start_id, direction, relation_type (nullable)
-            let mut start_id =
-                Self::extract_string_literal(args.first().map(|a| &a.value), name, 0)?;
-            let direction = Self::extract_string_literal(args.get(1).map(|a| &a.value), name, 1)?
-                .to_uppercase();
-            let relation_type = match args.get(2).map(|a| &a.value) {
+            let mut start_id = Self::extract_string_literal(positional.first().copied(), name, 0)?;
+            let direction =
+                Self::extract_string_literal(positional.get(1).copied(), name, 1)?.to_uppercase();
+            let relation_type = match positional.get(2).copied() {
                 Some(expr) => match &expr.expr {
                     Expr::Literal(Literal::Null) => None,
                     Expr::Literal(Literal::Text(v)) | Expr::Literal(Literal::Path(v)) => {
@@ -146,6 +155,28 @@ impl PhysicalPlanner {
             let branch = branch_override
                 .clone()
                 .unwrap_or_else(|| self.default_branch.to_string());
+
+            if neighborhood::is_set_form(args) {
+                if !matches!(direction.as_str(), "OUT" | "IN" | "BOTH") {
+                    return Err(Error::Validation(format!(
+                        "NEIGHBORS: direction must be 'OUT', 'IN' or 'BOTH', got '{direction}'."
+                    )));
+                }
+                let set = neighborhood::parse(args, relation_type)?;
+                return Ok(PhysicalPlan::NeighborhoodScan {
+                    tenant_id: self.default_tenant_id.to_string(),
+                    repo_id: self.default_repo_id.to_string(),
+                    branch,
+                    alias: alias.clone(),
+                    source_workspace: workspace_name,
+                    source_node_id: start_id,
+                    direction,
+                    relation_types: set.relation_types,
+                    min_depth: set.min_depth,
+                    max_depth: set.max_depth,
+                    max_nodes: set.max_nodes,
+                });
+            }
 
             Ok(PhysicalPlan::NeighborsScan {
                 tenant_id: self.default_tenant_id.to_string(),

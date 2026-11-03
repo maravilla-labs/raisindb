@@ -74,6 +74,9 @@ fn dispatch_row<'a, S: Storage + raisin_storage::transactional::TransactionalSto
         PhysicalPlan::NeighborsScan { .. } => {
             Box::pin(crate::physical_plan::scan_executors::execute_neighbors_scan(plan, ctx))
         }
+        PhysicalPlan::NeighborhoodScan { .. } => {
+            Box::pin(crate::physical_plan::scan_executors::execute_neighborhood_scan(plan, ctx))
+        }
         PhysicalPlan::SpatialDistanceScan { .. } => {
             Box::pin(crate::physical_plan::scan_executors::execute_spatial_distance_scan(plan, ctx))
         }

@@ -59,6 +59,7 @@ pub mod filter;
 pub mod fulltext;
 pub mod graph_access;
 pub mod graph_algo;
+pub mod graph_neighborhood;
 pub mod hash_aggregate;
 pub mod hash_join;
 pub mod index_lookup_join;

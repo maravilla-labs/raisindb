@@ -75,6 +75,12 @@
 //! Queries the relation index to find connected nodes via graph edges.
 //! Used for graph traversal queries.
 //!
+//! ## NeighborhoodScan
+//!
+//! The set form of `NEIGHBORS(..., depth => n)`: a breadth-first search over
+//! the per-node relation indexes that returns each node within `n` hops once,
+//! with its shortest distance and the number of previous-level nodes reaching it.
+//!
 //! ## SpatialDistanceScan
 //!
 //! Queries the `spatial_index` column family to find nodes within a given
@@ -150,6 +156,7 @@ impl PhysicalPlan {
                 | PhysicalPlan::NodeIdScan { .. }
                 | PhysicalPlan::FullTextScan { .. }
                 | PhysicalPlan::NeighborsScan { .. }
+                | PhysicalPlan::NeighborhoodScan { .. }
                 | PhysicalPlan::SpatialDistanceScan { .. }
                 | PhysicalPlan::SpatialKnnScan { .. }
                 | PhysicalPlan::ReferenceIndexScan { .. }

@@ -15,6 +15,7 @@
 mod aggregate;
 mod dml;
 mod limit;
+mod neighborhood;
 mod scan;
 mod spatial_knn;
 mod vector_knn;

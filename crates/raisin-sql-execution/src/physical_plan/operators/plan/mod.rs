@@ -302,6 +302,25 @@ define_physical_plan! {
             projection: Option<Vec<String>>,
             limit: Option<usize>,
         },
+        /// Depth-aware neighbourhood: the DISTINCT nodes within `max_depth`
+        /// hops, each with its shortest `depth` and `via_count`. The set form of
+        /// `NEIGHBORS` (see `graph_neighborhood`).
+        NeighborhoodScan {
+            tenant_id: String,
+            repo_id: String,
+            branch: String,
+            alias: Option<String>,
+            source_workspace: String,
+            source_node_id: String,
+            /// `OUT`, `IN` or `BOTH`.
+            direction: String,
+            /// Relation types to follow; empty = every type.
+            relation_types: Vec<String>,
+            min_depth: u32,
+            max_depth: u32,
+            /// Visited-node budget; exceeding it is an error, never a truncation.
+            max_nodes: usize,
+        },
         /// Spatial proximity scan using geohash index.
         ///
         /// Emits a `__distance` column (metres, geodesic) and yields rows in

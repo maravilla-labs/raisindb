@@ -166,6 +166,25 @@ impl PhysicalPlan {
                     source_node_id, direction, rel_type_str
                 )
             }
+            PhysicalPlan::NeighborhoodScan {
+                source_node_id,
+                direction,
+                relation_types,
+                min_depth,
+                max_depth,
+                max_nodes,
+                ..
+            } => {
+                let types = if relation_types.is_empty() {
+                    "*".to_string()
+                } else {
+                    relation_types.join(",")
+                };
+                format!(
+                    "NeighborhoodScan: source={}, direction={}, types={}, depth={}..{}, max_nodes={}",
+                    source_node_id, direction, types, min_depth, max_depth, max_nodes
+                )
+            }
             PhysicalPlan::SpatialDistanceScan {
                 property_name,
                 center_lon,
