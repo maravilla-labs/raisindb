@@ -61,7 +61,8 @@ pub async fn execute_variable_length_pattern<S: Storage>(
         &context.repo_id,
         &context.branch,
         context.revision.as_ref(),
-    );
+    )
+    .with_workspace_hint(&context.workspace_id);
     execute_variable_length_with(
         &access,
         source_pattern,

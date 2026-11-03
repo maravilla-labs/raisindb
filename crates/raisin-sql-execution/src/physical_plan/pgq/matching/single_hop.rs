@@ -73,7 +73,8 @@ pub async fn match_single_hop<S: Storage>(
         &context.repo_id,
         &context.branch,
         context.revision.as_ref(),
-    );
+    )
+    .with_workspace_hint(&context.workspace_id);
     match_single_hop_with(&access, source_pattern, rel_pattern, target_pattern, hints).await
 }
 

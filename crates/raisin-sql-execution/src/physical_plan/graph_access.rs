@@ -119,6 +119,9 @@ pub struct StorageAccess<'a, S: Storage> {
     repo_id: &'a str,
     branch: &'a str,
     revision: Option<&'a HLC>,
+    /// A workspace to ask about even if the repository's workspace list does
+    /// not name it (the query's own workspace).
+    workspace_hint: Option<&'a str>,
 }
 
 impl<'a, S: Storage> StorageAccess<'a, S> {
@@ -135,7 +138,14 @@ impl<'a, S: Storage> StorageAccess<'a, S> {
             repo_id,
             branch,
             revision,
+            workspace_hint: None,
         }
+    }
+
+    /// Also consider `workspace` when a node has to be located by id or path.
+    pub fn with_workspace_hint(mut self, workspace: &'a str) -> Self {
+        self.workspace_hint = Some(workspace);
+        self
     }
 
     fn scope<'b>(&'b self, workspace: &'b str) -> StorageScope<'b> {
@@ -167,7 +177,13 @@ impl<S: Storage> RelationAccess for StorageAccess<'_, S> {
             .list(RepoScope::new(self.tenant_id, self.repo_id))
             .await
             .map_err(backend)?;
-        Ok(list.into_iter().map(|w| w.name).collect())
+        let mut names: Vec<String> = list.into_iter().map(|w| w.name).collect();
+        if let Some(hint) = self.workspace_hint {
+            if !names.iter().any(|n| n == hint) {
+                names.push(hint.to_string());
+            }
+        }
+        Ok(names)
     }
 
     async fn node_type(&self, workspace: &str, id: &str) -> Result<Option<String>> {
