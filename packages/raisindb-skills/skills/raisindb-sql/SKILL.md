@@ -334,8 +334,11 @@ WHERE id = '<bob node id>'
 ```
 
 `depth` is 1 to 16, `types` is `'A'` or `'A,B'`, `min_depth` hides nearer nodes
-(they are still walked through), and `max_nodes` (default 200000) is a budget that
-**fails with an error** rather than returning a partial neighbourhood. In
+(they are still walked through), and `max_nodes` (default 200000, at most 1000000 and
+above the default only for a system admin) is a budget that **fails with an error**
+rather than returning a partial neighbourhood; so do the 3 s time limit and the
+relation-read ceiling. `via_count` counts readable nodes only, and a start the caller
+cannot read gives no rows. In
 `GRAPH_TABLE`, a `WHERE` that pins an endpoint with `a.id = '...'` (top-level
 `AND`, text literal) reads that node's own relations instead of scanning the
 repository. See the book chapter "Graph Queries".

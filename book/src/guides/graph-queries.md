@@ -125,17 +125,18 @@ the set form:** one row per **distinct node** within `depth` hops.
 | third positional / `types =>` | relation types to follow, `'A'` or `'A,B'` (exact, case sensitive) | every type | giving both is an error unless they agree |
 | `depth =>` | deepest hop to follow | `1` | 1 to 16 |
 | `min_depth =>` | shallowest depth to **report**; nearer nodes are still walked through | `1` | 1 to `depth` |
-| `max_nodes =>` | visited-node budget, the start included | `200000` | 1 to 5,000,000 |
+| `max_nodes =>` | visited-node budget, the start included | `200000` | 1 to 1,000,000; above 200,000 only for a system or system-admin caller (see below) |
 
 | Column | Meaning |
 |---|---|
 | `id`, `path`, `node_type`, `name`, `properties`, ... | the node, as in the one-hop form |
 | `depth` | the **shortest** distance from the start (a node is reported once) |
-| `via_count` | the number of distinct nodes one level closer that reach it. At depth 2 this is the number of **mutual connections**. At depth 1 it is 1 |
+| `via_count` | the number of distinct nodes one level closer that reach it **and that the caller may read**. At depth 2 this is the number of **mutual connections**. At depth 1 it is 1 |
 
 Rows come back ordered by depth, then id. Unknown, repeated or non-integer
 arguments are errors that list the valid names. The start node is never part of
-the result, and a start that does not exist (or has no relations) gives no rows.
+the result, and a start that does not exist, has no relations, or that the caller
+may not read gives no rows.
 
 ```sql
 -- Friends of friends of Ann, who are not already her friends, with the number
@@ -165,20 +166,51 @@ never by the number of paths through it and never by the number of relations in
 the repository. A variable-length `GRAPH_TABLE` pattern enumerates one result per
 **route**, which grows with the product of the degrees along the way.
 
-The visited-node budget **fails, it does not truncate**. When the search would
-visit more than `max_nodes` nodes it stops with an error naming the budget and
-the remedies (lower `depth`, restrict `types`, raise `max_nodes`). A neighbourhood
-cut short is indistinguishable from a complete one once it reaches the client, so
-none is returned.
+### Limits
+
+Three limits stop the search, and each one **fails the query, it does not
+truncate** it (a neighbourhood cut short is indistinguishable from a complete one
+once it reaches the client, so none is returned):
+
+| Limit | Value | Error |
+|---|---|---|
+| visited nodes, the start included | `max_nodes` (default 200,000) | `neighbourhood too large: narrow the query with depth, types or max_nodes` |
+| relations read from the per-node indexes (every relation a seek returns, followed or not) | 200,000, or `max_nodes` when that is larger (the ceiling every scan has) | the same text |
+| wall-clock time | 3 seconds (the time limit every scan has) | `neighbourhood search ran out of time: narrow the query with depth, types or max_nodes` |
+
+`max_nodes` accepts 1 to 1,000,000, but only a system context or a system admin
+is given more than the default 200,000. Any other caller (an ordinary user, an
+anonymous visitor, a query with no auth context) is held to 200,000 whatever it
+asks for: asking for more is not an error, the search simply fails at 200,000.
+Lowering `max_nodes` is always allowed.
+
+The errors carry no numbers: not how many nodes were visited, not how many
+relations were read, no node ids. Those counts include nodes the caller may not
+read, so they are logged on the server at debug level only.
+
+Rows are produced as the search goes, a few hundred nodes at a time, so a large
+result is not loaded into memory before the first row is returned.
 
 ### Row-level security
 
-The policy is the one `GRAPH_TABLE` documents: **endpoints only**. A node is
-checked against the caller's permissions when it is about to be reported (and the
-root node is skipped, as in the one-hop form). A node the caller cannot read is
-left out of the result but is still walked through, so a friend of a friend is
-found even if the friend in between is private, and `via_count` counts every
-intermediate. A system caller (no auth context) is not filtered.
+* **The start** is checked first. A start the caller may not read gives exactly
+  what a start that does not exist gives: no rows, no error, and nothing is read
+  from it.
+* **Reported nodes** are checked against the caller's permissions (the root node
+  is never reported, as in the one-hop form). A node the caller cannot read is
+  left out of the result.
+* **Walked-through nodes**: the policy is the one `GRAPH_TABLE` documents,
+  **endpoints only**. A node the caller cannot read is still walked through, so
+  a friend of a friend is found even if the friend in between is private.
+* **`via_count`** counts only nodes one level closer that the caller may read. A
+  node reached only through private nodes is reported with `via_count = 0`.
+
+What a caller can still learn about private nodes, by design: a reported node's
+`depth` is its shortest distance through any node, private ones included (as a
+`GRAPH_TABLE` path through a private middle node still produces its row), and
+whether the search hits a limit depends on the whole neighbourhood, private
+nodes included (but the error never says by how much). A system context is not
+filtered.
 
 ## `GRAPH_TABLE` with a pinned endpoint
 
@@ -208,11 +240,19 @@ SELECT * FROM GRAPH_TABLE(
 * A variable-length pattern whose **source** is pinned expands outward from it,
   level by level, reading only the nodes within `depth - 1` hops, and runs the
   usual path search over that part of the graph. If the expansion passes 50,000
-  nodes the query silently takes the global route instead; the answer is the same.
+  nodes, reads more than 200,000 relations, or runs for more than 3 seconds, the
+  query takes the global route instead; the answer is the same, and the extra
+  work the narrowed read can add is bounded.
 * `ANY SHORTEST` / `ALL SHORTEST` between two pinned nodes is answered by a
-  breadth-first search, not by enumerating every path.
-* A pin that names no existing node falls back to the global scan, so a relation
-  that outlives its node is still found. Pin by an id that exists.
+  breadth-first search over that expanded part of the graph (so it has the same
+  limits), not by enumerating every path; `ALL SHORTEST` still stops at the
+  10,000 path cap.
+* In a single hop, a pin that names no existing node falls back to the global
+  scan, so a relation that outlives its node is still found; the rows are the
+  ones the pinned node would have given. In a variable-length pattern a pinned
+  source or `SHORTEST` target that names no existing node gives no rows, exactly
+  like an existing node without relations: whether a pinned id exists never
+  changes the rows or turns an answer into an error. Pin by an id that exists.
 * A pin on the **target** of a variable-length pattern is not used (the path
   search starts from sources). Write the pattern the other way round, or use
   `NEIGHBORS(..., 'IN', ...)`.
