@@ -504,3 +504,56 @@ async fn shortest_between_two_pinned_nodes_does_not_enumerate_paths() {
     let rows = var_list(&g, &p, &p.hints).await.unwrap();
     assert_eq!(rows, vec![("c0".into(), "c17".into(), 1)]);
 }
+
+// ---- a pin that names nothing ------------------------------------------------
+
+#[tokio::test]
+async fn a_variable_length_pin_naming_no_node_is_empty_without_a_global_scan() {
+    // The unpinned route over this ring would fail at the path cap; a missing
+    // pin must answer like an existing node without relations (empty), not
+    // like the unpinned route, or the error would tell the two apart.
+    let mut g = FakeGraph::new();
+    for i in 0..6000 {
+        g.node(WS, &format!("x{i}"), "t:P");
+        g.rel(WS, &format!("x{i}"), &format!("x{}", (i + 1) % 6000), "k");
+    }
+    g.node(WS, "lonely", "t:P");
+    let missing = parse("(a)-[r:k]->{1,3}(b)", "a.id = 'ghost'");
+    let lonely = parse("(a)-[r:k]->{1,3}(b)", "a.id = 'lonely'");
+    assert_eq!(
+        var_rows(&g, &missing, &missing.hints).await,
+        Ok(BTreeSet::new())
+    );
+    assert_eq!(
+        var_rows(&g, &lonely, &lonely.hints).await,
+        Ok(BTreeSet::new())
+    );
+    assert_eq!(g.global_scans.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_shortest_target_naming_no_node_is_empty_like_an_unreachable_one() {
+    // Complete graph: enumerating from c0 would pass the path cap. A target
+    // that does not exist and one that exists but is unreachable both answer
+    // with no row and no error.
+    let mut g = FakeGraph::new();
+    for i in 0..30 {
+        g.node(WS, &format!("c{i}"), "t:P");
+    }
+    g.node(WS, "island", "t:P");
+    for i in 0..30 {
+        for j in 0..30 {
+            if i != j {
+                g.rel(WS, &format!("c{i}"), &format!("c{j}"), "k");
+            }
+        }
+    }
+    for target in ["ghost", "island"] {
+        let p = parse(
+            "ANY SHORTEST p = (a)-[r:k]->{1,4}(b)",
+            &format!("a.id = 'c0' AND b.id = '{target}'"),
+        );
+        assert_eq!(var_list(&g, &p, &p.hints).await, Ok(vec![]), "{target}");
+    }
+    assert_eq!(g.global_scans.load(Ordering::SeqCst), 0);
+}

@@ -30,6 +30,7 @@ use crate::physical_plan::graph_access::{
     RelationAccess, ScannedRelation, SeekNode, Side, StorageAccess,
 };
 use crate::physical_plan::graph_algo::{GraphAdjacency, GraphEdge, GraphNodeId, GraphPath};
+use crate::physical_plan::graph_budget::GraphBudget;
 use crate::physical_plan::pgq::context::PgqContext;
 use crate::physical_plan::pgq::types::{NodeInfo, RelationInfo, VariableBinding};
 
@@ -87,6 +88,31 @@ pub(crate) async fn execute_variable_length_with<A: RelationAccess>(
     bindings: Vec<VariableBinding>,
     hints: &SeekHints,
 ) -> Result<Vec<VariableBinding>> {
+    execute_variable_length_budgeted(
+        access,
+        source_pattern,
+        rel_pattern,
+        target_pattern,
+        semantics,
+        bindings,
+        hints,
+        GraphBudget::standard(),
+    )
+    .await
+}
+
+/// [`execute_variable_length_with`] with the seeded expansion held to `budget`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_variable_length_budgeted<A: RelationAccess>(
+    access: &A,
+    source_pattern: &NodePattern,
+    rel_pattern: &RelationshipPattern,
+    target_pattern: &NodePattern,
+    semantics: &PathSemantics,
+    bindings: Vec<VariableBinding>,
+    hints: &SeekHints,
+    budget: GraphBudget,
+) -> Result<Vec<VariableBinding>> {
     let quantifier = rel_pattern.quantifier.as_ref().ok_or_else(|| {
         ExecutionError::Validation("Variable-length pattern requires a quantifier".to_string())
     })?;
@@ -120,7 +146,7 @@ pub(crate) async fn execute_variable_length_with<A: RelationAccess>(
         .is_some_and(|v| bindings.iter().all(|b| b.get_node(v).is_none()));
     let seeded = match hints.seek_for(source_pattern.variable.as_ref()) {
         Some(seek) if source_unbound => {
-            seeded_graph(access, seek, rel_pattern, params.max_depth).await?
+            seeded_graph(access, seek, rel_pattern, params.max_depth, budget).await?
         }
         _ => None,
     };
@@ -338,18 +364,22 @@ fn type_accepted(types: &[String], relation_type: &str) -> bool {
     }
 }
 
-/// The edges leaving `node` in the direction the pattern walks.
+/// The edges leaving `node` in the direction the pattern walks, and how many
+/// relations the index returned to find them.
 async fn walk_edges<A: RelationAccess>(
     access: &A,
     node: &GraphNodeId,
     side: Side,
     types: &[String],
-) -> Result<Vec<GraphEdge>> {
+) -> Result<(Vec<GraphEdge>, usize)> {
     let (workspace, id) = node;
     let mut edges = Vec::new();
+    let read;
     match side {
         Side::In => {
-            for (src_ws, src_id, rel) in access.incoming(workspace, id).await? {
+            let rels = access.incoming(workspace, id).await?;
+            read = rels.len();
+            for (src_ws, src_id, rel) in rels {
                 if type_accepted(types, &rel.relation_type) {
                     // The reverse entry is the relation seen from the other end:
                     // its `target_node_type` is the SOURCE's type.
@@ -364,7 +394,9 @@ async fn walk_edges<A: RelationAccess>(
             }
         }
         _ => {
-            for rel in access.outgoing(workspace, id).await? {
+            let rels = access.outgoing(workspace, id).await?;
+            read = rels.len();
+            for rel in rels {
                 if type_accepted(types, &rel.relation_type) {
                     edges.push(GraphEdge::new(
                         &rel.workspace,
@@ -377,7 +409,7 @@ async fn walk_edges<A: RelationAccess>(
             }
         }
     }
-    Ok(edges)
+    Ok((edges, read))
 }
 
 /// Build the adjacency a pinned source can reach, level by level.
@@ -387,17 +419,25 @@ async fn walk_edges<A: RelationAccess>(
 /// are needed; the depth-first search then runs over this partial adjacency and
 /// finds exactly the paths it would have found over the full one.
 ///
-/// `Ok(None)` means "use the global route": the pin names no existing node, or
-/// the expansion grew past [`SEEK_EXPANSION_LIMIT`].
+/// A pin that names no existing node gives an EMPTY graph, the same answer as
+/// a node that exists and has no relations: whether a pinned id exists must not
+/// change what the query returns or whether it fails.
+///
+/// `Ok(None)` means "use the global route": the expansion grew past
+/// [`SEEK_EXPANSION_LIMIT`] nodes or ran into `budget` (relations read, or its
+/// deadline). That never changes the answer, only the access path, and it keeps
+/// the extra work this route can add to a query bounded.
 async fn seeded_graph<A: RelationAccess>(
     access: &A,
     seek: &NodeSeek,
     rel_pattern: &RelationshipPattern,
     max_depth: u32,
+    mut budget: GraphBudget,
 ) -> Result<Option<SeededGraph>> {
-    let Some(nodes) = resolve_seek(access, seek).await? else {
+    if !seek.is_seekable() {
         return Ok(None);
-    };
+    }
+    let nodes = resolve_seek(access, seek).await?.unwrap_or_default();
     // `Left` walks the reverse index; `Right` and the (forward-only) `Any` walk
     // the forward one.
     let side = if matches!(rel_pattern.direction, Direction::Left) {
@@ -424,7 +464,16 @@ async fn seeded_graph<A: RelationAccess>(
                 );
                 return Ok(None);
             }
-            let edges = walk_edges(access, &node, side, &rel_pattern.types).await?;
+            let (edges, read) = walk_edges(access, &node, side, &rel_pattern.types).await?;
+            if let Err(why) = budget.charge(read) {
+                tracing::debug!(
+                    reason = ?why,
+                    expanded = expanded.len(),
+                    relations_read = budget.relations_read(),
+                    "PGQ: seeded expansion reached its budget; using the global scan"
+                );
+                return Ok(None);
+            }
             if edges.is_empty() {
                 continue;
             }
@@ -443,7 +492,12 @@ async fn seeded_graph<A: RelationAccess>(
     Ok(Some(SeededGraph { adjacency, starts }))
 }
 
-/// The nodes a pinned target variable names, when it is pinned and resolvable.
+/// The nodes a pinned target variable names, when it is pinned.
+///
+/// A pin that names no existing node is an empty list (no pair to ask about),
+/// not `None`: falling back to enumeration there would make a missing target
+/// fail at the path cap where an existing one answers, and so tell the two
+/// apart.
 async fn pinned_targets<A: RelationAccess>(
     access: &A,
     hints: &SeekHints,
@@ -452,12 +506,14 @@ async fn pinned_targets<A: RelationAccess>(
     let Some(seek) = hints.seek_for(target_pattern.variable.as_ref()) else {
         return Ok(None);
     };
-    Ok(resolve_seek(access, seek).await?.map(|nodes| {
-        nodes
+    Ok(Some(
+        resolve_seek(access, seek)
+            .await?
+            .unwrap_or_default()
             .into_iter()
             .filter(|n| matches_label(&target_pattern.labels, &n.node_type))
-            .collect()
-    }))
+            .collect(),
+    ))
 }
 
 /// One binding per (start, target) pair that can be asked about directly.
