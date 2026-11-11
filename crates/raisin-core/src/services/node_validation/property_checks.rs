@@ -176,27 +176,15 @@ impl<S: Storage> NodeValidator<S> {
             }
         }
 
-        // Fallback to O(n) scan if index not available or query failed
+        // Otherwise ask the property index through the repository (one lookup), never by listing the workspace: a unique check
+        // that listed every node made a sign-up take as long as the workspace was large (12-50 s at 79,000 nodes).
         let scope = StorageScope::new(&self.tenant_id, &self.repo_id, &self.branch, workspace);
-        let all_nodes = node_repo
-            .list_all(scope, raisin_storage::ListOptions::for_api())
+        let hits = node_repo
+            .find_by_property(scope, prop_name, prop_value)
             .await?;
-
-        for node in all_nodes {
-            // Skip the current node
-            if node.id == current_node_id {
-                continue;
-            }
-
-            // Check if this node has the same property value
-            if let Some(other_value) = node.properties.get(prop_name) {
-                if Self::property_values_equal(prop_value, other_value) {
-                    return Ok(Some(node));
-                }
-            }
-        }
-
-        Ok(None)
+        // The repository already compares by the index's canonical rendering (a String and an all-digit Decimal are one key),
+        // so a hit is a match; only the node being validated is skipped.
+        Ok(hits.into_iter().find(|node| node.id != current_node_id))
     }
 
     /// Compare two property values for equality

@@ -341,6 +341,38 @@ impl NodeRepository for InMemoryNodeRepo {
         list_ops::list_all(self, tenant_id, repo_id, branch, workspace, options)
     }
 
+    /// In-memory storage has no property index: a filtered listing answers the same question, which is all a test needs.
+    fn find_by_property(
+        &self,
+        scope: StorageScope<'_>,
+        property_name: &str,
+        property_value: &models::nodes::properties::PropertyValue,
+    ) -> impl std::future::Future<Output = Result<Vec<models::nodes::Node>>> + Send {
+        let StorageScope {
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+        } = scope;
+        let name = property_name.to_string();
+        let value = property_value.clone();
+        async move {
+            let all = list_ops::list_all(
+                self,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                ListOptions::for_api(),
+            )
+            .await?;
+            Ok(all
+                .into_iter()
+                .filter(|n| n.properties.get(&name) == Some(&value))
+                .collect())
+        }
+    }
+
     fn count_all(
         &self,
         scope: StorageScope<'_>,
