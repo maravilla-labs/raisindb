@@ -108,7 +108,7 @@ jobs:
           WINDOWS=$(jq -cn --arg f "$FEATURES" \
             '{os:"windows-latest",target:"x86_64-pc-windows-msvc",archive:"zip",ext:".exe",features:$f}')
           MACOS_ARM=$(jq -cn --arg f "$FEATURES" \
-            '{os:"macos-14",target:"aarch64-apple-darwin",archive:"tar.gz",ext:"",features:$f}')
+            '{os:"macos-15",target:"aarch64-apple-darwin",archive:"tar.gz",ext:"",features:$f}')
           MACOS_INTEL=$(jq -cn --arg f "$FEATURES" \
             '{os:"macos-15-intel",target:"x86_64-apple-darwin",archive:"tar.gz",ext:"",features:$f}')
 
