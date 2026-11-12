@@ -23,18 +23,28 @@ impl NodeRepositoryImpl {
     ) -> Result<Vec<Node>> {
         let value_hash = hash_property_value(property_value);
 
-        // The one revision-bounded PROPERTY_INDEX reader, at the branch HEAD.
-        let node_ids = PropertyIndexReader::new(
-            &self.db,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            property_name,
-            false,
-            None,
-        )?
-        .find(property_value, None)?;
+        // The one revision-bounded PROPERTY_INDEX reader, at the branch HEAD. A node is indexed under `prop` while it is a draft
+        // and under `prop_pub` once it carries `published_at`, so a lookup "by value at HEAD" reads both tags; reading only
+        // `prop` missed every published node (a unique check then let a duplicate through).
+        let mut node_ids: Vec<String> = Vec::new();
+        for published in [false, true] {
+            for id in PropertyIndexReader::new(
+                &self.db,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                property_name,
+                published,
+                None,
+            )?
+            .find(property_value, None)?
+            {
+                if !node_ids.contains(&id) {
+                    node_ids.push(id);
+                }
+            }
+        }
 
         // Fetch actual nodes
         let mut nodes = Vec::new();
