@@ -74,11 +74,24 @@ impl UnifiedJobEventHandler {
         // produce N parked jobs and zero provider calls. See
         // `crate::jobs::circuit_breaker`.
         //
-        // Only this job type is keyed on the revision. The others here are
+        // `TriggerEvaluation` is keyed on the revision for the same reason: each
+        // write carries its own `node_data` and `changed_properties` in the
+        // context, and a trigger filtered on `changed_properties` decides from
+        // exactly those. Two writes to one node in quick succession (issue a
+        // quote, then accept it ~50 ms later) shared the key
+        // `trigger_eval:Updated:{node_id}:{node_type}`, so while the first job
+        // was still pending the second was DROPPED with its context, and the
+        // trigger waiting for the second change never fired. Duplicate copies
+        // of ONE write still collapse: they carry the same revision.
+        //
+        // Only these job types are keyed on the revision. The others here are
         // either not revision-scoped or genuinely idempotent per node, and
         // widening the rule to them would multiply job volume for no
         // correctness gain.
-        if matches!(job_type, JobType::EmbeddingGenerate { .. }) {
+        if matches!(
+            job_type,
+            JobType::EmbeddingGenerate { .. } | JobType::TriggerEvaluation { .. }
+        ) {
             dedup_key.push(':');
             dedup_key.push_str(&context.revision.to_string());
         }
