@@ -196,6 +196,11 @@ jobs:
       - name: raisin-sql-execution ai-tools retrieval SQL
         run: cargo test -p raisin-sql-execution --test all rag_retrieval_sql
 
+      # GRANT/REVOKE and the other ACL statements must drop cached permission
+      # sets; otherwise a revoked group keeps applying until the cache TTL (#23).
+      - name: raisin-sql-execution ACL statements drop cached permissions
+        run: cargo test -p raisin-sql-execution --test all acl_permission_cache
+
       # Anonymous visitor chat: the visitor zone in row-level security, the
       # anonymous tool grant, the WebSocket visitor chat (limits, leases,
       # replies reaching only the owning session), and the conversation events
