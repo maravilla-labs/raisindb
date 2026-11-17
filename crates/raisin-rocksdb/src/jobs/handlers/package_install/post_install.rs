@@ -55,6 +55,11 @@ pub const POST_INSTALL_PHASE_BUDGET: Duration = Duration::from_secs(1200);
 const FUNCTIONS_WORKSPACE: &str = "functions";
 const FUNCTION_NODE_TYPE: &str = "raisin:Function";
 const MAX_ERROR_LEN: usize = 500;
+/// Most warnings kept per hook, and the longest each may be.
+const MAX_WARNINGS: usize = 20;
+const MAX_WARNING_LEN: usize = 300;
+/// Longest rendering of a hook's return value kept on the package node.
+const MAX_OUTPUT_LEN: usize = 1_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// What happened to one hook. Recorded on the package node as
@@ -68,6 +73,51 @@ pub struct PostInstallResult {
     pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The hook's own `warnings` (a list of strings in its return value),
+    /// bounded. What a seed hook reports it deferred or could not do.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// The hook's return value as compact JSON, truncated. Absent when the
+    /// hook returned nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
+/// A bounded summary of a hook's return value: its `warnings` (strings, or
+/// objects carrying a `message`) and the whole value as truncated JSON.
+pub(super) fn summarize_output(value: Option<&serde_json::Value>) -> (Vec<String>, Option<String>) {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return (Vec::new(), None);
+    };
+    let warnings = value
+        .get("warnings")
+        .and_then(|w| w.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|w| match w {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    other => other
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
+                        .or_else(|| Some(other.to_string())),
+                })
+                .filter(|w| !w.trim().is_empty())
+                .take(MAX_WARNINGS)
+                .map(|w| truncate_chars(w.trim(), MAX_WARNING_LEN))
+                .collect()
+        })
+        .unwrap_or_default();
+    let output = truncate_chars(&value.to_string(), MAX_OUTPUT_LEN);
+    (warnings, Some(output))
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max).collect();
+    format!("{cut}…")
 }
 
 /// The phase's results, plus the first failure as `(function, message)`.
@@ -118,12 +168,17 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 .await;
             let duration_ms = started.elapsed().as_millis() as u64;
             match outcome {
-                Ok(()) => results.push(PostInstallResult {
-                    function: hook.function.clone(),
-                    status: "completed".into(),
-                    duration_ms,
-                    error: None,
-                }),
+                Ok(returned) => {
+                    let (warnings, output) = summarize_output(returned.as_ref());
+                    results.push(PostInstallResult {
+                        function: hook.function.clone(),
+                        status: "completed".into(),
+                        duration_ms,
+                        error: None,
+                        warnings,
+                        output,
+                    })
+                }
                 Err(msg) => {
                     let msg = shorten(&msg);
                     tracing::warn!(
@@ -137,6 +192,8 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                         status: "failed".into(),
                         duration_ms,
                         error: Some(msg.clone()),
+                        warnings: Vec::new(),
+                        output: None,
                     });
                     failure = Some((hook.function.clone(), msg));
                 }
@@ -154,7 +211,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         repo_id: &str,
         branch: &str,
         timeout: Duration,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<Option<serde_json::Value>, String> {
         if timeout.is_zero() {
             return Err("the post_install time budget is used up".into());
         }
@@ -228,15 +285,27 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     /// Poll the registry until the job is terminal or `timeout` passes. The
     /// same polling the HTTP sync-invoke path uses; the registry has no
     /// completion notification to wait on.
+    ///
+    /// On success, the function's return value (the `result` of the
+    /// `FunctionExecutionResult` the function job stores as its job result).
     async fn wait_for_function_job(
         &self,
         job_id: &JobId,
         timeout: Duration,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<Option<serde_json::Value>, String> {
         let poll = async {
             loop {
                 match self.job_registry.get_status(job_id).await {
-                    Ok(JobStatus::Completed) => return Ok(()),
+                    Ok(JobStatus::Completed) => {
+                        let returned = self
+                            .job_registry
+                            .get_job_info(job_id)
+                            .await
+                            .ok()
+                            .and_then(|info| info.result)
+                            .and_then(|r| r.get("result").cloned());
+                        return Ok(returned);
+                    }
                     Ok(JobStatus::Failed(e)) => return Err(e),
                     Ok(JobStatus::Cancelled) => return Err("the function job was cancelled".into()),
                     Ok(_) => tokio::time::sleep(POLL_INTERVAL).await,
@@ -270,6 +339,8 @@ fn skipped(hook: &PostInstallHook, reason: String) -> PostInstallResult {
         status: "skipped".into(),
         duration_ms: 0,
         error: Some(reason),
+        warnings: Vec::new(),
+        output: None,
     }
 }
 

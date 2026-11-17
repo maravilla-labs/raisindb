@@ -11,6 +11,8 @@ import {
   formatInstallFailure,
   formatPostInstallResults,
   installVerdict,
+  currentResults,
+  retryNotice,
   INSTALL_POLL_TIMEOUT_MS,
 } from './package.js';
 import { countPostInstallHooks, type PackageSummary } from '../api.js';
@@ -409,5 +411,98 @@ describe('countPostInstallHooks', () => {
     expect(countPostInstallHooks([{ function: '/lib/a' }])).toBe(1);
     expect(countPostInstallHooks(undefined)).toBeUndefined();
     expect(countPostInstallHooks('not json')).toBeUndefined();
+  });
+});
+
+describe('a failed attempt the engine retries', () => {
+  const failedNode: PackageSummary = {
+    id: '1',
+    name: 'site',
+    version: '1.0.0',
+    installed: false,
+    status: 'failed',
+    error: "Package 'site' installed 369 content node(s) but 28 were rejected",
+  };
+  const retrying = {
+    status: 'Scheduled',
+    error: 'installed 369 content node(s) but 28 were rejected',
+    retryCount: 1,
+    maxRetries: 3,
+    nextRetryAt: '2026-11-17T12:00:10Z',
+  };
+
+  it('is not final while the retry is pending, although the node says failed', () => {
+    expect(installVerdict(retrying, failedNode)).toEqual({ done: false });
+  });
+
+  it('is a success when the retry completes', () => {
+    expect(
+      installVerdict({ ...retrying, status: 'Completed' }, { ...failedNode, status: 'installed', installed: true })
+    ).toEqual({ done: true, ok: true });
+  });
+
+  it('is a failure once the engine gives up', () => {
+    expect(installVerdict({ ...retrying, status: 'Failed', retryCount: 3 }, failedNode)).toMatchObject({
+      done: true,
+      ok: false,
+    });
+  });
+
+  it('says a retry is pending, and stays quiet otherwise', () => {
+    expect(retryNotice(retrying)).toBe(
+      '  attempt failed: installed 369 content node(s) but 28 were rejected; the engine retries (retry 1/3) at 2026-11-17T12:00:10Z'
+    );
+    expect(retryNotice({ status: 'Scheduled', retryCount: 0 })).toBeNull();
+    expect(retryNotice({ status: 'Executing', retryCount: 1 })).toBeNull();
+    expect(retryNotice(null)).toBeNull();
+  });
+});
+
+describe('results of this run only', () => {
+  const rows = [
+    { function: '/lib/a', status: 'completed', job_id: 'old-job' },
+    { function: '/lib/a', status: 'completed', job_id: 'new-job' },
+    { function: '/lib/b', status: 'completed' },
+  ];
+
+  it('drops rows stamped with another job and keeps unstamped ones', () => {
+    expect(currentResults(rows, 'new-job').map((r) => r.job_id)).toEqual(['new-job', undefined]);
+    expect(currentResults(rows, undefined)).toHaveLength(3);
+    expect(currentResults(undefined, 'x')).toEqual([]);
+  });
+
+  it('does not take an earlier run\'s results as this run\'s hooks having run', () => {
+    const pkg: PackageSummary = {
+      id: '1',
+      name: 'site',
+      version: '1.0.0',
+      installed: true,
+      status: 'installed',
+      postInstallHooks: 1,
+      postInstallResults: [{ function: '/lib/a', status: 'completed', job_id: 'old-job' }],
+    };
+    expect(installVerdict(null, pkg, 'new-job')).toEqual({ done: false });
+    expect(installVerdict(null, pkg, 'old-job')).toEqual({ done: true, ok: true });
+  });
+});
+
+describe('hook warnings and output', () => {
+  it('prints each warning and the output under its hook', () => {
+    expect(
+      formatPostInstallResults([
+        {
+          function: '/lib/seed',
+          status: 'completed',
+          duration_ms: 40,
+          warnings: ['self-registration closed', 'audiences:/speakers deferred'],
+          output: '{"seeded":3}',
+        },
+      ])
+    ).toEqual([
+      '  post_install /lib/seed: completed (40 ms)',
+      '    warning: self-registration closed',
+      '    warning: audiences:/speakers deferred',
+      '    output: {"seeded":3}',
+    ]);
   });
 });

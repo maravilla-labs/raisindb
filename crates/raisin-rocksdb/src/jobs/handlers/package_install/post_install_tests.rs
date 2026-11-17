@@ -68,7 +68,7 @@ async fn setup() -> Env {
         .unwrap();
 
     write(&storage, "main", "functions", folder("/lib")).await;
-    for name in ["a", "b", "fail"] {
+    for name in ["a", "b", "fail", "warn"] {
         write(
             &storage,
             "main",
@@ -174,6 +174,32 @@ fn spawn_function_worker(env: &Env) {
                         .await
                         .unwrap();
                 } else {
+                    if function_path == "/lib/warn" {
+                        // What the function-execution handler stores as the
+                        // job result: a FunctionExecutionResult whose `result`
+                        // is the function's return value.
+                        registry
+                            .set_result(
+                                &job.id,
+                                serde_json::json!({
+                                    "execution_id": "x",
+                                    "success": true,
+                                    "result": {
+                                        "warnings": [
+                                            "self-registration closed",
+                                            { "message": "audiences:/speakers deferred" },
+                                            "w".repeat(400)
+                                        ],
+                                        "seeded": 3
+                                    },
+                                    "error": null,
+                                    "duration_ms": 5,
+                                    "logs": []
+                                }),
+                            )
+                            .await
+                            .unwrap();
+                    }
                     registry.mark_completed(&job.id).await.unwrap();
                 }
             }
@@ -387,6 +413,103 @@ async fn an_install_does_not_keep_the_previous_installs_hook_results() {
 
     install(&env, "main", "sync", TWO_HOOKS).await.unwrap();
     assert_eq!(statuses(&package_props(&env).await).len(), 2);
+}
+
+/// A hook's own report survives: its `warnings` and a bounded rendering of
+/// its return value are stored with its result row, which also names the
+/// install job that ran it.
+#[tokio::test]
+async fn a_hooks_warnings_and_output_are_kept_bounded() {
+    let env = setup().await;
+    let result = install(
+        &env,
+        "main",
+        "sync",
+        "post_install:\n  - function: /lib/warn\n",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let row = &result["post_install_results"][0];
+    assert_eq!(row["status"], "completed");
+    let warnings = row["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings[0], "self-registration closed");
+    assert_eq!(warnings[1], "audiences:/speakers deferred");
+    assert!(
+        warnings[2].as_str().unwrap().chars().count() <= 301,
+        "clamped"
+    );
+    assert!(row["output"].as_str().unwrap().contains("\"seeded\":3"));
+
+    let props = package_props(&env).await;
+    let Some(PropertyValue::Array(items)) = props.get("post_install_results") else {
+        panic!("no results on the node");
+    };
+    let PropertyValue::Object(stored) = &items[0] else {
+        panic!("row is not an object");
+    };
+    assert!(matches!(stored.get("warnings"), Some(PropertyValue::Array(w)) if w.len() == 3));
+    assert!(matches!(
+        stored.get("output"),
+        Some(PropertyValue::String(_))
+    ));
+    assert!(
+        matches!(stored.get("job_id"), Some(PropertyValue::String(j)) if !j.is_empty()),
+        "each row names the install job that produced it"
+    );
+}
+
+#[test]
+fn hook_output_summary_is_bounded() {
+    use super::post_install::summarize_output;
+    assert_eq!(summarize_output(None), (Vec::new(), None));
+    assert_eq!(
+        summarize_output(Some(&serde_json::Value::Null)),
+        (Vec::new(), None)
+    );
+    let many: Vec<String> = (0..50).map(|i| format!("w{i}")).collect();
+    let (w, out) = summarize_output(Some(&serde_json::json!({
+        "warnings": many,
+        "blob": "x".repeat(5_000)
+    })));
+    assert_eq!(w.len(), 20);
+    assert!(out.unwrap().chars().count() <= 1_001);
+    // A return value without warnings still keeps its output.
+    let (w, out) = summarize_output(Some(&serde_json::json!("done")));
+    assert!(w.is_empty());
+    assert_eq!(out.as_deref(), Some("\"done\""));
+}
+
+/// The previous run's results are gone the moment a new run starts, not only
+/// at finalize: a reader polling during the install never sees the new state
+/// next to the old results.
+#[tokio::test]
+async fn a_new_run_clears_the_previous_results_at_start() {
+    let env = setup().await;
+    install(&env, "main", "sync", TWO_HOOKS).await.unwrap();
+    assert!(package_props(&env)
+        .await
+        .contains_key("post_install_results"));
+
+    let handler =
+        PackageInstallHandler::new(env.storage.clone(), env.storage.job_registry().clone());
+    let context = JobContext {
+        tenant_id: TENANT.into(),
+        repo_id: REPO.into(),
+        branch: "main".into(),
+        workspace_id: "packages".into(),
+        revision: raisin_hlc::HLC::now(),
+        metadata: HashMap::new(),
+    };
+    handler
+        .set_package_status(&context, PKG_ID, "installing", None)
+        .await;
+    let props = package_props(&env).await;
+    assert_eq!(props.get("status"), Some(&s("installing")));
+    assert!(
+        !props.contains_key("post_install_results"),
+        "the old run's results must not sit next to the new run's status"
+    );
 }
 
 #[tokio::test]

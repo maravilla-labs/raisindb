@@ -52,6 +52,12 @@ export interface PostInstallResult {
   status: string;
   duration_ms?: number;
   error?: string;
+  /** What the hook itself reported (its `warnings`), bounded by the server. */
+  warnings?: string[];
+  /** The hook's return value as truncated JSON. */
+  output?: string;
+  /** The install job that ran this hook (engines from 0.7.33). */
+  job_id?: string;
 }
 
 /** Count the hooks in the node's `post_install` property (a JSON string of the list). */
@@ -480,7 +486,18 @@ export async function installPackage(
  * Fetch a background job's info (status, error detail).
  * Returns null when the job cannot be fetched.
  */
-export async function getJobInfo(jobId: string): Promise<{ status?: string; error?: string } | null> {
+/** What the CLI reads from `/management/jobs/{id}/info`. */
+export interface JobInfoSummary {
+  status?: string;
+  error?: string;
+  /** Attempts the engine has re-scheduled so far, and how many it allows. */
+  retryCount?: number;
+  maxRetries?: number;
+  /** When a re-scheduled attempt is due (RFC3339), if one is. */
+  nextRetryAt?: string;
+}
+
+export async function getJobInfo(jobId: string): Promise<JobInfoSummary | null> {
   const baseUrl = getBaseUrl();
   const url = `${baseUrl}/management/jobs/${encodeURIComponent(jobId)}/info`;
 
@@ -489,7 +506,13 @@ export async function getJobInfo(jobId: string): Promise<{ status?: string; erro
     if (!response.ok) return null;
     const body = await response.json() as Record<string, unknown>;
     // Endpoint may wrap the payload in { data: ... }
-    const info = (body.data ?? body) as { status?: unknown; error?: string | null };
+    const info = (body.data ?? body) as {
+      status?: unknown;
+      error?: string | null;
+      retry_count?: unknown;
+      max_retries?: unknown;
+      next_retry_at?: unknown;
+    };
     // JobStatus serializes as a bare string ("Completed") or, for a failure,
     // as { "Failed": "<detail>" }; the detail may be only there.
     let status: string | undefined;
@@ -501,7 +524,13 @@ export async function getJobInfo(jobId: string): Promise<{ status?: string; erro
       status = key;
       if (!error && typeof value === 'string') error = value;
     }
-    return { status, error };
+    return {
+      status,
+      error,
+      retryCount: typeof info.retry_count === 'number' ? info.retry_count : undefined,
+      maxRetries: typeof info.max_retries === 'number' ? info.max_retries : undefined,
+      nextRetryAt: typeof info.next_retry_at === 'string' ? info.next_retry_at : undefined,
+    };
   } catch {
     return null;
   }
