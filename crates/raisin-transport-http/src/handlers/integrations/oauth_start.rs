@@ -20,6 +20,12 @@ use crate::state::AppState;
 pub struct StartRequest {
     /// Path of the `raisin:Integration` node in the `raisin:system` workspace.
     pub integration_path: String,
+    /// Where to send the browser once the consent is over, instead of the
+    /// admin console. Absolute `https` URL on an allow-listed origin
+    /// (`[integrations] oauth_return_origins`); anything else is a 400 here,
+    /// never a silent fallback. See `return_to.rs`.
+    #[serde(default)]
+    pub return_to: Option<String>,
 }
 
 /// Response for `oauth/start`.
@@ -40,6 +46,20 @@ pub async fn start(
     Json(req): Json<StartRequest>,
 ) -> Result<Json<StartResponse>, ApiError> {
     require_admin(auth.as_deref())?;
+
+    // Validated BEFORE anything is minted, so a refused return_to leaves no
+    // half-started flow behind.
+    let return_to = match req.return_to.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(rt) => Some(super::return_to::validate_configured(rt).map_err(|reason| {
+            ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "RETURN_TO_NOT_ALLOWED",
+                reason,
+            )
+            .with_field("return_to")
+        })?),
+    };
 
     let svc = super::config_service(&state, &tenant.tenant_id, &repo, "integration-oauth");
     let node = svc
@@ -89,6 +109,9 @@ pub async fn start(
         now_secs(),
         STATE_TTL_SECS,
     );
+    if let Some(rt) = return_to {
+        OAUTH_STATE_STORE.set_return_to(&state_token, rt);
+    }
 
     // `access_type=offline` + `prompt=consent` request a refresh token on every
     // connect (Google semantics; harmless for providers that ignore them).

@@ -29,6 +29,7 @@
 //! of the model layer and makes every rule below unit-testable.
 
 mod account;
+pub mod bundle;
 mod capabilities;
 mod config;
 mod credential;

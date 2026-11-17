@@ -20,7 +20,7 @@ use axum::{
     http::Request,
     middleware::{from_fn, Next},
     response::Response,
-    routing::{any, post},
+    routing::{any, get, patch, post},
     Router,
 };
 
@@ -62,6 +62,9 @@ async fn admin_system_auth_context(mut req: Request<Body>, next: Next) -> Respon
 /// - `POST /management/integrations/{repo}/oauth/client-secret` — the operator
 ///   counterpart of `/api/integrations/{repo}/oauth/client-secret`, for connectors
 ///   whose OAuth client belongs to the platform rather than to the customer.
+/// - `POST /management/integrations/{repo}/instances`, `.../oauth/start`,
+///   `GET .../connections`, `PATCH .../connections/{account_id}` and
+///   `POST .../mount-bundles` — connector setup without a console session.
 #[cfg(feature = "storage-rocksdb")]
 pub fn operator_package_routes(state: AppState) -> Router {
     #[allow(deprecated)]
@@ -108,6 +111,39 @@ pub fn operator_package_routes(state: AppState) -> Router {
         .route(
             "/management/integrations/connect-event",
             post(crate::handlers::integrations::connect_event),
+        )
+        // SELF-SERVE CONNECTOR SETUP for the control plane, end to end, without a
+        // console session: instance from template, consent URL, connection
+        // config, mounts. Each is the SAME handler as its `/api/integrations/*`
+        // twin and still calls `require_admin`; this adds doors, not keys, for the
+        // reason given on the client-secret route above. Deliberately not the
+        // whole `/api/integrations` surface: only what setting a connector up
+        // needs.
+        //
+        // `oauth/start` answers `{ auth_url, state }`. The state lives in THIS
+        // process for 10 minutes and is single-use, so a control plane mints the
+        // URL at the moment the human clicks (redirect them to it), not ahead of
+        // time, and on a multi-node deployment the callback must reach the node
+        // that minted it.
+        .route(
+            "/management/integrations/{repo}/instances",
+            post(crate::handlers::integrations::create_instance),
+        )
+        .route(
+            "/management/integrations/{repo}/oauth/start",
+            post(crate::handlers::integrations::start),
+        )
+        .route(
+            "/management/integrations/{repo}/connections",
+            get(crate::handlers::integrations::list_connections),
+        )
+        .route(
+            "/management/integrations/{repo}/connections/{account_id}",
+            patch(crate::handlers::integrations::update_connection),
+        )
+        .route(
+            "/management/integrations/{repo}/mount-bundles",
+            post(crate::handlers::integrations::instantiate_bundle),
         )
         .layer(from_fn(admin_system_auth_context))
         .with_state(state)

@@ -57,6 +57,19 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
                 "/api/integrations/{repo}/oauth/start",
                 post(integrations::start),
             )
+            // Copy a package-shipped connector template into an operator
+            // instance under /integrations. Idempotent.
+            .route(
+                "/api/integrations/{repo}/instances",
+                post(integrations::create_instance),
+            )
+            // Instantiate a connector's mount bundle into VirtualMount nodes:
+            // the server side of the console's "Add bundle". Idempotent;
+            // refuses when the target workspace would reject the mount types.
+            .route(
+                "/api/integrations/{repo}/mount-bundles",
+                post(integrations::instantiate_bundle),
+            )
             .route(
                 "/api/integrations/{repo}/oauth/disconnect",
                 post(integrations::disconnect),

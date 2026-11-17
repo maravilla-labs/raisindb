@@ -127,6 +127,8 @@ pub struct MergedConfig {
     pub storage: config::StorageConfig,
     /// Secret handling (auto-vaulting on/off)
     pub secrets: config::SecretsConfig,
+    /// Allowed origins for a connector OAuth `return_to`
+    pub oauth_return_origins: Vec<String>,
     /// Operator-named platform hooks for `raisin.platform.hook`
     pub platform: config::PlatformConfig,
     /// Function runtime tunables (`[functions]`, currently `[functions.wasm]`)
@@ -298,6 +300,25 @@ impl ServerConfig {
             .map(|c| c.platform.clone())
             .unwrap_or_default();
 
+        // Connector OAuth return_to origins: config file > env var > none.
+        // Same precedence as `anonymous_enabled` above. None means every
+        // return_to is refused.
+        let oauth_return_origins = toml_config
+            .as_ref()
+            .map(|c| c.integrations.oauth_return_origins.clone())
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| {
+                std::env::var("RAISIN_INTEGRATIONS_OAUTH_RETURN_ORIGINS")
+                    .map(|v| {
+                        v.split(|c: char| c == ',' || c.is_whitespace())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+
         // Function runtime tunables from TOML only (no CLI override: these are
         // engine sizing numbers, installed process-wide once at boot).
         // Absent section = the shipped defaults, wasm enabled at a 32 MiB cap.
@@ -345,6 +366,7 @@ impl ServerConfig {
             mcp_client,
             secrets,
             platform,
+            oauth_return_origins,
             functions,
             trigger_safety,
             max_active_jobs_per_tenant,
