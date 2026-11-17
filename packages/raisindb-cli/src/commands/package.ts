@@ -96,6 +96,12 @@ interface PackageManifest {
   author?: string;
   dependencies?: Record<string, string>;
   files?: string[];
+  /**
+   * Functions the server runs, in order, after every install on `main`.
+   * Validated by the schema validator (`--check`); `{env:...}` tokens in
+   * `input` are substituted with the rest of manifest.yaml.
+   */
+  post_install?: Array<{ function: string; input?: Record<string, unknown> }>;
 }
 
 export interface CreatePackageOptions {

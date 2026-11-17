@@ -362,6 +362,9 @@ pub struct PackageInstallResult {
     /// Relations skipped because an endpoint is in a retired home.
     #[serde(default)]
     pub relations_skipped_retired: usize,
+    /// The manifest's `post_install` hooks, in order, with their outcome.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_install_results: Vec<super::post_install::PostInstallResult>,
 }
 
 // ============================================================================

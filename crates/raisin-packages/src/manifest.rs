@@ -8,6 +8,7 @@ use std::io::Read;
 use zip::ZipArchive;
 
 use crate::error::{PackageError, PackageResult};
+use crate::post_install::{validate_post_install, PostInstallHook};
 use crate::sync_config::SyncConfig;
 
 /// Package manifest (manifest.yaml)
@@ -77,6 +78,11 @@ pub struct Manifest {
     /// Sync configuration for bidirectional synchronization
     #[serde(default)]
     pub sync: Option<SyncConfig>,
+
+    /// Functions to run, in order, after every install on `main`
+    /// (see [`crate::post_install`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_install: Vec<PostInstallHook>,
 }
 
 fn default_icon() -> String {
@@ -204,6 +210,8 @@ impl Manifest {
             }
         }
 
+        validate_post_install(&self.post_install).map_err(PackageError::InvalidManifest)?;
+
         Ok(())
     }
 }
@@ -319,6 +327,35 @@ provides:
     }
 
     #[test]
+    fn test_post_install_parses_and_validates() {
+        let manifest = Manifest::from_yaml(
+            "name: x\nversion: 1.0.0\npost_install:\n  - { function: /lib/setup, input: { a: 1 } }\n  - function: /lib/publish\n",
+        )
+        .unwrap();
+        assert_eq!(manifest.post_install.len(), 2);
+        assert_eq!(manifest.post_install[0].function, "/lib/setup");
+        assert_eq!(manifest.post_install[1].input, serde_json::json!({}));
+        assert!(manifest.validate().is_ok());
+
+        // Absent → empty (backward compatible).
+        let bare = Manifest::from_yaml("name: x\nversion: 1.0.0\n").unwrap();
+        assert!(bare.post_install.is_empty());
+
+        let relative = Manifest::from_yaml(
+            "name: x\nversion: 1.0.0\npost_install:\n  - function: lib/setup\n",
+        )
+        .unwrap();
+        let err = relative.validate().unwrap_err().to_string();
+        assert!(err.contains("absolute"), "{err}");
+
+        let bad_input = Manifest::from_yaml(
+            "name: x\nversion: 1.0.0\npost_install:\n  - { function: /lib/setup, input: [1] }\n",
+        )
+        .unwrap();
+        assert!(bad_input.validate().is_err());
+    }
+
+    #[test]
     fn test_validate_manifest() {
         let manifest = Manifest {
             name: "valid-package".into(),
@@ -355,6 +392,7 @@ impl Default for Manifest {
             provides: Provides::default(),
             workspace_patches: HashMap::new(),
             sync: None,
+            post_install: Vec::new(),
         }
     }
 }

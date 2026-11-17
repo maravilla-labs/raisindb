@@ -47,6 +47,7 @@ mod manifest;
 mod migrations;
 pub mod namespace_encoding;
 mod patcher;
+pub mod post_install;
 mod relations;
 pub mod sync;
 pub mod sync_config;
@@ -65,6 +66,10 @@ pub use installer::{ContentNode, InstallResult, PackageInstaller, UninstallResul
 pub use manifest::{Dependency, Manifest, Provides, WorkspacePatch};
 pub use migrations::{read_migration_summaries, MigrationSummary, PackageMigration};
 pub use patcher::{PatchOperation, WorkspacePatcher};
+pub use post_install::{
+    post_install_from_property, post_install_to_property, validate_post_install, PostInstallHook,
+    MAX_POST_INSTALL_HOOKS, POST_INSTALL_PROPERTY,
+};
 pub use relations::{
     PackageRelation, PackageRelations, RelationEndpoint, RELATIONS_FILE, RELATIONS_FORMAT_VERSION,
 };

@@ -165,14 +165,11 @@ pub(super) async fn install_package_impl(
 
     let package_name = node.name.clone();
 
-    let already_installed = node
-        .properties
-        .get("installed")
-        .and_then(|v| match v {
-            PropertyValue::Boolean(b) => Some(*b),
-            _ => None,
-        })
-        .unwrap_or(false);
+    // An installed package makes a skip-mode request a no-op, unless its
+    // last install failed: a failed `post_install` hook keeps `installed:
+    // true` with `status: failed`, and this request is how its hooks run
+    // again.
+    let skip_is_noop = raisin_core::package_registration::skip_install_is_noop(&node);
 
     let version = node
         .properties
@@ -183,7 +180,7 @@ pub(super) async fn install_package_impl(
         })
         .unwrap_or_else(|| "unknown".to_string());
 
-    if already_installed && mode == InstallMode::Skip {
+    if skip_is_noop && mode == InstallMode::Skip {
         let installed_at = node.properties.get("installed_at").and_then(|v| match v {
             PropertyValue::String(s) => Some(s.clone()),
             PropertyValue::Date(dt) => Some(dt.to_string()),

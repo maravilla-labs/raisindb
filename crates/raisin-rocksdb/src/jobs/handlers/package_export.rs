@@ -260,7 +260,7 @@ impl<S: Storage + TransactionalStorage> PackageExportHandler<S> {
     }
 
     /// Build a minimal package with just the manifest
-    fn build_minimal_package(&self, node: &Node) -> Result<Vec<u8>> {
+    pub(crate) fn build_minimal_package(&self, node: &Node) -> Result<Vec<u8>> {
         use std::io::{Cursor, Write};
         use zip::write::SimpleFileOptions;
         use zip::ZipWriter;
@@ -336,7 +336,14 @@ impl<S: Storage + TransactionalStorage> PackageExportHandler<S> {
             provides: None,
             dependencies: None,
             locales: get_string_array("locales"),
+            post_install: Vec::new(),
         };
+
+        // The hooks the installer stored on the node (see `finalize_installation`).
+        if let Some(json) = get_string(raisin_packages::POST_INSTALL_PROPERTY) {
+            manifest.post_install = raisin_packages::post_install_from_property(&json)
+                .map_err(|e| Error::storage(format!("Package node '{}': {}", node.name, e)))?;
+        }
 
         // Extract provides from node properties
         if let Some(PropertyValue::Object(provides_obj)) = node.properties.get("provides") {
@@ -463,6 +470,8 @@ struct PackageManifest {
     dependencies: Option<Vec<PackageDependency>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     locales: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    post_install: Vec<raisin_packages::PostInstallHook>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

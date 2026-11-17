@@ -124,6 +124,11 @@ workspace_patches:
         - ai:Chat
     default_folder_type: "raisin:Folder"
 
+# Functions to run after every install, in order (optional; see below)
+post_install:
+  - function: /lib/raisin/agent-setup
+    input: { default_model: small }
+
 # Sync configuration (optional)
 sync:
   remote:
@@ -159,6 +164,7 @@ Here is what each section means:
 | `provides` | Provides | No | Declares what the package contributes (mixins, node types, workspaces, content paths). |
 | `workspace_patches` | HashMap\<String, WorkspacePatch\> | No | Modifications to apply to workspace configurations during install. |
 | `sync` | SyncConfig | No | Configuration for bidirectional synchronization. |
+| `post_install` | Vec\<PostInstallHook\> | No | Functions the installer runs, in order, after every install on `main`. See [Post-install hooks](#post-install-hooks-post_install). |
 
 ### Manifest in Rust
 
@@ -637,6 +643,100 @@ relations:
   `?allow_retired_user_keys=true` (audit-logged; see Authentication).
   `raisin:access_control` is exportable; credentials are not in it (identity,
   session and provider records are never exported).
+
+## Post-install hooks (`post_install`)
+
+A package installs static content. Some setup cannot be content: creating a
+store through its own API, setting opening stock, publishing. `post_install`
+names functions the installer runs after the package is installed:
+
+```yaml
+post_install:
+  - function: /lib/shop/create-store        # absolute path in `functions`
+    input: { store: main }                  # optional object, default {}
+  - function: /lib/shop/set-opening-stock
+    input:
+      items: [{ sku: tee, qty: "{env:OPENING_STOCK:-50}" }]
+  - function: /lib/studio/publish-all
+```
+
+**When they run.** After the package is marked installed (after content,
+relations and package assets), in **every** install job, whatever the install
+mode (`skip` included), and only when the install targets the `main` branch.
+On any other branch every hook is recorded as `skipped`. A skip-mode request
+for a package that is installed and not `failed` starts no job (nothing to
+do), so it runs no hooks; an upload resets `installed`, so every
+`raisindb deploy --install` does run them.
+
+**How they run.** Each entry becomes a `FunctionExecution` job with the
+entry's `input`, queued with no retries. The installer waits for it (at most
+330 s per hook, 1200 s for all hooks, inside the install job's own 1800 s
+limit) before it starts the next one. The function must exist as a
+`raisin:Function` in the `functions` workspace when its turn comes: shipped by
+this package or installed by an earlier one. A missing function fails that
+hook with "function not found".
+
+**Failure.** The first hook that fails, times out or is missing stops the
+phase: later hooks are not run (recorded as `skipped`) and the install job
+fails with
+
+```text
+installed; post_install /lib/shop/set-opening-stock failed: <reason>
+```
+
+The content stays installed (`installed: true`, `status: failed`, the message
+in `error`). The error is permanent (`raisin_error::Error::permanent`), so the
+job worker marks the install job failed at once instead of re-running the whole
+install on the job's retry budget.
+
+**Retrying.** Install the package again; every hook runs again from the first.
+Any install request starts a job for a package in `status: failed`, in `skip`
+mode too: the install endpoint's skip-mode early return
+(`package_registration::skip_install_is_noop`) applies only to an installed
+package whose status is not `failed`. So `raisindb package install`, a
+reinstall from the console, or a new `raisindb deploy --install` all retry the
+hooks. Once they pass, the status is `installed` and a skip-mode request is a
+no-op again.
+
+**Stored hooks and export.** The installer also keeps the installed
+manifest's list on the package node as `post_install` (a JSON string, so inputs
+round-trip exactly; removed when the installed version declares no hooks). A
+package export rebuilt from the package node (no original archive) writes it
+back into the exported `manifest.yaml`.
+
+**Limits.** Hooks of nested `.rap` dependencies do not run, only the outer
+package's. A hook must not start a package install itself: the install job
+holds its worker while it waits. A timed-out hook's function job may still be
+running after the install has failed. Waiting for a free function worker counts
+against the hook's limit.
+
+**Results.** The package node carries `post_install_results`, one entry per
+hook in order: `{ function, status: completed|failed|skipped, duration_ms,
+error? }`. A successful job result has the same list; a failed job stores it
+as its result before it fails. A dry run lists each hook (category
+`post_install`, action `run` or `skip`) and whether its function is present,
+shipped by the package, or missing; it runs nothing.
+
+**Validation.** `raisindb package create --check`, the upload and the install
+all reject a manifest whose hook has an empty or relative `function`, a `.`
+or `..` segment, an `input` that is not an object, an unknown key, or more
+than 32 entries. An invalid list fails the install before anything is
+written. `{env:NAME}` tokens in `input` are substituted by the CLI when the
+package is built, like everywhere else in the package.
+
+**Idempotency contract.** Because hooks run on every install job and are
+retried by installing again, a hook must be safe to run any number of times:
+look before you create, set values rather than add to them, publish what is
+already published without error. A hook that is not idempotent will duplicate
+data on the next deploy.
+
+**Security.** Hooks run with the **system** context (all permissions, no row
+level security), marked `agent: job:package-post-install:<package>` for the
+audit trail. Installing a package that declares hooks is therefore the same
+trust decision as running its functions as an administrator: install only
+packages whose functions you have reviewed. Keep secrets out of `input` (it
+is stored in the job context and visible to administrators); read them with
+the secrets API inside the function instead.
 
 ## Dependencies
 

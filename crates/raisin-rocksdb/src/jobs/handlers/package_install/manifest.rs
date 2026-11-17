@@ -50,6 +50,11 @@ pub struct PackageManifest {
     /// The actual translation files are the source of truth.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locales: Option<Vec<String>>,
+    /// Functions to run, in order, after every install on `main`. The entry
+    /// type and its validation are `raisin_packages`'s, shared with the
+    /// upload path so both reject the same manifests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_install: Vec<raisin_packages::PostInstallHook>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,6 +287,47 @@ operations:
         assert!(written.contains("- delete_node:"), "{written}");
         let reread: PackageMigration = serde_yaml::from_str(&written).unwrap();
         assert_eq!(reread.operations.len(), 4);
+    }
+
+    #[test]
+    fn test_post_install_parses_in_order() {
+        let yaml = r#"
+name: site
+version: 1.0.0
+post_install:
+  - { function: /lib/site/create-store, input: { store: main } }
+  - function: /lib/site/set-stock
+    input:
+      items: [{ sku: tee, qty: 10 }]
+  - function: /lib/site/publish
+"#;
+        let manifest: PackageManifest = serde_yaml::from_str(yaml).unwrap();
+        let fns: Vec<_> = manifest
+            .post_install
+            .iter()
+            .map(|h| h.function.as_str())
+            .collect();
+        assert_eq!(
+            fns,
+            [
+                "/lib/site/create-store",
+                "/lib/site/set-stock",
+                "/lib/site/publish"
+            ]
+        );
+        assert_eq!(manifest.post_install[0].input["store"], "main");
+        assert_eq!(manifest.post_install[1].input["items"][0]["qty"], 10);
+        assert_eq!(manifest.post_install[2].input, serde_json::json!({}));
+        assert!(raisin_packages::validate_post_install(&manifest.post_install).is_ok());
+
+        let bare: PackageManifest = serde_yaml::from_str("name: x\nversion: 1.0.0\n").unwrap();
+        assert!(bare.post_install.is_empty());
+
+        let bad: PackageManifest = serde_yaml::from_str(
+            "name: x\nversion: 1.0.0\npost_install:\n  - { function: relative/path }\n",
+        )
+        .unwrap();
+        assert!(raisin_packages::validate_post_install(&bad.post_install).is_err());
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! a detailed log and summary of what would happen.
 
 mod content_simulation;
+mod post_install_simulation;
 mod schema_simulation;
 
 use raisin_error::Result;
@@ -149,6 +150,18 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             &mut summary.package_assets,
         )
         .await?;
+
+        // List the post_install hooks the install would run (never run them).
+        super::post_install::validate_hooks(&manifest.post_install)?;
+        self.dry_run_post_install(
+            &manifest.post_install,
+            &zip_data_owned,
+            tenant_id,
+            repo_id,
+            branch,
+            &mut logs,
+        )
+        .await;
 
         Ok(DryRunResult { logs, summary })
     }

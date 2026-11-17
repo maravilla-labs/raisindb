@@ -549,7 +549,7 @@ async fn execute_handler_task(
                         "Failed to park job"
                     );
                 }
-            } else if job.retry_count < job.max_retries {
+            } else if retry_allowed(&e, &job) {
                 tracing::warn!(
                     job_id = %job.id,
                     job_type = %job.job_type,
@@ -590,6 +590,15 @@ async fn execute_handler_task(
 }
 
 /// Whether a job is still actively executing (used by the heartbeat backstop).
+/// May the worker schedule another attempt of this job after `e`?
+///
+/// Not when the handler marked the failure permanent ([`raisin_error::Error::permanent`]):
+/// a package install whose content landed and whose `post_install` hook failed
+/// would otherwise re-run the whole install up to `max_retries` times.
+fn retry_allowed(e: &raisin_error::Error, job: &JobInfo) -> bool {
+    !e.is_permanent() && job.retry_count < job.max_retries
+}
+
 async fn job_registry_job_is_active(registry: &JobRegistry, job_id: &JobId) -> bool {
     matches!(
         registry.get_status(job_id).await,
@@ -600,6 +609,45 @@ async fn job_registry_job_is_active(registry: &JobRegistry, job_id: &JobId) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raisin_storage::jobs::JobType;
+
+    fn package_install_job(retry_count: u32) -> JobInfo {
+        JobInfo {
+            id: JobId::new(),
+            job_type: JobType::PackageInstall {
+                package_name: "p".into(),
+                package_version: "1.0.0".into(),
+                package_node_id: "package-p".into(),
+            },
+            status: JobStatus::Executing,
+            tenant: "t".into(),
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            progress: None,
+            error: None,
+            result: None,
+            retry_count,
+            max_retries: 3,
+            last_heartbeat: None,
+            timeout_seconds: 1800,
+            next_retry_at: None,
+            executing_since: None,
+        }
+    }
+
+    /// A failed post_install hook is permanent: the content is installed, and
+    /// re-running the whole install would not change the hook's outcome.
+    #[test]
+    fn a_permanent_failure_is_not_retried() {
+        let job = package_install_job(0);
+        let hook = raisin_error::Error::permanent("installed; post_install /lib/a failed: x");
+        assert!(!retry_allowed(&hook, &job));
+
+        // Any other failure keeps the job's retry budget.
+        let other = raisin_error::Error::Validation("content rejected".into());
+        assert!(retry_allowed(&other, &job));
+        assert!(!retry_allowed(&other, &package_install_job(3)));
+    }
 
     /// Aborting a handler task must still cancel its heartbeat token and
     /// decrement the in-flight counter (via HandlerCleanupGuard::drop).

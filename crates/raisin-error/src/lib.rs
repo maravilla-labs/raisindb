@@ -211,4 +211,41 @@ impl Error {
             _ => None,
         }
     }
+
+    /// A failure that running the same job again cannot fix (see
+    /// [`PermanentFailure`]). Displays as the message alone.
+    pub fn permanent(message: impl Into<String>) -> Self {
+        Self::Other(anyhow::Error::new(PermanentFailure(message.into())))
+    }
+
+    /// Should the job worker fail this job now instead of scheduling a retry?
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, Self::Other(e) if e.downcast_ref::<PermanentFailure>().is_some())
+    }
+}
+
+/// The marker behind [`Error::permanent`]: the job did its work (or decided
+/// it cannot), and re-running the whole job would repeat that work without
+/// changing the outcome. The job worker marks such a job failed at once
+/// instead of spending its retry budget on it.
+///
+/// A struct carried in [`Error::Other`] rather than a new variant, so no
+/// exhaustive `match` on [`Error`] anywhere has to learn about it.
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct PermanentFailure(pub String);
+
+#[cfg(test)]
+mod permanent_tests {
+    use super::*;
+
+    #[test]
+    fn permanent_errors_are_recognised_and_display_their_message() {
+        let e = Error::permanent("installed; post_install /lib/a failed: boom");
+        assert!(e.is_permanent());
+        assert_eq!(e.to_string(), "installed; post_install /lib/a failed: boom");
+
+        assert!(!Error::Validation("x".into()).is_permanent());
+        assert!(!Error::Other(anyhow::anyhow!("plain")).is_permanent());
+    }
 }

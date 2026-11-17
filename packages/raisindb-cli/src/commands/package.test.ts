@@ -203,6 +203,26 @@ describe('createZipPackage', () => {
       );
     });
 
+    it('resolves tokens inside post_install inputs in manifest.yaml', () => {
+      writeFile(
+        tmpDir,
+        'manifest.yaml',
+        'name: test\nversion: 1.0.0\npost_install:\n' +
+          '  - function: /lib/shop/set-stock\n' +
+          '    input: { store: "{env:STORE_ID}", qty: "{env:OPENING_STOCK:-50}" }\n'
+      );
+
+      const outputPath = path.join(outputDir, 'test.zip');
+      createZipPackage(tmpDir, outputPath, env({ STORE_ID: 'main' }));
+
+      const zip = new AdmZip(outputPath);
+      expect(zip.getEntry('manifest.yaml')!.getData().toString('utf-8')).toBe(
+        'name: test\nversion: 1.0.0\npost_install:\n' +
+          '  - function: /lib/shop/set-stock\n' +
+          '    input: { store: "main", qty: "50" }\n'
+      );
+    });
+
     it('applies inline defaults with no environment at all', () => {
       writeFile(tmpDir, 'manifest.yaml', 'name: test\nversion: 1.0.0');
       writeFile(tmpDir, 'a.yaml', 'url: "{env:PREVIEW_SERVER:-http://localhost:5173}"');

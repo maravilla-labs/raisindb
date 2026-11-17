@@ -17,7 +17,10 @@ icon: package
 # write the failure detail next to `status: failed`, but strict mode refused
 # the undeclared property, the write was retried without it, and `raisindb
 # deploy --install` could only print "failed" with no reason.
-version: 7
+# v8: `post_install` and `post_install_results`, written by the installer:
+# the manifest's hooks (so an export rebuilt from the node keeps them) and the
+# outcome of each hook on the last install.
+version: 8
 strict: true
 indexable: true
 index_types: [Property, Fulltext]
@@ -239,6 +242,26 @@ properties:
       The installer's ledger of migrations already applied to this
       installation, keyed by id and content hash, so a migration runs once.
       Structure: [{ id: string, hash: string, status: string }]
+
+  - name: post_install
+    type: String
+    required: false
+    title: Post-install Hooks
+    description: |
+      The installed manifest's `post_install` list, as a JSON string (kept
+      verbatim so hook inputs round-trip exactly). Written at install, removed
+      when the installed version declares no hooks; read by package export.
+
+  - name: post_install_results
+    type: Array
+    required: false
+    title: Post-install Results
+    description: |
+      Outcome of the manifest's `post_install` hooks on the last install, in
+      declaration order. A hook after a failed one is `skipped`; on a branch
+      other than `main` every hook is `skipped`.
+      Structure: [{ function: string, status: completed|failed|skipped,
+      duration_ms: integer, error?: string }]
 
   - name: sync_policy
     type: Object

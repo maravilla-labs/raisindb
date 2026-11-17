@@ -59,6 +59,10 @@ mod migrations;
 mod nested;
 #[cfg(test)]
 mod nested_element_install_tests;
+mod post_install;
+mod post_install_results;
+#[cfg(test)]
+mod post_install_tests;
 mod relations;
 #[cfg(test)]
 mod retired_keys_install_tests;
@@ -71,6 +75,9 @@ pub use self::handler::{PackageInstallHandler, RetiredKeysCheck};
 pub use self::manifest::{
     AllowedNodeTypesPatch, PackageDependency, PackageManifest, PackageMigration, PackageProvides,
     WorkspacePatch,
+};
+pub use self::post_install::{
+    PostInstallResult, POST_INSTALL_BRANCH, POST_INSTALL_HOOK_TIMEOUT, POST_INSTALL_PHASE_BUDGET,
 };
 pub use self::types::{
     AppliedHashRecorder, BinaryDeleteCallback, BinaryRetrievalCallback, BinaryStorageCallback,

@@ -52,7 +52,9 @@ pub fn create_package_install_handler(
 
     let mut builder = PackageInstallHandler::new(storage.clone(), job_registry)
         .with_applied_recorder(recorder)
-        .with_retired_keys(retired_keys_check(&storage));
+        .with_retired_keys(retired_keys_check(&storage))
+        // `post_install` hooks queue function jobs through it.
+        .with_job_data_store(storage.job_data_store().clone());
     if let Some(callback) = binary_retrieval {
         builder = builder.with_binary_callback(callback.clone());
     }

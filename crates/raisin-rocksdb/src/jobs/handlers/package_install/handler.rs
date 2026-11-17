@@ -23,10 +23,12 @@ use std::sync::Arc;
 use zip::ZipArchive;
 
 use super::content_types::InstallStats;
+use super::post_install::{post_install_error, validate_hooks};
 use super::types::{
     AppliedHashRecorder, BinaryRetrievalCallback, BinaryStorageCallback, InstallMode,
     PackageInstallResult,
 };
+use crate::jobs::data_store::JobDataStore;
 
 /// Handler for package installation jobs
 pub struct PackageInstallHandler<S: Storage + TransactionalStorage> {
@@ -40,6 +42,12 @@ pub struct PackageInstallHandler<S: Storage + TransactionalStorage> {
     /// Answers "is this user key retired in this tenant?" (the tenant ledger,
     /// `crate::retired_keys`). `None` (tests on other storage): no check.
     pub(super) retired_keys: Option<RetiredKeysCheck>,
+    /// Where `post_install` hooks store their function job's context. `None`
+    /// (tests, the dry-run-only handler): a package that declares hooks fails
+    /// its post_install phase with a clear message instead of hanging.
+    pub(super) job_data_store: Option<Arc<JobDataStore>>,
+    /// Upper bound on one `post_install` hook (see `post_install.rs`).
+    pub(super) post_install_hook_timeout: std::time::Duration,
 }
 
 /// `(tenant_id, repo_id, user_key) -> leave the home out?` (retired, and the
@@ -56,7 +64,22 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             binary_store_callback: None,
             applied_recorder: None,
             retired_keys: None,
+            job_data_store: None,
+            post_install_hook_timeout: super::post_install::POST_INSTALL_HOOK_TIMEOUT,
         }
+    }
+
+    /// Let `post_install` hooks queue function jobs.
+    pub fn with_job_data_store(mut self, store: Arc<JobDataStore>) -> Self {
+        self.job_data_store = Some(store);
+        self
+    }
+
+    /// Override the per-hook timeout (tests).
+    #[cfg(test)]
+    pub(super) fn with_post_install_hook_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.post_install_hook_timeout = timeout;
+        self
     }
 
     /// Check user homes against the tenant's retired keys ledger.
@@ -270,6 +293,8 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
 
         // Parse manifest
         let manifest = self.extract_manifest(&zip_data)?;
+        // Reject bad hooks before anything is written, not after the content.
+        validate_hooks(&manifest.post_install)?;
 
         // Parse the optional `.raisin-sync.yaml` per-path sync/install policy,
         // if this package ships one at its root.
@@ -535,8 +560,49 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             &context.repo_id,
             &context.branch,
             package_node_id,
+            &manifest.post_install,
         )
         .await?;
+
+        // Phase 8: post_install hooks (every install, `main` only). The
+        // package is already marked installed: a failing hook fails the job
+        // but leaves the content in place, and re-running the install retries
+        // the hooks (idempotent by contract).
+        let mut post_install_results = Vec::new();
+        if !manifest.post_install.is_empty() {
+            self.report_progress(&job.id, 0.95, "Running post_install hooks")
+                .await;
+            let outcome = self
+                .run_post_install(
+                    &manifest.post_install,
+                    package_name,
+                    &context.tenant_id,
+                    &context.repo_id,
+                    &context.branch,
+                )
+                .await;
+            self.record_post_install_results(
+                &context.tenant_id,
+                &context.repo_id,
+                &context.branch,
+                package_node_id,
+                &outcome.results,
+            )
+            .await;
+            if let Some((function, message)) = outcome.failure {
+                let partial = serde_json::json!({
+                    "package_name": package_name,
+                    "package_version": package_version,
+                    "installed": true,
+                    "post_install_results": outcome.results,
+                });
+                if let Err(e) = self.job_registry.set_result(&job.id, partial).await {
+                    tracing::warn!(job_id = %job.id, error = %e, "Failed to store post_install results");
+                }
+                return Err(post_install_error(&function, &message));
+            }
+            post_install_results = outcome.results;
+        }
 
         self.report_progress(&job.id, 1.0, "Installation complete")
             .await;
@@ -587,6 +653,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             skipped_retired_keys: stats.skipped_retired_keys.len(),
             skipped_retired_key_list: std::mem::take(&mut stats.skipped_retired_keys),
             relations_skipped_retired: stats.relations_skipped_retired,
+            post_install_results,
         };
 
         Ok(Some(serde_json::to_value(result).unwrap_or_default()))
@@ -607,6 +674,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         repo_id: &str,
         branch: &str,
         package_node_id: &str,
+        post_install: &[raisin_packages::PostInstallHook],
     ) -> Result<()> {
         let workspace = "packages";
 
@@ -635,6 +703,20 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 PropertyValue::String("installed".to_string()),
             );
             node.properties.remove("error");
+            // Keep the hooks on the node, so an export rebuilt from it (no
+            // original archive) still declares them.
+            match raisin_packages::post_install_to_property(post_install) {
+                Some(json) => {
+                    node.properties.insert(
+                        raisin_packages::POST_INSTALL_PROPERTY.to_string(),
+                        PropertyValue::String(json),
+                    );
+                }
+                None => {
+                    node.properties
+                        .remove(raisin_packages::POST_INSTALL_PROPERTY);
+                }
+            }
 
             // What content this install applied, read off the node that was
             // just installed rather than passed in — the registration wrote it

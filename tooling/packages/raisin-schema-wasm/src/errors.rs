@@ -238,6 +238,7 @@ pub mod codes {
     pub const INVALID_VERSION: &str = "INVALID_VERSION";
     pub const INVALID_MIGRATION_OPERATION: &str = "INVALID_MIGRATION_OPERATION";
     pub const BROAD_MIGRATION_PATCH: &str = "BROAD_MIGRATION_PATCH";
+    pub const INVALID_POST_INSTALL: &str = "INVALID_POST_INSTALL";
 
     // NodeType errors
     pub const INVALID_NODE_TYPE_NAME: &str = "INVALID_NODE_TYPE_NAME";

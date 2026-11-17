@@ -201,6 +201,20 @@ pub fn package_is_installed(node: &Node) -> bool {
     )
 }
 
+/// Whether a `skip`-mode install request for this package has nothing to do.
+///
+/// True for an installed package, EXCEPT one whose last install job failed
+/// (`status: failed`). That is what a failed `post_install` hook leaves
+/// behind: the content is installed (`installed` stays `true`), but the hooks
+/// still have to run, so the request must start an install job again.
+pub fn skip_install_is_noop(node: &Node) -> bool {
+    let failed = matches!(
+        node.properties.get("status"),
+        Some(PropertyValue::String(s)) if s == "failed"
+    );
+    package_is_installed(node) && !failed
+}
+
 /// Store a package's `.rap` bytes, always inside the tenant's blob namespace.
 ///
 /// The tenant prefix is baked into the returned key, so passing `None` puts the
@@ -511,6 +525,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skip_install_is_a_noop_only_for_a_healthy_installed_package() {
+        let node = |installed: Option<bool>, status: Option<&str>| {
+            let mut n = Node::default();
+            if let Some(i) = installed {
+                n.properties
+                    .insert("installed".into(), PropertyValue::Boolean(i));
+            }
+            if let Some(s) = status {
+                n.properties
+                    .insert("status".into(), PropertyValue::String(s.into()));
+            }
+            n
+        };
+        assert!(skip_install_is_noop(&node(Some(true), Some("installed"))));
+        // Builtins installed at repository creation carry no status.
+        assert!(skip_install_is_noop(&node(Some(true), None)));
+        // A failed post_install hook: installed, but the hooks must run again.
+        assert!(!skip_install_is_noop(&node(Some(true), Some("failed"))));
+        assert!(!skip_install_is_noop(&node(Some(false), Some("uploaded"))));
+        assert!(!skip_install_is_noop(&node(None, None)));
+    }
 
     fn manifest() -> Manifest {
         Manifest {
