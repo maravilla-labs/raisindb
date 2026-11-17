@@ -16,9 +16,11 @@ use super::super::content_types::ContentEntry;
 
 /// Result of topological sorting: ordered entries + circular-reference entries.
 pub struct SortedEntries {
-    /// Entries in dependency order (referenced nodes first)
+    /// NodeDef and BinaryFile entries in dependency order (referenced nodes
+    /// and assets first)
     pub ordered: Vec<ContentEntry>,
-    /// Non-NodeDef entries (BinaryFile, TranslationFile) in original order
+    /// TranslationFile entries in original order (they overlay nodes that the
+    /// two lists above create, so they go last)
     pub other: Vec<ContentEntry>,
     /// NodeDef entries involved in circular references (need two-pass install)
     pub circular: Vec<ContentEntry>,
@@ -32,23 +34,27 @@ pub struct SortedEntries {
 ///   `__deferred_references` in their properties for two-pass handling.
 /// - BinaryFile and TranslationFile entries are returned separately, unsorted.
 pub fn sort_by_references(entries: Vec<ContentEntry>) -> SortedEntries {
-    // Partition into NodeDefs vs other
+    // Partition: NodeDefs AND BinaryFiles take part in the ordering; only
+    // translations (overlays onto nodes that must already exist) stay apart.
+    //
+    // Binary files used to be appended AFTER every NodeDef. A page whose
+    // `file:` references `assets:/press-kit/logo.svg` from the SAME package was
+    // then installed before that asset existed, rejected with "Referenced node
+    // not found", and the job failed on a fresh repo — the engine's retry ten
+    // seconds later found the asset and succeeded, but the first attempt had
+    // already failed the pipeline. A binary is a node like any other here: it
+    // depends on its parent folder, and what references it depends on it.
     let mut node_entries: Vec<ContentEntry> = Vec::new();
     let mut other: Vec<ContentEntry> = Vec::new();
 
     for entry in entries {
         match &entry {
-            ContentEntry::NodeDef { .. } => node_entries.push(entry),
+            ContentEntry::NodeDef { .. } | ContentEntry::BinaryFile { .. } => {
+                node_entries.push(entry)
+            }
             _ => other.push(entry),
         }
     }
-
-    // Sort other entries: BinaryFiles before TranslationFiles
-    other.sort_by_key(|e| match e {
-        ContentEntry::BinaryFile { .. } => 0u8,
-        ContentEntry::TranslationFile { .. } => 1,
-        _ => 2,
-    });
 
     let n = node_entries.len();
     if n == 0 {
@@ -100,15 +106,37 @@ pub fn sort_by_references(entries: Vec<ContentEntry>) -> SortedEntries {
     }
 }
 
-/// Build a map of (workspace, path) → index for NodeDef entries.
+/// The `(workspace, path)` an entry installs to. A binary file becomes the
+/// asset at `/{parent_path}/{filename}`, the same path `install_binary_file`
+/// writes.
+pub(super) fn entry_node_path(entry: &ContentEntry) -> Option<(String, String)> {
+    match entry {
+        ContentEntry::NodeDef {
+            workspace, node, ..
+        } => Some((workspace.clone(), node.path.clone())),
+        ContentEntry::BinaryFile {
+            workspace,
+            parent_path,
+            filename,
+            ..
+        } => Some((
+            workspace.clone(),
+            if parent_path.is_empty() {
+                format!("/{filename}")
+            } else {
+                format!("/{parent_path}/{filename}")
+            },
+        )),
+        ContentEntry::TranslationFile { .. } => None,
+    }
+}
+
+/// Build a map of (workspace, path) → index for NodeDef and BinaryFile entries.
 fn build_path_index(entries: &[ContentEntry]) -> HashMap<(String, String), usize> {
     let mut map = HashMap::new();
     for (idx, entry) in entries.iter().enumerate() {
-        if let ContentEntry::NodeDef {
-            workspace, node, ..
-        } = entry
-        {
-            map.insert((workspace.clone(), node.path.clone()), idx);
+        if let Some(key) = entry_node_path(entry) {
+            map.insert(key, idx);
         }
     }
     map
@@ -123,11 +151,11 @@ fn build_dependency_graph(
     let mut deps: Vec<HashSet<usize>> = vec![HashSet::new(); n];
 
     for (idx, entry) in entries.iter().enumerate() {
-        if let ContentEntry::NodeDef {
-            workspace, node, ..
-        } = entry
-        {
-            // Reference dependencies
+        let Some((workspace, path)) = entry_node_path(entry) else {
+            continue;
+        };
+        // Reference dependencies (a binary file references nothing).
+        if let ContentEntry::NodeDef { node, .. } = entry {
             for (ref_ws, ref_path) in collect_path_references(&node.properties) {
                 let ws = if ref_ws.is_empty() {
                     workspace.clone()
@@ -140,18 +168,18 @@ fn build_dependency_graph(
                     }
                 }
             }
+        }
 
-            // Parent path dependency (parent folders before children)
-            if let Some((parent, _)) = node.path.rsplit_once('/') {
-                let pp = if parent.is_empty() {
-                    "/".to_string()
-                } else {
-                    parent.to_string()
-                };
-                if let Some(&dep_idx) = path_to_idx.get(&(workspace.clone(), pp)) {
-                    if dep_idx != idx {
-                        deps[idx].insert(dep_idx);
-                    }
+        // Parent path dependency (parent folders before children)
+        if let Some((parent, _)) = path.rsplit_once('/') {
+            let pp = if parent.is_empty() {
+                "/".to_string()
+            } else {
+                parent.to_string()
+            };
+            if let Some(&dep_idx) = path_to_idx.get(&(workspace.clone(), pp)) {
+                if dep_idx != idx {
+                    deps[idx].insert(dep_idx);
                 }
             }
         }
@@ -369,6 +397,60 @@ mod tests {
             products_pos < home_pos,
             "element-nested ref target must come first"
         );
+    }
+
+    fn binary(workspace: &str, parent_path: &str, filename: &str) -> ContentEntry {
+        ContentEntry::BinaryFile {
+            workspace: workspace.to_string(),
+            zip_path: format!("content/{workspace}/{parent_path}/{filename}"),
+            filename: filename.to_string(),
+            parent_path: parent_path.to_string(),
+            data: vec![1, 2, 3],
+            metadata: Box::new(None),
+            content_hash: "h".to_string(),
+        }
+    }
+
+    /// A page that references an asset shipped as a binary in the SAME package
+    /// must be installed after it. Binaries used to be appended after every
+    /// NodeDef, so on a fresh repo the page was rejected ("Referenced node not
+    /// found: assets:/press-kit/…") and the first install attempt failed.
+    #[test]
+    fn a_binary_asset_is_installed_before_the_node_that_references_it() {
+        let entries = vec![
+            make_node(
+                "stories",
+                "/site/press/kit/photo",
+                vec![("assets", "/press-kit/photo.png")],
+            ),
+            make_node("assets", "/press-kit", vec![]),
+            binary("assets", "press-kit", "photo.png"),
+            binary("assets", "press-kit", "unreferenced.pdf"),
+        ];
+        let sorted = sort_by_references(entries);
+        assert!(sorted.circular.is_empty());
+        assert!(
+            sorted.other.is_empty(),
+            "binaries are ordered, not appended"
+        );
+        let keys: Vec<(String, String)> =
+            sorted.ordered.iter().filter_map(entry_node_path).collect();
+        let pos = |ws: &str, p: &str| {
+            keys.iter()
+                .position(|(w, q)| w == ws && q == p)
+                .unwrap_or_else(|| panic!("{ws}:{p} missing from {keys:?}"))
+        };
+        assert!(pos("assets", "/press-kit") < pos("assets", "/press-kit/photo.png"));
+        assert!(pos("assets", "/press-kit/photo.png") < pos("stories", "/site/press/kit/photo"));
+        assert!(pos("assets", "/press-kit") < pos("assets", "/press-kit/unreferenced.pdf"));
+    }
+
+    #[test]
+    fn translations_still_come_last() {
+        let entries = vec![binary("assets", "", "a.png"), make_node("ws", "/a", vec![])];
+        let sorted = sort_by_references(entries);
+        assert_eq!(sorted.ordered.len(), 2);
+        assert!(sorted.other.is_empty());
     }
 
     #[test]

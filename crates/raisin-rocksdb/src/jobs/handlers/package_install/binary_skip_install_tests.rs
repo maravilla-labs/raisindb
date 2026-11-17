@@ -185,3 +185,60 @@ async fn without_a_policy_sync_still_updates_a_changed_asset() {
 
     assert_eq!(stored_hash(&storage, "/site/logo.png").await, "hash-v2");
 }
+
+/// A node that references an asset the SAME package ships as a binary file is
+/// accepted on a fresh repository. The binaries used to be installed after
+/// every node, so the reference was checked before the asset existed and the
+/// node was rejected ("Referenced node not found"): the first install of a
+/// package failed and only the engine's retry, seconds later, succeeded.
+#[tokio::test]
+async fn a_node_referencing_a_bundled_binary_installs_on_a_fresh_repo() {
+    use raisin_models::nodes::properties::RaisinReference;
+    use raisin_models::nodes::Node;
+
+    let (_dir, storage) = setup().await;
+    let page = ContentEntry::NodeDef {
+        workspace: WS.to_string(),
+        yaml_path: "content/default/doc/.node.yaml".to_string(),
+        legacy_path: None,
+        node: Box::new(Node {
+            id: nanoid::nanoid!(),
+            node_type: "raisin:Folder".to_string(),
+            name: "doc".to_string(),
+            path: "/doc".to_string(),
+            workspace: Some(WS.to_string()),
+            properties: HashMap::from([(
+                "file".to_string(),
+                PropertyValue::Reference(RaisinReference {
+                    id: "/media/logo.png".to_string(),
+                    workspace: WS.to_string(),
+                    path: String::new(),
+                }),
+            )]),
+            ..Default::default()
+        }),
+    };
+    // Package order: the node first, the binary after it, as the collector
+    // produces them.
+    let sorted = super::install_content::reference_sort::sort_by_references(vec![
+        page,
+        image("media", b"png", "hash-1"),
+    ]);
+    let mut entries = sorted.ordered;
+    entries.extend(sorted.circular);
+    entries.extend(sorted.other);
+
+    install(&storage, entries, None).await; // asserts no rejected entries
+
+    for path in ["/doc", "/media/logo.png"] {
+        assert!(
+            storage
+                .nodes()
+                .get_by_path(StorageScope::new(TENANT, REPO, BRANCH, WS), path, None)
+                .await
+                .unwrap()
+                .is_some(),
+            "{path} installed"
+        );
+    }
+}

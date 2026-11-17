@@ -212,6 +212,13 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                     "status".to_string(),
                     PropertyValue::String(status.to_string()),
                 );
+                // A new run starts: the previous run's hook results are not
+                // this run's. Clearing them HERE, not at finalize, closes the
+                // window in which a reader saw the new `installing`/`installed`
+                // state next to the old results.
+                if status == "installing" {
+                    node.properties.remove("post_install_results");
+                }
                 match error {
                     Some(detail) if include_error => {
                         node.properties.insert(
@@ -586,6 +593,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 &context.repo_id,
                 &context.branch,
                 package_node_id,
+                &job.id.0,
                 &outcome.results,
             )
             .await;

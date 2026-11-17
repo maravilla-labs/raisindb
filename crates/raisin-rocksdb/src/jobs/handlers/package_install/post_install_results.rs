@@ -32,6 +32,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         repo_id: &str,
         branch: &str,
         package_node_id: &str,
+        job_id: &str,
         results: &[PostInstallResult],
     ) {
         let write = async {
@@ -45,7 +46,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             if let Some(mut node) = tx.get_node("packages", package_node_id).await? {
                 node.properties.insert(
                     "post_install_results".to_string(),
-                    results_property(results),
+                    results_property(results, job_id),
                 );
                 tx.upsert_node("packages", &node).await?;
                 tx.commit().await?;
@@ -62,7 +63,9 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     }
 }
 
-fn results_property(results: &[PostInstallResult]) -> PropertyValue {
+/// The rows stored on the node. Each carries the install `job_id` that ran
+/// it, so a reader can tell this run's results from an earlier run's.
+pub(super) fn results_property(results: &[PostInstallResult], job_id: &str) -> PropertyValue {
     PropertyValue::Array(
         results
             .iter()
@@ -81,8 +84,26 @@ fn results_property(results: &[PostInstallResult]) -> PropertyValue {
                         PropertyValue::Integer(r.duration_ms as i64),
                     ),
                 ]);
+                obj.insert(
+                    "job_id".to_string(),
+                    PropertyValue::String(job_id.to_string()),
+                );
                 if let Some(e) = &r.error {
                     obj.insert("error".to_string(), PropertyValue::String(e.clone()));
+                }
+                if !r.warnings.is_empty() {
+                    obj.insert(
+                        "warnings".to_string(),
+                        PropertyValue::Array(
+                            r.warnings
+                                .iter()
+                                .map(|w| PropertyValue::String(w.clone()))
+                                .collect(),
+                        ),
+                    );
+                }
+                if let Some(o) = &r.output {
+                    obj.insert("output".to_string(), PropertyValue::String(o.clone()));
                 }
                 PropertyValue::Object(obj)
             })

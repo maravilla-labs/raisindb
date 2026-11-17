@@ -16,6 +16,7 @@ import {
   subscribeToJobEvents,
   PackageSummary,
   type PostInstallResult,
+  type JobInfoSummary,
   JobEvent,
 } from '../api.js';
 import {
@@ -780,8 +781,9 @@ export type InstallVerdict =
  * done until their results are recorded.
  */
 export function installVerdict(
-  job: { status?: string; error?: string } | null,
-  pkg: PackageSummary | undefined
+  job: JobInfoSummary | null,
+  pkg: PackageSummary | undefined,
+  jobId?: string | null
 ): InstallVerdict {
   const status = job?.status;
   if (status === 'Completed') {
@@ -791,17 +793,22 @@ export function installVerdict(
   if (status === 'Failed' || status === 'Cancelled') {
     return { done: true, ok: false, detail: pkg?.error || job?.error || undefined };
   }
-  if (status) return { done: false }; // Scheduled | Running | Executing
+  // Scheduled | Running | Executing. A failed attempt the engine will RETRY is
+  // `Scheduled` again (the registry moves Executing -> Scheduled, never through
+  // Failed), while the package node already says `failed`: the job decides, so
+  // a pending retry is never reported as the final outcome.
+  if (status) return { done: false };
 
   if (!pkg) return { done: false };
   const nodeStatus = pkg.status || (pkg.installed ? 'installed' : '');
   if (nodeStatus === 'failed') return { done: true, ok: false, detail: pkg.error };
   if (nodeStatus === 'installed') {
     const hooks = pkg.postInstallHooks ?? 0;
-    if (hooks > 0 && !(pkg.postInstallResults && pkg.postInstallResults.length > 0)) {
+    const results = currentResults(pkg.postInstallResults, jobId);
+    if (hooks > 0 && results.length === 0) {
       return { done: false };
     }
-    if (pkg.postInstallResults?.some((r) => r.status === 'failed')) {
+    if (results.some((r) => r.status === 'failed')) {
       return { done: true, ok: false, detail: pkg.error };
     }
     return { done: true, ok: true };
@@ -809,14 +816,43 @@ export function installVerdict(
   return { done: false };
 }
 
-/** One line per hook, for the console. */
+/**
+ * The results that belong to THIS install. Rows stamped with another job's id
+ * are an earlier run's; rows without a stamp (older engines) are taken as is.
+ */
+export function currentResults(
+  results: PostInstallResult[] | undefined,
+  jobId?: string | null
+): PostInstallResult[] {
+  if (!results) return [];
+  if (!jobId) return results;
+  return results.filter((r) => !r.job_id || r.job_id === jobId);
+}
+
+/** Lines per hook for the console: the outcome, then its warnings and output. */
 export function formatPostInstallResults(results: PostInstallResult[] | undefined): string[] {
   if (!results || results.length === 0) return [];
-  return results.map((r) => {
+  const lines: string[] = [];
+  for (const r of results) {
     const took = typeof r.duration_ms === 'number' ? ` (${r.duration_ms} ms)` : '';
     const why = r.error ? `: ${r.error}` : '';
-    return `  post_install ${r.function}: ${r.status}${took}${why}`;
-  });
+    lines.push(`  post_install ${r.function}: ${r.status}${took}${why}`);
+    for (const w of r.warnings ?? []) lines.push(`    warning: ${w}`);
+    if (r.output) lines.push(`    output: ${r.output}`);
+  }
+  return lines;
+}
+
+/**
+ * A line saying the engine will retry a failed attempt, or null. Shown once per
+ * attempt so the node's interim `failed` does not read as the final outcome.
+ */
+export function retryNotice(job: JobInfoSummary | null): string | null {
+  if (!job || job.status !== 'Scheduled' || !job.retryCount) return null;
+  const of = job.maxRetries ? `/${job.maxRetries}` : '';
+  const when = job.nextRetryAt ? ` at ${job.nextRetryAt}` : '';
+  const why = job.error ? `: ${job.error.split('\n')[0]}` : '';
+  return `  attempt failed${why}; the engine retries (retry ${job.retryCount}${of})${when}`;
 }
 
 /**
@@ -832,6 +868,7 @@ async function waitForInstalled(
   const deadline = Date.now() + timeoutMs;
   let lastStatus = '';
   let hooksAnnounced = false;
+  let retriesAnnounced = 0;
 
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, INSTALL_POLL_INTERVAL_MS));
@@ -845,9 +882,15 @@ async function waitForInstalled(
       // transient network/API error — the job answer may still decide
     }
 
+    const notice = retryNotice(job);
+    if (notice && (job?.retryCount ?? 0) > retriesAnnounced) {
+      console.log(notice);
+      retriesAnnounced = job?.retryCount ?? retriesAnnounced;
+    }
     const status = pkg?.status || (pkg?.installed ? 'installed' : '');
     if (status && status !== lastStatus) {
-      console.log(`  status: ${status}`);
+      // During a pending retry the node says `failed`; say what it means.
+      console.log(`  status: ${status}${notice && status === 'failed' ? ' (retry pending)' : ''}`);
       lastStatus = status;
     }
     if (
@@ -860,10 +903,12 @@ async function waitForInstalled(
       hooksAnnounced = true;
     }
 
-    const verdict = installVerdict(job, pkg);
+    const verdict = installVerdict(job, pkg, jobId);
     if (!verdict.done) continue;
 
-    for (const line of formatPostInstallResults(pkg?.postInstallResults)) console.log(line);
+    for (const line of formatPostInstallResults(currentResults(pkg?.postInstallResults, jobId))) {
+      console.log(line);
+    }
     if (verdict.ok) return;
     throw new Error(formatInstallFailure(packageName, verdict.detail, jobId));
   }
