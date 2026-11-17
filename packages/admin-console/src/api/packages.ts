@@ -255,7 +255,7 @@ export async function getPackage(
     color: props.color as string,
     upload_state: props.upload_state as 'new' | 'updated',
     teaser_background_url: props.teaser_background_url as string,
-    dependencies: props.dependencies as PackageDependency[],
+    dependencies: dependencyList(props.dependencies),
     provides: props.provides as PackageProvides,
     changelog: props.changelog as string,
     readme: props.readme as string,
@@ -265,6 +265,24 @@ export async function getPackage(
     migrations: props.migrations as PackageMigrationSummary[] | undefined,
     applied_migrations: props.applied_migrations as AppliedPackageMigration[] | undefined,
   }
+}
+
+/**
+ * `raisin:Package.dependencies` as a list.
+ *
+ * It is an Array of `{ name, version }`. Engines before the fix wrote an Object
+ * keyed "0", "1", … instead, and such a node can still be read until its next
+ * registration rewrites it; `.map` on that object would crash the details page.
+ */
+export function dependencyList(value: unknown): PackageDependency[] | undefined {
+  if (Array.isArray(value)) return value as PackageDependency[]
+  if (value && typeof value === 'object') {
+    return Object.keys(value as Record<string, unknown>)
+      .sort((a, b) => Number(a) - Number(b))
+      .map((k) => (value as Record<string, PackageDependency>)[k])
+      .filter((d) => d && typeof d === 'object')
+  }
+  return undefined
 }
 
 /**

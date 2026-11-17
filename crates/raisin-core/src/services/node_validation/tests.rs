@@ -1603,3 +1603,75 @@ fn an_empty_string_on_a_string_property_is_untouched() {
         Some(&PropertyValue::String(String::new()))
     );
 }
+
+/// The node a builtin/overlay package registers as must pass the SHIPPED
+/// `raisin:Package` schema. `dependencies` was written as an Object keyed
+/// "0", "1", … while the type declares Array, so every package with a
+/// `dependencies:` block (`maravilla-connectors` has two) failed registration
+/// with "declared Array but the value is Object".
+#[tokio::test]
+async fn a_registered_package_node_passes_the_shipped_package_type() {
+    use crate::package_registration::{
+        build_package_node, PackageOrigin, PackageRegistration, PackageResource,
+    };
+
+    let storage = setup_test_storage().await;
+    let package_type = crate::nodetype_init::load_global_nodetypes()
+        .into_iter()
+        .find(|nt| nt.name == "raisin:Package")
+        .expect("raisin:Package ships as a global node type");
+    storage
+        .node_types()
+        .put(
+            BranchScope::new("default", "default", "main"),
+            package_type,
+            CommitMetadata::system("raisin:Package"),
+        )
+        .await
+        .unwrap();
+    let validator = NodeValidator::new(
+        storage.clone(),
+        "default".to_string(),
+        "default".to_string(),
+        "main".to_string(),
+    );
+
+    let manifest: raisin_packages::Manifest = serde_yaml::from_str(
+        "name: maravilla-connectors\nversion: 0.4.0\ndependencies:\n  - name: ms-graph-adapter\n    version: \">=0.1.0\"\n  - name: google-drive-adapter\n    version: \"*\"\n",
+    )
+    .unwrap();
+    let node = build_package_node(
+        &PackageRegistration {
+            manifest: &manifest,
+            resource: PackageResource::new("t/2026/01/01/a.rap", "http://x/a.rap", 42),
+            origin: PackageOrigin::Builtin {
+                content_hash: "abc123".to_string(),
+            },
+        },
+        None,
+    );
+
+    let Some(PropertyValue::Array(deps)) = node.properties.get("dependencies") else {
+        panic!(
+            "dependencies must be an Array, got {:?}",
+            node.properties.get("dependencies")
+        );
+    };
+    assert_eq!(deps.len(), 2);
+    let PropertyValue::Object(first) = &deps[0] else {
+        panic!("each dependency is an object");
+    };
+    assert_eq!(
+        first.get("name"),
+        Some(&PropertyValue::String("ms-graph-adapter".to_string()))
+    );
+    assert_eq!(
+        first.get("version"),
+        Some(&PropertyValue::String(">=0.1.0".to_string()))
+    );
+
+    validator
+        .validate_node("packages", &node)
+        .await
+        .expect("a registered package node must satisfy raisin:Package");
+}

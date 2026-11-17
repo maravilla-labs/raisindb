@@ -301,18 +301,26 @@ pub fn build_package_node_properties(
         );
     }
 
+    // An ARRAY of {name, version}, as raisin:Package declares it. This was an
+    // Object keyed "0", "1", … which strict type checking refuses ("declared
+    // Array but the value is Object"), so every builtin/overlay package with a
+    // `dependencies:` block failed registration on every repo. The upload path
+    // (`package_process::manifest`) was fixed the same way; keep them in step.
     if !manifest.dependencies.is_empty() {
-        let mut deps_map = HashMap::new();
-        for (i, dep) in manifest.dependencies.iter().enumerate() {
-            let mut dep_obj = HashMap::new();
-            dep_obj.insert("name".to_string(), PropertyValue::String(dep.name.clone()));
-            dep_obj.insert(
-                "version".to_string(),
-                PropertyValue::String(dep.version.clone()),
-            );
-            deps_map.insert(i.to_string(), PropertyValue::Object(dep_obj));
-        }
-        properties.insert("dependencies".to_string(), PropertyValue::Object(deps_map));
+        let deps = manifest
+            .dependencies
+            .iter()
+            .map(|dep| {
+                let mut dep_obj = HashMap::new();
+                dep_obj.insert("name".to_string(), PropertyValue::String(dep.name.clone()));
+                dep_obj.insert(
+                    "version".to_string(),
+                    PropertyValue::String(dep.version.clone()),
+                );
+                PropertyValue::Object(dep_obj)
+            })
+            .collect();
+        properties.insert("dependencies".to_string(), PropertyValue::Array(deps));
     }
 
     let provides = &manifest.provides;
