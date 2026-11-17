@@ -9,7 +9,11 @@ import {
   createZipPackage,
   DEFAULT_IGNORE_PATTERNS,
   formatInstallFailure,
+  formatPostInstallResults,
+  installVerdict,
+  INSTALL_POLL_TIMEOUT_MS,
 } from './package.js';
+import { countPostInstallHooks, type PackageSummary } from '../api.js';
 
 function makeTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'raisindb-cli-test-'));
@@ -309,5 +313,101 @@ describe('formatInstallFailure', () => {
     expect(msg).toContain('  - entry 58');
     expect(msg).not.toContain('  - entry 59\n');
     expect(msg).toContain('41 more line(s)');
+  });
+});
+
+describe('installVerdict', () => {
+  const pkg = (p: Partial<PackageSummary>): PackageSummary => ({
+    id: '1',
+    name: 'site',
+    version: '1.0.0',
+    installed: true,
+    status: 'installed',
+    ...p,
+  });
+
+  it('keeps waiting while the job runs, even when the node already says installed', () => {
+    // The node flips to `installed` BEFORE the post_install hooks run.
+    for (const status of ['Scheduled', 'Running', 'Executing']) {
+      expect(installVerdict({ status }, pkg({ postInstallHooks: 2 }))).toEqual({ done: false });
+    }
+  });
+
+  it('succeeds when the job completes', () => {
+    expect(installVerdict({ status: 'Completed' }, pkg({}))).toEqual({ done: true, ok: true });
+  });
+
+  it('fails when the job fails, with the node error first', () => {
+    expect(
+      installVerdict({ status: 'Failed', error: 'job detail' }, pkg({ status: 'failed', error: 'node detail' }))
+    ).toEqual({ done: true, ok: false, detail: 'node detail' });
+    expect(installVerdict({ status: 'Failed', error: 'job detail' }, undefined)).toEqual({
+      done: true,
+      ok: false,
+      detail: 'job detail',
+    });
+    expect(installVerdict({ status: 'Cancelled' }, pkg({}))).toMatchObject({ done: true, ok: false });
+  });
+
+  describe('without a job answer (old server, purged job, no job id)', () => {
+    it('waits for the hook results when the manifest declares hooks', () => {
+      expect(installVerdict(null, pkg({ postInstallHooks: 1 }))).toEqual({ done: false });
+      expect(
+        installVerdict(
+          null,
+          pkg({ postInstallHooks: 1, postInstallResults: [{ function: '/lib/a', status: 'completed' }] })
+        )
+      ).toEqual({ done: true, ok: true });
+    });
+
+    it('fails on a failed hook or a failed node', () => {
+      expect(
+        installVerdict(
+          null,
+          pkg({ postInstallHooks: 1, postInstallResults: [{ function: '/lib/a', status: 'failed' }] })
+        )
+      ).toMatchObject({ done: true, ok: false });
+      expect(installVerdict(null, pkg({ status: 'failed', error: 'x' }))).toEqual({
+        done: true,
+        ok: false,
+        detail: 'x',
+      });
+    });
+
+    it('is done at installed when there are no hooks, and waits otherwise', () => {
+      expect(installVerdict(null, pkg({}))).toEqual({ done: true, ok: true });
+      expect(installVerdict(null, pkg({ status: 'installing', installed: false }))).toEqual({ done: false });
+      expect(installVerdict(null, undefined)).toEqual({ done: false });
+    });
+  });
+
+  it('allows the whole hook budget (1200 s) and then some', () => {
+    expect(INSTALL_POLL_TIMEOUT_MS).toBeGreaterThan(1_200_000);
+  });
+});
+
+describe('formatPostInstallResults', () => {
+  it('prints one line per hook with its status, duration and error', () => {
+    expect(
+      formatPostInstallResults([
+        { function: '/lib/a', status: 'completed', duration_ms: 12 },
+        { function: '/lib/b', status: 'failed', duration_ms: 3, error: 'boom' },
+        { function: '/lib/c', status: 'skipped', error: 'an earlier hook failed' },
+      ])
+    ).toEqual([
+      '  post_install /lib/a: completed (12 ms)',
+      '  post_install /lib/b: failed (3 ms): boom',
+      '  post_install /lib/c: skipped: an earlier hook failed',
+    ]);
+    expect(formatPostInstallResults(undefined)).toEqual([]);
+  });
+});
+
+describe('countPostInstallHooks', () => {
+  it('reads the JSON string the server stores, or a plain list', () => {
+    expect(countPostInstallHooks('[{"function":"/lib/a"},{"function":"/lib/b"}]')).toBe(2);
+    expect(countPostInstallHooks([{ function: '/lib/a' }])).toBe(1);
+    expect(countPostInstallHooks(undefined)).toBeUndefined();
+    expect(countPostInstallHooks('not json')).toBeUndefined();
   });
 });

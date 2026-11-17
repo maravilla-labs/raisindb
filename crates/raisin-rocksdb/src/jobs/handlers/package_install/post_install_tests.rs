@@ -366,6 +366,29 @@ async fn skip_mode_runs_the_hooks_on_every_install() {
     );
 }
 
+/// A node must never answer "the hooks ran" with the PREVIOUS install's
+/// results: the CLI, when it cannot ask the job, waits for results to appear
+/// after `installed`. Finalizing an install clears them; this install's hooks
+/// record their own.
+#[tokio::test]
+async fn an_install_does_not_keep_the_previous_installs_hook_results() {
+    let env = setup().await;
+    install(&env, "main", "sync", TWO_HOOKS).await.unwrap();
+    assert_eq!(statuses(&package_props(&env).await).len(), 2);
+
+    install(&env, "main", "sync", "").await.unwrap();
+    let props = package_props(&env).await;
+    assert_eq!(props.get("status"), Some(&s("installed")));
+    assert!(
+        !props.contains_key("post_install_results"),
+        "stale results survived a hook-less install: {:?}",
+        props.get("post_install_results")
+    );
+
+    install(&env, "main", "sync", TWO_HOOKS).await.unwrap();
+    assert_eq!(statuses(&package_props(&env).await).len(), 2);
+}
+
 #[tokio::test]
 async fn a_branch_other_than_main_runs_no_hooks() {
     let env = setup().await;
