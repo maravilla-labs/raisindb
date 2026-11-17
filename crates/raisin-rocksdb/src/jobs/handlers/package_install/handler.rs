@@ -23,7 +23,7 @@ use std::sync::Arc;
 use zip::ZipArchive;
 
 use super::content_types::InstallStats;
-use super::post_install::{post_install_error, validate_hooks};
+use super::post_install::{post_install_error, validate_hooks, POST_INSTALL_BRANCH};
 use super::types::{
     AppliedHashRecorder, BinaryRetrievalCallback, BinaryStorageCallback, InstallMode,
     PackageInstallResult,
@@ -216,7 +216,13 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 // this run's. Clearing them HERE, not at finalize, closes the
                 // window in which a reader saw the new `installing`/`installed`
                 // state next to the old results.
-                if status == "installing" {
+                //
+                // `main` ONLY. The packages workspace pins its branch to
+                // `main`, so an install on `publish` (a schema-only deploy)
+                // updates this same node; it runs no hooks and records none,
+                // and clearing here erased the results of the main install
+                // that did run them.
+                if status == "installing" && context.branch == POST_INSTALL_BRANCH {
                     node.properties.remove("post_install_results");
                 }
                 match error {
@@ -588,15 +594,20 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                     &context.branch,
                 )
                 .await;
-            self.record_post_install_results(
-                &context.tenant_id,
-                &context.repo_id,
-                &context.branch,
-                package_node_id,
-                &job.id.0,
-                &outcome.results,
-            )
-            .await;
+            // Only a run that can execute hooks records them: a non-main run's
+            // rows are all `skipped` and would replace main's real results on
+            // the shared package node. They are still in the job result.
+            if context.branch == POST_INSTALL_BRANCH {
+                self.record_post_install_results(
+                    &context.tenant_id,
+                    &context.repo_id,
+                    &context.branch,
+                    package_node_id,
+                    &job.id.0,
+                    &outcome.results,
+                )
+                .await;
+            }
             if let Some((function, message)) = outcome.failure {
                 let partial = serde_json::json!({
                     "package_name": package_name,
@@ -715,7 +726,10 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             // hooks run after this commit and record their own; until then the
             // node must not answer "the hooks ran" with stale ones (the CLI
             // waits for results to appear when it cannot ask the job).
-            node.properties.remove("post_install_results");
+            // Main only, for the reason given in `set_package_status`.
+            if branch == POST_INSTALL_BRANCH {
+                node.properties.remove("post_install_results");
+            }
             // Keep the hooks on the node, so an export rebuilt from it (no
             // original archive) still declares them.
             match raisin_packages::post_install_to_property(post_install) {

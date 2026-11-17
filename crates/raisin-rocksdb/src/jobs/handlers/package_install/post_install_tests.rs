@@ -512,6 +512,31 @@ async fn a_new_run_clears_the_previous_results_at_start() {
     );
 }
 
+/// `maravilla package deploy` installs on `main` (hooks run) and then the
+/// schema on `publish`. The packages workspace pins `main`, so both installs
+/// update ONE package node: the publish run must leave main's hook results
+/// alone (it neither clears them at start or finalize, nor overwrites them
+/// with its `skipped` rows).
+#[tokio::test]
+async fn a_publish_install_keeps_mains_hook_results() {
+    let env = setup().await;
+    install(&env, "main", "sync", TWO_HOOKS).await.unwrap();
+    let before = statuses(&package_props(&env).await);
+    assert_eq!(before.len(), 2);
+
+    for post_install in ["", TWO_HOOKS] {
+        install(&env, "feature", "sync", post_install)
+            .await
+            .unwrap();
+        let props = package_props(&env).await;
+        assert_eq!(
+            statuses(&props),
+            before,
+            "a non-main install changed main's results (manifest hooks: {post_install:?})"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_branch_other_than_main_runs_no_hooks() {
     let env = setup().await;
