@@ -1573,6 +1573,18 @@ async fn async_main() {
     // a connection is saved.
     raisin_functions::configure_mcp_client(server_config.mcp_client.clone());
 
+    // Where a connector OAuth flow may send the browser back to
+    // (`[integrations] oauth_return_origins`). Empty refuses every return_to.
+    #[cfg(feature = "storage-rocksdb")]
+    {
+        if !server_config.oauth_return_origins.is_empty() {
+            tracing::info!(origins = ?server_config.oauth_return_origins, "connector OAuth return_to origins");
+        }
+        raisin_transport_http::configure_oauth_return_origins(
+            server_config.oauth_return_origins.clone(),
+        );
+    }
+
     // Operator-named platform hooks for `raisin.platform.hook`. Same
     // process-global shape as the MCP client settings, for the same reason.
     raisin_functions::configure_platform_hooks(

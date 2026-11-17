@@ -109,9 +109,12 @@ template can carry that set as `raisin:Integration.mount_bundles`; the admin
 console's *Add bundle* (Mounts page) asks for connection, workspace and root
 folder, checks the workspace's `allowed_node_types` against what the bundle
 materialises, and creates ordinary `raisin:VirtualMount` nodes from it
-(`planBundle` in `packages/admin-console/src/api/integrations.ts`). Nothing
-server-side reads the property. Stripe and Microsoft 365 are the two reference
-examples.
+(`planBundle` in `packages/admin-console/src/api/integrations.ts`). The same
+rule runs server-side as `POST /api/integrations/{repo}/mount-bundles`
+(`raisin_models::nodes::integrations::bundle`, a tested port of `planBundle`),
+for a caller with no console: see [Setting a connector up without the
+console](#setting-a-connector-up-without-the-console). Stripe and Microsoft 365
+are the two reference examples.
 
 Schema v5 added the two things a single-workspace, no-questions preset could not
 express. An entry may name its own `target_workspace` (and `root_override`), so
@@ -260,13 +263,76 @@ never enter the function sandbox.
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /api/integrations/{repo}/oauth/start` | Admin-only. Body `{ integration_path }` → `{ auth_url, state }`. |
-| `GET /api/integrations/{repo}/oauth/callback` | Provider redirect. Authenticated by the single-use, TTL'd `state` (not a bearer token). Exchanges the code, encrypts tokens, appends a `connected_accounts` entry, redirects to the console. |
+| `POST /api/integrations/{repo}/oauth/start` | Admin-only. Body `{ integration_path, return_to? }` → `{ auth_url, state }`. `return_to` is described below. |
+| `GET /api/integrations/{repo}/oauth/callback` | Provider redirect. Authenticated by the single-use, TTL'd `state` (not a bearer token). Exchanges the code, encrypts tokens, appends a `connected_accounts` entry, then sends the browser to `return_to` when the state carries one, else renders the relay page (opener `postMessage`, fallback to the console). |
 | `POST /api/integrations/{repo}/oauth/disconnect` | Admin-only. Best-effort provider revoke + remove the account. |
 | `POST /api/integrations/{repo}/mounts/{mount_id}/sync` | Admin-only. Enqueue a "sync now" (`mode` = `delta` \| `full`). |
 
 The token exchange happens **server-side**; the client secret and the tokens
 never leave the server in cleartext.
+
+**The `state` is in-process.** It lives 10 minutes, is single-use, and is held by
+the process that minted it. A caller handing the consent link to someone else
+should mint it when that person clicks (redirect them to `auth_url`), not ahead
+of time; on several nodes the callback must reach the node that minted it.
+
+### `return_to`: coming back somewhere other than the console
+
+`oauth/start` takes an optional `return_to`, an absolute URL. It is accepted only
+when its scheme is `https` and its exact origin (scheme, host, port; no
+userinfo) is in the server's allow-list:
+
+```toml
+[integrations]
+oauth_return_origins = ["https://www.maravilla.cloud"]
+```
+
+or, when the TOML list is empty, `RAISIN_INTEGRATIONS_OAUTH_RETURN_ORIGINS`
+(comma-separated). With neither set, every `return_to` is refused. A refused one
+is a `400 RETURN_TO_NOT_ALLOWED` at `start`, never a silent fallback, and nothing
+is minted.
+
+The validated URL rides on the single-use state. Once the outcome is known — on
+success, on every failure after the state is resolved, and on a provider-side
+refusal (`?error=…&state=…`) — the callback answers `302` to it, with the
+outcome merged into its existing query:
+
+| param | value |
+|---|---|
+| `integration_status` | `connected` or `error` |
+| `error`, `error_description` | on `error` only; clamped to 64 / 300 characters |
+
+No code, token, state or account id travels, and the redirect carries
+`Referrer-Policy: no-referrer` (the callback URL itself holds the code). When
+the state is missing or unknown there is no trusted `return_to`, and the relay
+page is rendered as before. Without `return_to` nothing changes.
+
+### Setting a connector up without the console
+
+A control plane holding the operator superadmin bearer reaches these through
+`/management/integrations/{repo}/…` (with `x-tenant-id`); a tenant admin reaches
+the same handlers under `/api/integrations/{repo}/…`. Each still calls
+`require_admin`.
+
+| Step | Endpoint |
+|---|---|
+| Install the adapter package | `POST /management/packages/{repo}/main/head/{package}/raisin:install?mode=skip` |
+| Instance from template | `POST …/instances` `{ template, name?, title? }` → copies `/connectors/<t>` to `/integrations/<name>` without connected accounts, capabilities or secrets; keeps `enabled`. Idempotent. |
+| Consent link | `POST …/oauth/start` `{ integration_path, return_to? }` |
+| Read the connection | `GET …/connections?integration_path=…` |
+| Connection config | `PATCH …/connections/{account_id}` `{ integration_path, config }`. `config` REPLACES the stored map (secrets merge; config does not), so send the whole config: read it from `GET …/connections` and add to it. |
+| Mounts | `POST …/mount-bundles` `{ integration_path, bundle_id?, keys?, account_ref?, target_workspace?, target_branch?, root?, answers?, dry_run? }` |
+
+`mount-bundles` defaults to the connector's only bundle, its entries marked
+`default`, the bundle's `default_workspace` / `default_root` and the only
+connection; an instance without bundles of its own uses its template's. It
+refuses (nothing created) on an unknown entry key, a missing required prompt
+answer, no connected account (`409 NO_CONNECTED_ACCOUNT`), several connections
+and none named, and a target workspace that rejects the mounts' types or
+`raisin:Folder` at its root (`409 WORKSPACE_GATE`: such a mount reports `ok`
+while importing nothing). A mount already there by name or by workspace and path
+is reported `exists`, so the call can be repeated. Each mount it creates gets its
+first walk enqueued at once (`first_sync`), the same job as "sync now".
 
 ---
 

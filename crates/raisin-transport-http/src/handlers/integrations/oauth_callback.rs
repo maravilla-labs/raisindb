@@ -179,6 +179,37 @@ fn escape_html(s: &str) -> String {
 
 /// Exchange the authorization code for tokens, persist an encrypted account
 /// entry, and redirect back to the admin console.
+/// Where a finished flow sends the browser.
+///
+/// With a `return_to` (allow-listed at `oauth/start` and carried on the
+/// single-use state), a 302 there with `integration_status` and, on failure,
+/// the clamped `error` / `error_description`. Without one, EXACTLY the
+/// historical behaviour: the relay page, which posts to the opener and falls
+/// back to the admin console.
+fn finish(repo: &str, return_to: Option<&str>, outcome: &Outcome) -> Response {
+    if let Some(rt) = return_to {
+        let failure = match outcome {
+            Outcome::Connected { .. } => None,
+            Outcome::Failed { code, description } => Some((code.as_str(), description.as_str())),
+        };
+        if let Some(location) = super::return_to::outcome_url(rt, failure) {
+            return super::return_to::redirect(&location);
+        }
+        tracing::warn!("stored return_to no longer parses; falling back to the relay page");
+    }
+    relay_page(repo, outcome)
+}
+
+/// Consume `state` on an early failure and return its `return_to`, when the
+/// state is known, unexpired, a connector flow, and for this repo.
+fn take_return_to(state: Option<&str>, repo: &str) -> Option<String> {
+    let entry = OAUTH_STATE_STORE.consume(state?, StateKind::Integration, now_secs())?;
+    if entry.repo != repo {
+        return None;
+    }
+    entry.return_to
+}
+
 pub async fn callback(
     State(state): State<AppState>,
     Path(repo): Path<String>,
@@ -189,11 +220,18 @@ pub async fn callback(
     // popup; redirect back to the console instead so the operator sees the
     // provider's own code (e.g. AADSTS50194) in context.
     if let Some(err) = q.error {
-        return Ok(relay_page(
+        // The provider bounced back with the `state` it was given, so the flow
+        // is over either way: consume it, and send the browser to its
+        // return_to if it carried one. An unknown state has no trusted
+        // return_to and gets today's page.
+        let return_to = take_return_to(q.state.as_deref(), &repo);
+        return Ok(finish(
             &repo,
+            return_to.as_deref(),
             &Outcome::failed(&err, q.error_description.as_deref().unwrap_or("")),
         ));
     }
+    // No code: nothing to exchange. No state: nothing to trust.
     let (Some(code), Some(state_token)) = (q.code, q.state) else {
         return Ok(relay_page(
             &repo,
@@ -224,11 +262,15 @@ pub async fn callback(
         ));
     }
 
+    // Validated against the allow-list at start; past this point every
+    // outcome, success or failure, goes there when it is set.
+    let return_to = entry.return_to.clone();
     let master_key = state.get_master_key()?;
     let svc = super::config_service(&state, &entry.tenant_id, &entry.repo, "integration-oauth");
     let Some(node) = svc.get_by_path(&entry.target_path).await? else {
-        return Ok(relay_page(
+        return Ok(finish(
             &repo,
+            return_to.as_deref(),
             &Outcome::failed(
                 "unknown_connector",
                 &format!(
@@ -243,8 +285,9 @@ pub async fn callback(
     let (Some(token_url), Some(client_id)) =
         (json_str(&cfg, "token_url"), json_str(&cfg, "client_id"))
     else {
-        return Ok(relay_page(
+        return Ok(finish(
             &repo,
+            return_to.as_deref(),
             &Outcome::failed(
                 "incomplete_config",
                 "This connector is missing its OAuth Token URL or Client ID. Fill both in, click \
@@ -282,8 +325,9 @@ pub async fn callback(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, %token_url, "OAuth token exchange could not reach the provider");
-            return Ok(relay_page(
+            return Ok(finish(
                 &repo,
+                return_to.as_deref(),
                 &Outcome::failed(
                     "token_endpoint_unreachable",
                     &format!("Could not reach the token endpoint {token_url}."),
@@ -329,14 +373,19 @@ pub async fn callback(
         } else {
             format!("{desc}{hint}")
         };
-        return Ok(relay_page(&repo, &Outcome::failed(&code, &desc)));
+        return Ok(finish(
+            &repo,
+            return_to.as_deref(),
+            &Outcome::failed(&code, &desc),
+        ));
     }
     let body: Value = match resp.json().await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, %token_url, "token endpoint returned a non-JSON body");
-            return Ok(relay_page(
+            return Ok(finish(
                 &repo,
+                return_to.as_deref(),
                 &Outcome::failed(
                     "bad_token_response",
                     "The token endpoint returned a response that is not valid JSON.",
@@ -350,8 +399,9 @@ pub async fn callback(
         .and_then(|v| v.as_str())
         .map(String::from)
     else {
-        return Ok(relay_page(
+        return Ok(finish(
             &repo,
+            return_to.as_deref(),
             &Outcome::failed(
                 "bad_token_response",
                 "The token endpoint accepted the exchange but returned no access_token.",
@@ -394,7 +444,7 @@ pub async fn callback(
             Ok(t) => t,
             Err(e) => {
                 tracing::error!(error = %e, "failed to encrypt OAuth tokens for storage");
-                return Ok(relay_page(&repo, &Outcome::failed(
+                return Ok(finish(&repo, return_to.as_deref(), &Outcome::failed(
                 "storage_failed",
                 "Authorization succeeded but the tokens could not be encrypted for storage.",
             )));
@@ -485,8 +535,9 @@ pub async fn callback(
     if let Err(e) = persisted {
         tracing::error!(error = %e, integration_path = %target_path,
             "failed to persist the connected account after a successful OAuth exchange");
-        return Ok(relay_page(
+        return Ok(finish(
             &repo,
+            return_to.as_deref(),
             &Outcome::failed(
                 "storage_failed",
                 "Authorization succeeded but the connected account could not be saved.",
@@ -500,8 +551,9 @@ pub async fn callback(
         .next()
         .unwrap_or("")
         .to_string();
-    Ok(relay_page(
+    Ok(finish(
         &repo,
+        return_to.as_deref(),
         &Outcome::Connected {
             name: integration_name,
         },
@@ -601,6 +653,105 @@ mod tests {
     #[test]
     fn clamp_never_splits_utf8() {
         assert_eq!(truncate(&"é".repeat(500), 300).chars().count(), 300);
+    }
+
+    fn location(r: &Response) -> String {
+        r.headers()
+            .get(axum::http::header::LOCATION)
+            .expect("Location")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn success_with_return_to_redirects_there_with_the_status_only() {
+        let connected = Outcome::Connected {
+            name: "maravilla-stripe".into(),
+        };
+        let r = finish(
+            "studio",
+            Some("https://www.maravilla.cloud/orgs/acme/stripe?step=4"),
+            &connected,
+        );
+        assert_eq!(r.status(), axum::http::StatusCode::FOUND);
+        assert_eq!(
+            location(&r),
+            "https://www.maravilla.cloud/orgs/acme/stripe?step=4&integration_status=connected"
+        );
+        assert_eq!(
+            r.headers()
+                .get(axum::http::header::REFERRER_POLICY)
+                .unwrap(),
+            "no-referrer"
+        );
+    }
+
+    #[test]
+    fn failure_with_return_to_redirects_there_with_the_clamped_error() {
+        let failed = Outcome::failed("access_denied", &"x".repeat(1000));
+        let r = finish("studio", Some("https://www.maravilla.cloud/back"), &failed);
+        assert_eq!(r.status(), axum::http::StatusCode::FOUND);
+        let url = url::Url::parse(&location(&r)).unwrap();
+        let q: std::collections::HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(q["integration_status"], "error");
+        assert_eq!(q["error"], "access_denied");
+        assert_eq!(q["error_description"].chars().count(), 300);
+        assert_eq!(q.len(), 3, "nothing but the outcome travels: {q:?}");
+    }
+
+    #[test]
+    fn without_return_to_the_relay_page_is_unchanged() {
+        let connected = Outcome::Connected {
+            name: "maravilla-stripe".into(),
+        };
+        let r = finish("studio", None, &connected);
+        assert_eq!(r.status(), axum::http::StatusCode::OK);
+        assert!(r.headers().get(axum::http::header::LOCATION).is_none());
+        assert!(r
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+    }
+
+    #[test]
+    fn an_early_failure_uses_only_a_known_state_for_this_repo() {
+        let store = &OAUTH_STATE_STORE;
+        let now = now_secs();
+        store.insert(
+            "cb-test-known".into(),
+            "t".into(),
+            "studio".into(),
+            "/integrations/x".into(),
+            now,
+            600,
+        );
+        store.set_return_to("cb-test-known", "https://www.maravilla.cloud/x".into());
+        assert_eq!(
+            take_return_to(Some("cb-test-known"), "studio").as_deref(),
+            Some("https://www.maravilla.cloud/x")
+        );
+        // Single use: the second look finds nothing.
+        assert!(take_return_to(Some("cb-test-known"), "studio").is_none());
+
+        store.insert(
+            "cb-test-other-repo".into(),
+            "t".into(),
+            "other".into(),
+            "/integrations/x".into(),
+            now,
+            600,
+        );
+        store.set_return_to("cb-test-other-repo", "https://www.maravilla.cloud/x".into());
+        assert!(take_return_to(Some("cb-test-other-repo"), "studio").is_none());
+        assert!(take_return_to(Some("cb-test-unknown"), "studio").is_none());
+        assert!(take_return_to(None, "studio").is_none());
     }
 }
 

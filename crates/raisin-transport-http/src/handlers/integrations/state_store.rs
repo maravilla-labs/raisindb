@@ -48,6 +48,10 @@ pub struct StateEntry {
     /// of the challenge, and the whole point of PKCE is that it never leaves
     /// the server that started the flow.
     pub pkce_verifier: Option<String>,
+    /// Where the browser goes once the connect is over, already validated
+    /// against the allow-list at `start` (see `return_to.rs`). `None` keeps the
+    /// relay page and its fallback to the admin console.
+    pub return_to: Option<String>,
     /// Unix epoch seconds after which the entry is no longer valid.
     pub expires_at: u64,
 }
@@ -113,9 +117,25 @@ impl OAuthStateStore {
                 target_path,
                 kind,
                 pkce_verifier,
+                return_to: None,
                 expires_at: now_secs.saturating_add(ttl_secs),
             },
         );
+    }
+
+    /// Attach a validated `return_to` to an entry minted moments ago.
+    ///
+    /// Separate from `insert_kind` so the MCP-connection flow, which has no
+    /// such thing, is untouched. Returns `false` if the entry is gone.
+    pub fn set_return_to(&self, state: &str, return_to: String) -> bool {
+        let mut guard = self.entries.lock().unwrap();
+        match guard.get_mut(state) {
+            Some(e) => {
+                e.return_to = Some(return_to);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Consume a `state` entry: remove it and return it only if it exists, has
@@ -194,6 +214,42 @@ mod tests {
         // The verifier must survive to the token exchange; losing it makes
         // every PKCE code exchange fail with invalid_grant.
         assert_eq!(got.pkce_verifier.as_deref(), Some("verifier"));
+    }
+
+    #[test]
+    fn a_return_to_rides_on_the_entry_and_is_consumed_with_it() {
+        let store = OAuthStateStore::new();
+        store.insert(
+            "s".into(),
+            "t".into(),
+            "r".into(),
+            "/integrations/x".into(),
+            100,
+            600,
+        );
+        assert!(store.set_return_to("s", "https://www.maravilla.cloud/x".into()));
+        let e = store
+            .consume("s", StateKind::Integration, 101)
+            .expect("entry");
+        assert_eq!(
+            e.return_to.as_deref(),
+            Some("https://www.maravilla.cloud/x")
+        );
+        assert!(!store.set_return_to("s", "https://www.maravilla.cloud/y".into()));
+        // An entry minted without one keeps the default behaviour.
+        store.insert(
+            "u".into(),
+            "t".into(),
+            "r".into(),
+            "/integrations/x".into(),
+            100,
+            600,
+        );
+        assert!(store
+            .consume("u", StateKind::Integration, 101)
+            .unwrap()
+            .return_to
+            .is_none());
     }
 
     #[test]

@@ -200,11 +200,6 @@ pub async fn sync_mount(
 ) -> Result<Json<SyncResponse>, ApiError> {
     require_admin(auth.as_deref())?;
 
-    let rocksdb = state
-        .rocksdb_storage
-        .as_ref()
-        .ok_or_else(|| ApiError::internal("RocksDB backend required for mount sync"))?;
-
     let mode = body
         .and_then(|Json(b)| b.mode)
         .unwrap_or_else(|| "delta".to_string());
@@ -218,23 +213,53 @@ pub async fn sync_mount(
         )));
     }
 
+    let job_id = enqueue_mount_sync(&state, &tenant.tenant_id, &repo, &mount_id, &mode).await?;
+    Ok(Json(match job_id {
+        Some(id) => SyncResponse {
+            job_id: Some(id),
+            status: "queued".to_string(),
+        },
+        None => SyncResponse {
+            job_id: None,
+            status: "already_running".to_string(),
+        },
+    }))
+}
+
+/// Enqueue a one-shot manual `VirtualMountSync` for the mount NODE ID
+/// `mount_id`. `Ok(None)` when an in-flight sync of that mount was deduped.
+///
+/// Shared by "sync now" and by `mount-bundles`, which kicks each new mount's
+/// first walk instead of leaving it for the next scheduler pass.
+#[cfg(feature = "storage-rocksdb")]
+pub(crate) async fn enqueue_mount_sync(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    mount_id: &str,
+    mode: &str,
+) -> Result<Option<String>, ApiError> {
+    let rocksdb = state
+        .rocksdb_storage
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("RocksDB backend required for mount sync"))?;
     let job_registry = rocksdb.job_registry();
     let job_data_store = rocksdb.job_data_store();
 
     let job_type = raisin_storage::jobs::JobType::VirtualMountSync {
-        mount_id: mount_id.clone(),
-        mode,
+        mount_id: mount_id.to_string(),
+        mode: mode.to_string(),
         trigger: "manual".to_string(),
     };
     let job_id = raisin_storage::jobs::JobId::new();
     let context = raisin_storage::jobs::JobContext {
-        tenant_id: tenant.tenant_id.clone(),
-        repo_id: repo.clone(),
+        tenant_id: tenant_id.to_string(),
+        repo_id: repo.to_string(),
         // The repo's real config branch, not a hardcoded "main": the scheduler
         // uses `repository.config.default_branch`, and a mismatch here builds a
         // different lock key and job context than the scheduled path, after
         // which the engine cannot find the mount and silently no-ops.
-        branch: super::config_branch(&state, &tenant.tenant_id, &repo).await,
+        branch: super::config_branch(state, tenant_id, repo).await,
         workspace_id: "raisin:system".to_string(),
         revision: raisin_hlc::HLC::now(),
         metadata: std::collections::HashMap::new(),
@@ -247,24 +272,14 @@ pub async fn sync_mount(
         .register_job_with_id_idempotent(
             job_id.clone(),
             job_type,
-            tenant.tenant_id.clone(),
+            tenant_id.to_string(),
             format!("vmount-sync:{}", mount_id),
             None,
         )
         .await
         .map_err(|e| ApiError::internal(format!("failed to enqueue sync job: {e}")))?;
 
-    if registered {
-        Ok(Json(SyncResponse {
-            job_id: Some(job_id.0),
-            status: "queued".to_string(),
-        }))
-    } else {
-        Ok(Json(SyncResponse {
-            job_id: None,
-            status: "already_running".to_string(),
-        }))
-    }
+    Ok(registered.then_some(job_id.0))
 }
 
 #[cfg(not(feature = "storage-rocksdb"))]

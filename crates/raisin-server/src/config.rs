@@ -188,6 +188,22 @@ pub struct ServerConfigFile {
     /// Absent means no hooks: the binding refuses every name.
     #[serde(default)]
     pub platform: PlatformConfig,
+    /// Outbound integrations (TOML `[integrations]`). Absent means no
+    /// `return_to` origins, so connector OAuth always ends on the console.
+    #[serde(default)]
+    pub integrations: IntegrationsConfig,
+}
+
+/// `[integrations]` section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IntegrationsConfig {
+    /// Origins a connector OAuth `return_to` may point at, exactly
+    /// (`https://www.maravilla.cloud`). https only; no path. When empty, the
+    /// `RAISIN_INTEGRATIONS_OAUTH_RETURN_ORIGINS` environment variable
+    /// (comma-separated) is used; when that is empty too, every `return_to` is
+    /// refused at `oauth/start`.
+    #[serde(default)]
+    pub oauth_return_origins: Vec<String>,
 }
 
 /// `[platform]` section: named endpoints a function may fire by name.

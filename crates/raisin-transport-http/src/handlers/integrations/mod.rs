@@ -18,10 +18,12 @@
 pub(crate) mod accounts_lock;
 mod adapter_invoke;
 mod browse;
+mod bundles;
 mod client_secret;
 mod config_secrets;
 mod connect_event;
 mod connections;
+mod instances;
 mod manage;
 mod mount_config;
 mod mount_content;
@@ -32,16 +34,19 @@ mod mount_rebind;
 mod notifications;
 mod oauth_callback;
 mod oauth_start;
+pub(crate) mod return_to;
 pub(crate) mod setup_info;
 pub mod state_store;
 mod test_connection;
 
 #[cfg(feature = "storage-rocksdb")]
 pub use browse::browse;
+pub use bundles::instantiate_bundle;
 pub use client_secret::set_client_secret;
 pub use config_secrets::set_config_secrets;
 pub use connect_event::connect_event;
 pub use connections::{create_connection, delete_connection, list_connections, update_connection};
+pub use instances::create_instance;
 pub use manage::{disconnect, sync_mount};
 #[cfg(feature = "storage-rocksdb")]
 pub use mount_config::patch_sync_config;
@@ -56,6 +61,7 @@ pub use mount_rebind::{rebind_mount, rebind_mounts};
 pub use notifications::notify;
 pub use oauth_callback::callback;
 pub use oauth_start::start;
+pub use return_to::configure_oauth_return_origins;
 pub use setup_info::{setup_urls_integration, setup_urls_mount};
 pub use test_connection::test_connection;
 
@@ -73,6 +79,10 @@ use crate::state::{AppState, Store};
 const CONFIG_BRANCH: &str = "main";
 /// Workspace that holds integration/mount configuration in every repo.
 const CONFIG_WORKSPACE: &str = "raisin:system";
+/// Node type of a connector (template or instance).
+pub(crate) const INTEGRATION_NODE_TYPE: &str = "raisin:Integration";
+/// Node type of a virtual mount.
+pub(crate) const MOUNT_NODE_TYPE: &str = "raisin:VirtualMount";
 
 /// Reject the request unless the caller is an admin.
 ///

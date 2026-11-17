@@ -27,6 +27,11 @@ pub(crate) mod util;
 /// one thing outside the HTTP layer that needs to look inside it.
 pub use handlers::uploads::upload_session_count;
 
+/// Install the allow-list of origins a connector OAuth `return_to` may point at
+/// (`[integrations] oauth_return_origins`). Called once by the server at boot.
+#[cfg(feature = "storage-rocksdb")]
+pub use handlers::integrations::configure_oauth_return_origins;
+
 mod handlers {
     pub mod admin;
     #[cfg(feature = "storage-rocksdb")]
