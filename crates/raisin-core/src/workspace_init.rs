@@ -341,12 +341,99 @@ mod tests {
             .find(|nt| nt.name == "raisin:User")
             .expect("raisin:User NodeType should exist");
 
-        let allowed_node_types: HashSet<_> = access_control.allowed_node_types.iter().collect();
-        let acl_children: HashSet<_> = acl_folder.allowed_children.iter().collect();
+        // A SUPERSET, not equality. `raisin:AclFolder` is shared: besides the
+        // ACL workspace, `raisin:system` builds its /config, /config/repos,
+        // /providers, /identities, /sessions, /tokens and /access out of
+        // AclFolders (system.yaml initial_structure), and 0c791d10 added those
+        // types to the list for exactly that reason. Equality with the ACL
+        // workspace would take them out again, and `/config/repos` would stop
+        // being created, so no tenant could get a RepoAuthConfig. What a
+        // workspace may hold is still decided by its own `allowed_node_types`;
+        // an AclFolder child type is not thereby allowed in `raisin:access_control`.
+        let acl_children: HashSet<&String> = acl_folder.allowed_children.iter().collect();
 
-        assert_eq!(
-            allowed_node_types, acl_children,
-            "AclFolder.allowed_children must admit every type declared by the ACL workspace"
+        // 1. Every type the ACL workspace declares may live under its folders.
+        let missing: Vec<&String> = access_control
+            .allowed_node_types
+            .iter()
+            .filter(|t| !acl_children.contains(t))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "AclFolder.allowed_children must admit every type declared by the ACL workspace; missing {missing:?}"
+        );
+
+        // 2. Every type a shipped workspace nests directly under an AclFolder in
+        //    its initial_structure is admitted (the October regression).
+        fn nested_under_acl_folders(
+            children: &[raisin_models::nodes::types::initial_structure::InitialChild],
+            parent_is_acl_folder: bool,
+            out: &mut Vec<String>,
+        ) {
+            for c in children {
+                if parent_is_acl_folder {
+                    out.push(c.node_type.clone());
+                }
+                if let Some(grand) = &c.children {
+                    nested_under_acl_folders(grand, c.node_type == "raisin:AclFolder", out);
+                }
+            }
+        }
+        let acl_hosts: Vec<_> = workspaces
+            .iter()
+            .filter(|ws| {
+                ws.allowed_node_types
+                    .iter()
+                    .any(|t| t == "raisin:AclFolder")
+            })
+            .collect();
+        for ws in &acl_hosts {
+            let mut nested = Vec::new();
+            if let Some(children) = ws
+                .initial_structure
+                .as_ref()
+                .and_then(|s| s.children.as_ref())
+            {
+                nested_under_acl_folders(children, false, &mut nested);
+            }
+            let refused: Vec<&String> = nested
+                .iter()
+                .filter(|t| !acl_children.contains(t))
+                .collect();
+            assert!(
+                refused.is_empty(),
+                "{}'s initial_structure nests {refused:?} under raisin:AclFolder, which does not admit them",
+                ws.name
+            );
+        }
+
+        // 2b. ...and the types raisin:system creates at RUNTIME under the
+        //     AclFolders of that structure, which (2) cannot see: provisioning
+        //     writes /config/repos/<repo> (RepoAuthConfig), auth writes under
+        //     /providers, /identities, /sessions, /tokens and /access.
+        for runtime in [
+            "raisin:RepoAuthConfig",
+            "raisin:ProviderConfig",
+            "raisin:Identity",
+            "raisin:Session",
+            "raisin:OneTimeToken",
+            "raisin:WorkspaceAccess",
+        ] {
+            assert!(
+                acl_children.contains(&runtime.to_string()),
+                "raisin:system creates {runtime} under an AclFolder at runtime; AclFolder must admit it"
+            );
+        }
+
+        // 3. No dead entries: every admitted child type can exist in at least one
+        //    workspace that holds AclFolders.
+        let dead: Vec<&&String> = acl_children
+            .iter()
+            .filter(|t| !acl_hosts.iter().any(|ws| ws.allowed_node_types.contains(t)))
+            .collect();
+        assert!(
+            dead.is_empty(),
+            "AclFolder.allowed_children lists {dead:?}, which no workspace holding AclFolders allows"
         );
 
         let user_children: HashSet<_> = user.allowed_children.iter().collect();
