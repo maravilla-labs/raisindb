@@ -374,6 +374,23 @@ pub async fn optional_auth_middleware(
             // repository. Never system, no AdminClaims (so no admin gate and
             // no `me/api-keys` minting), refused outside its repository.
             if api_key.is_scoped() {
+                // A key belongs to ONE tenant: the request may not name
+                // another one (`x-tenant-id`), or a repository of the same
+                // name there would be reachable with this key's roles.
+                let request_tenant = req
+                    .extensions()
+                    .get::<TenantInfo>()
+                    .map(|t| t.tenant_id.as_str())
+                    .unwrap_or("default");
+                if request_tenant != api_key.tenant_id {
+                    tracing::warn!(
+                        key = %api_key.key_prefix,
+                        key_tenant = %api_key.tenant_id,
+                        request_tenant = %request_tenant,
+                        "scoped API key refused for another tenant"
+                    );
+                    return Err(StatusCode::FORBIDDEN);
+                }
                 let context = scoped_key_context(&state, &api_key, req.uri().path()).await?;
                 req.extensions_mut().insert(context);
                 return Ok(next.run(req).await);
