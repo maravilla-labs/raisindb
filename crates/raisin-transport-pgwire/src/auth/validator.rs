@@ -3,6 +3,18 @@
 //! API key validation trait and mock implementation.
 
 use async_trait::async_trait;
+use raisin_models::auth::AuthContext;
+
+/// A validated key, with what a SCOPED key is limited to.
+#[derive(Debug, Clone)]
+pub struct ValidatedApiKey {
+    pub user_id: String,
+    pub tenant_id: String,
+    /// `Some(repo)` for a scoped key: it may connect to that repository only.
+    pub scope_repo: Option<String>,
+    /// A scoped key's RLS context (its roles in `scope_repo`).
+    pub key_auth: Option<AuthContext>,
+}
 
 /// Trait for validating API keys and checking permissions
 ///
@@ -25,6 +37,24 @@ pub trait ApiKeyValidator: Send + Sync {
     /// * `Ok(false)` - User does not have pgwire access
     /// * `Err(error)` - Error checking permissions
     async fn has_pgwire_access(&self, tenant_id: &str, user_id: &str) -> Result<bool, String>;
+
+    /// Validate a key including its scope. The default treats every key as
+    /// unscoped (an admin's own key), which is what a validator that knows
+    /// nothing of scopes means. The server's validator overrides it.
+    async fn validate_api_key_scoped(
+        &self,
+        api_key: &str,
+    ) -> Result<Option<ValidatedApiKey>, String> {
+        Ok(self
+            .validate_api_key(api_key)
+            .await?
+            .map(|(user_id, tenant_id)| ValidatedApiKey {
+                user_id,
+                tenant_id,
+                scope_repo: None,
+                key_auth: None,
+            }))
+    }
 }
 
 /// Simple in-memory API key validator for testing

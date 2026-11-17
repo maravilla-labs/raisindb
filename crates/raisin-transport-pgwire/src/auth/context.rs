@@ -17,6 +17,9 @@ pub struct ConnectionContext {
     pub identity_auth: Option<AuthContext>,
     /// Session branch (set via USE BRANCH or SET app.branch)
     pub session_branch: Option<String>,
+    /// The RLS context of a SCOPED API key (its roles in this repository).
+    /// `None` for an admin's own key, whose queries run as before.
+    pub key_auth: Option<AuthContext>,
 }
 
 impl ConnectionContext {
@@ -28,7 +31,25 @@ impl ConnectionContext {
             repository,
             identity_auth: None,
             session_branch: None,
+            key_auth: None,
         }
+    }
+
+    /// The same context for a scoped key.
+    pub fn with_key_auth(mut self, auth: AuthContext) -> Self {
+        self.key_auth = Some(auth);
+        self
+    }
+
+    /// Whether this connection authenticated with a scoped key.
+    pub fn is_scoped(&self) -> bool {
+        self.key_auth.is_some()
+    }
+
+    /// The context a query runs with: the identity set by `SET app.user`,
+    /// else a scoped key's own context, else none (an admin key: unchanged).
+    pub fn effective_auth(&self) -> Option<AuthContext> {
+        self.identity_auth.clone().or_else(|| self.key_auth.clone())
     }
 
     /// Set identity auth context (from SET app.user = '<jwt>')

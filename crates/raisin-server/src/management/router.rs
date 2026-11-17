@@ -296,6 +296,16 @@ pub fn management_router(
             axum::routing::put(admin::scheduling::set_tenant_scheduling)
                 .get(admin::scheduling::get_tenant_scheduling),
         )
+        // Scoped API keys (a site's server key): RLS context of `roles` in
+        // `repo`, never system. Path-scoped like identity-users.
+        .route(
+            "/management/admin/tenants/{tenant_id}/api-keys",
+            post(admin::api_keys::create_scoped_api_key).get(admin::api_keys::list_scoped_api_keys),
+        )
+        .route(
+            "/management/admin/tenants/{tenant_id}/api-keys/{key_id}",
+            axum::routing::delete(admin::api_keys::revoke_scoped_api_key),
+        )
         .route(
             "/management/admin/tenants/{tenant_id}/identity-users",
             post(admin::identity_users::create_identity_user)

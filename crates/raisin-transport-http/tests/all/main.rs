@@ -40,6 +40,7 @@ mod http_reorder_copy;
 mod http_revision_queries;
 mod http_revisions;
 mod http_sanitization;
+mod http_scoped_api_keys;
 mod http_secrets;
 mod http_smoke;
 mod http_snapshot_branches;

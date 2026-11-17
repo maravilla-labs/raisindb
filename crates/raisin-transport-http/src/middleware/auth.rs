@@ -182,6 +182,73 @@ async fn insert_unauthenticated_context(state: &AppState, req: &mut Request<Body
     }
 }
 
+/// The `AuthContext` of a SCOPED key for a request to `path`.
+///
+/// 403 when the request names no repository or another one than the key's:
+/// a key's roles are roles of ONE repository, and a route that names none
+/// (tenant settings, management) is not something a role grants. 503 when the
+/// roles cannot be read: fail closed, never fall through to anonymous or
+/// system.
+#[cfg(feature = "storage-rocksdb")]
+pub(crate) async fn scoped_key_context(
+    state: &AppState,
+    api_key: &raisin_models::api_key::ApiKey,
+    path: &str,
+) -> Result<raisin_models::auth::AuthContext, StatusCode> {
+    let Some(scope) = api_key.scope.as_ref() else {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    if !scoped_key_admits_path(&scope.repo, path) {
+        tracing::warn!(
+            key = %api_key.key_prefix,
+            key_repo = %scope.repo,
+            path = %path,
+            "scoped API key refused outside its repository"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // Roles live on `main` of raisin:access_control whatever the repository's
+    // default branch is (the workspace pins its own branch).
+    let service = raisin_core::PermissionService::new(state.storage().clone());
+    match service.resolve_scoped_key(api_key, "main").await {
+        Ok(Some(context)) => {
+            tracing::debug!(
+                key = %api_key.key_prefix,
+                repo = %scope.repo,
+                roles = ?context.roles,
+                "Scoped API key authenticated (RLS context)"
+            );
+            Ok(context)
+        }
+        Ok(None) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(e) => {
+            tracing::error!(key = %api_key.key_prefix, error = %e, "could not resolve a scoped API key's roles");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
+}
+
+/// Whether a scoped key for `repo` may be used on `path`: only when the path
+/// names exactly that repository.
+pub(crate) fn scoped_key_admits_path(repo: &str, path: &str) -> bool {
+    // Management and admin surfaces carry a tenant or a resource name where a
+    // repository usually sits (`/api/management/repositories/…`,
+    // `/api/tenants/{t}/…`); they are never a role's business.
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if matches!(
+        segs.as_slice(),
+        ["api", "management", ..]
+            | ["api", "admin", ..]
+            | ["api", "tenants", ..]
+            | ["api", "raisindb", ..]
+            | ["api", "replication", ..]
+            | ["management", ..]
+    ) {
+        return false;
+    }
+    extract_repo_from_path(path).as_deref() == Some(repo)
+}
+
 /// Optional auth middleware - extracts auth context if Bearer token present
 /// but does not reject requests without auth.
 ///
@@ -303,6 +370,15 @@ pub async fn optional_auth_middleware(
     // then, so a key cannot mean different things depending on how it arrived.
     if token.starts_with("raisin_") {
         if let Ok(Some(api_key)) = auth_service.validate_api_key(token) {
+            // A SCOPED key: an RLS context for exactly its roles in its one
+            // repository. Never system, no AdminClaims (so no admin gate and
+            // no `me/api-keys` minting), refused outside its repository.
+            if api_key.is_scoped() {
+                let context = scoped_key_context(&state, &api_key, req.uri().path()).await?;
+                req.extensions_mut().insert(context);
+                return Ok(next.run(req).await);
+            }
+
             let now = chrono::Utc::now().timestamp();
             let admin_claims = raisin_rocksdb::AdminClaims {
                 sub: api_key.user_id.clone(),
@@ -819,4 +895,35 @@ pub async fn require_path_tenant_scope(
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(next.run(req).await)
+}
+
+#[cfg(test)]
+mod scoped_key_path_tests {
+    use super::scoped_key_admits_path;
+
+    #[test]
+    fn a_scoped_key_works_only_in_its_repository() {
+        for ok in [
+            "/api/repository/studio/main/head/stories/home",
+            "/api/sql/studio",
+            "/api/sql/studio/main",
+            "/api/functions/studio/plan-entitlement/invoke",
+            "/api/repos/studio/packages",
+        ] {
+            assert!(scoped_key_admits_path("studio", ok), "{ok}");
+        }
+        for refused in [
+            "/api/repository/other/main/head/stories/home",
+            "/api/sql/other",
+            "/api/management/repositories/acme/studio/system-updates",
+            "/api/tenants/studio/ai/config",
+            "/api/raisindb/me/api-keys",
+            "/api/admin/management/database/acme/studio/fulltext/verify",
+            "/management/packages/studio/upload",
+            "/api/repositories",
+            "/",
+        ] {
+            assert!(!scoped_key_admits_path("studio", refused), "{refused}");
+        }
+    }
 }

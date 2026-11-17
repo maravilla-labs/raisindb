@@ -223,7 +223,7 @@ where
                 "Lost connection context during query execution".to_owned(),
             )))
         })?;
-        if let Some(auth) = current_context.identity_auth().cloned() {
+        if let Some(auth) = current_context.effective_auth() {
             debug!(
                 "Using identity auth context for query: actor='{}'",
                 auth.actor_id()

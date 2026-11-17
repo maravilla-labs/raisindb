@@ -125,3 +125,44 @@ fn test_validate_revoked_key() {
     let result = store.validate_api_key(&raw_token).unwrap();
     assert!(result.is_none());
 }
+
+#[test]
+fn a_scoped_key_carries_its_scope_and_no_owner() {
+    use raisin_models::api_key::{ApiKeyScope, SCOPED_KEY_OWNER};
+    let (_dir, db) = create_test_db();
+    let store = ApiKeyStore::new(db);
+    let scope = ApiKeyScope {
+        repo: "studio".into(),
+        roles: vec!["studio_viewer".into()],
+    };
+    let (key, token) = store
+        .create_scoped_api_key("acme", "site:events", scope.clone())
+        .unwrap();
+    assert_eq!(key.user_id, SCOPED_KEY_OWNER);
+    assert_eq!(key.scope.as_ref(), Some(&scope));
+
+    let validated = store.validate_api_key(&token).unwrap().expect("valid");
+    assert_eq!(validated.scope, Some(scope));
+    assert_eq!(validated.tenant_id, "acme");
+
+    // An ordinary key is still unscoped.
+    let (plain, plain_token) = store.create_api_key("acme", "admin-1", "cli").unwrap();
+    assert!(plain.scope.is_none());
+    assert!(store
+        .validate_api_key(&plain_token)
+        .unwrap()
+        .unwrap()
+        .scope
+        .is_none());
+
+    // Listing the scoped owner returns only scoped keys.
+    let scoped = store.list_user_api_keys("acme", SCOPED_KEY_OWNER).unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].key_id, key.key_id);
+
+    // Revoked: no longer validates.
+    store
+        .revoke_api_key("acme", SCOPED_KEY_OWNER, &key.key_id)
+        .unwrap();
+    assert!(store.validate_api_key(&token).unwrap().is_none());
+}
