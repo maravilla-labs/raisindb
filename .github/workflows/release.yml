@@ -104,7 +104,7 @@ jobs:
           # a `language: wasm` function would fail with "No runtime available".
           FEATURES="storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr,wasm"
           LINUX=$(jq -cn --arg f "$FEATURES" \
-            '{os:"ubuntu-latest",target:"x86_64-unknown-linux-gnu",archive:"tar.gz",ext:"",features:$f}')
+            '{os:"ubuntu-24.04",target:"x86_64-unknown-linux-gnu",archive:"tar.gz",ext:"",features:$f}')
           WINDOWS=$(jq -cn --arg f "$FEATURES" \
             '{os:"windows-latest",target:"x86_64-pc-windows-msvc",archive:"zip",ext:".exe",features:$f}')
           MACOS_ARM=$(jq -cn --arg f "$FEATURES" \
