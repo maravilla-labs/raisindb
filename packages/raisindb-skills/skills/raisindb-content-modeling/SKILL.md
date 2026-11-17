@@ -1,6 +1,6 @@
 ---
 name: raisindb-content-modeling
-description: "Define NodeTypes, Archetypes, and ElementTypes for your RaisinDB package. Use when creating data schemas, page templates, or content blocks."
+description: "Define NodeTypes, Archetypes, and ElementTypes for your RaisinDB package, and the manifest that ships them: migrations and post_install hooks (functions the installer runs after the content is in place). Use when creating data schemas, page templates, or content blocks, or when deciding where package set-up belongs."
 ---
 
 # RaisinDB Content Modeling
@@ -19,7 +19,9 @@ Use `package/migrations/*.yaml` when a package release must update existing
 installed data before the new schema/content can be installed. Migrations run
 after schema/workspace patches and before content installation. They are ordered
 by filename and recorded by `id` plus file hash, so reruns are idempotent and
-changed migration files are rejected.
+changed migration files are rejected. Set-up that has to run code AFTER the
+content is installed (create a store, post opening stock) is a `post_install`
+hook, not a migration: see section 6.
 
 Supported operations:
 
@@ -791,6 +793,62 @@ The merge is **skipped when the existing workspace already allows everything** (
 
 `workspace_patches` is still the right tool when you need to extend a workspace you don't define in your own package (e.g. another package's workspace), or to add types targeted at a specific workspace by name.
 
+### `post_install`: set-up that cannot be content (server 0.7.31+, CLI 0.5.14+)
+
+Some set-up is not a node you can write as YAML: a store created through its own
+function, opening stock, a sweep that offers inventory, publishing. Declare it as
+**hooks**: functions the installer runs after the content is in place, so the
+set-up ships with the package instead of living in a hand-run seed script.
+An older server ignores the field and runs nothing.
+
+```yaml
+post_install:
+  - function: /lib/shop/create-store          # absolute path in `functions`
+    input: { store: main, currency: CHF }
+  - function: /lib/shop/set-opening-stock
+    input: { store: main, qty: "{env:OPENING_STOCK:-50}" }   # substituted at build time; arrives as a STRING
+  - function: /lib/shop/publish-catalog       # input defaults to {}
+```
+
+- **Shape** (checked by `package create --check`, upload and install, before
+  anything is written): at most 32 entries; each has only `function` (absolute,
+  no `.`/`..` segments, no surrounding whitespace) and `input` (an object). The
+  function receives `input` flat, like a direct invoke.
+- **When**: in order, as the **system** (no row-level security; writes attributed
+  to `job:package-post-install:<package>`), after the package is marked
+  installed, **only on `main`** (other branches record every hook `skipped`).
+  The function must exist by then: ship it in this package's
+  `content/functions/...` or rely on an earlier package.
+- **Limits and failure**: 330 s per hook, 1200 s for all. No retry per hook; the
+  first failure stops the rest (`skipped`), the install job fails, the content
+  stays (`installed: true`, `status: failed`). Installing again (any mode, `skip`
+  included) re-runs every hook from the first.
+- **Hooks must be idempotent.** `deploy --install` uploads first, and an upload
+  starts a new install job, so hooks run on every deploy. (A `skip`-mode
+  install of a package that is already installed and healthy starts no job.)
+  Look before you create, set values instead of adding to them, treat "already
+  done" as success.
+- **Results**: `post_install_results` on the package node (`packages`
+  workspace, `/<name>`): per hook `function`, `status`
+  (`completed`|`failed`|`skipped`), `duration_ms`, `error`. A dry run lists the
+  hooks (`category: post_install`) and runs none. Package export writes the
+  list back into `manifest.yaml`.
+- **Trust**: installing a package with hooks means running its functions as an
+  administrator. Never put secrets in `input` (it is stored in the job
+  context); read them in the function. Hooks of nested `.rap`s do not run, and a
+  hook must never install a package itself.
+
+**Which tool to use:**
+
+| You need to... | Use |
+|---|---|
+| ship schema, pages, records, roles, functions, triggers | content (YAML) |
+| reshape data that is already installed so the new schema fits | a migration (`migrations/*.yaml`; once per `id`, before content) |
+| create or configure live state through code once the content is in place | a `post_install` hook (every install, `main` only) |
+| react to later edits | a trigger, not a hook |
+
+Guide: `book/src/guides/packages.md`, section "Post-install hooks".
+
 ---
 
 ## 7. Content YAML
@@ -951,14 +1009,14 @@ raisindb sync ./package --repo myapp --watch --push
 - **Content** — `content/**/.node.yaml`, named-node YAML, function code (`.js`/`.py`/`.star`), and translations push live to the workspace.
 - **Needs re-deploy** — only `manifest.yaml` and `workspaces/` (applied at install time). The watcher prints a hint.
 
-Re-running `raisindb deploy ./package --repo myapp --install` also updates existing schema (a reinstall upserts node types / archetypes / element types / mixins); **content nodes are left untouched**, so runtime edits aren't clobbered. Use `--watch` for the fast loop and `deploy --install` after manifest/workspace changes (or to ship a versioned `.rap`).
+Re-running `raisindb deploy ./package --repo myapp --install` also updates existing schema (a reinstall upserts node types / archetypes / element types / mixins). What it does to existing **content nodes** depends on the install mode: `deploy --install` defaults to `--mode sync`, which updates them from the package (a runtime edit on a shipped node is overwritten); `--mode skip` (and `raisindb package install`, which sends no mode) only creates missing nodes. Per-path policy in `.raisin-sync.yaml` (see `raisindb-overview`) overrides both. Use `--watch` for the fast loop and `deploy --install` after manifest/workspace changes (or to ship a versioned `.rap`). Every `deploy --install` also runs the manifest's `post_install` hooks (section 6).
 
 > ⚠️ **A content node's `archetype` link is set ONLY by `deploy --install`, never
 > by `sync`.** `sync` pushes a content node's `name` / `node_type` / `properties`
 > but **not** its top-level `archetype` field — so a page first created via
 > `sync` resolves `archetype = null`, and the frontend archetype→component
 > registry can't pick a component for it. **Author archetyped content with
-> `deploy --install`.** Because reinstall leaves existing content untouched, it
+> `deploy --install`.** A `skip` install leaves existing content untouched, so it
 > won't backfill the archetype on an already-synced node — to fix one you must
 > **delete it and reinstall** so install recreates it fresh. (Same rule for
 > editing a shipped role's permissions or any other existing content node:

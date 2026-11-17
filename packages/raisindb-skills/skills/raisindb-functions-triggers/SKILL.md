@@ -102,11 +102,13 @@ The exported function name must match `entry_file`.
 > `async function myHandler(context) { … }`); the runtime calls it directly.
 > (Relative `import { x } from './utils.js'` IS still fine.)
 
-> ⚠️ **Updating a function's CODE pushes via `sync`, not `deploy --install`.** A
-> reinstall upserts *schema* but leaves existing *content* (which includes the
-> function `.js`) untouched — so an edited handler won't take effect after
-> `deploy --install` alone. Use `raisindb sync … --push` (or `--watch`) to push
-> the new code live, then the next trigger run uses it.
+> ⚠️ **Updating a function's CODE: push it with `sync` while developing.** A
+> `skip` install (`raisindb package install`, `deploy --install --mode skip`, or
+> a path `.raisin-sync.yaml` marks `skip`) leaves existing *content*, which
+> includes the function `.js`, untouched, so an edited handler does not reach an
+> installation that way. Use `raisindb sync … --push` (or `--watch`) to push the
+> new code live; for shipped packages mark `/functions` as `mode: replace` in
+> `.raisin-sync.yaml` (see `raisindb-overview`) so every install carries fixes.
 
 ### Trigger-Invoked (the event is wrapped in `flow_input`)
 
@@ -634,6 +636,33 @@ provides:
 ```
 
 Paths match the folder path under `content/functions/`.
+
+### Functions as `post_install` hooks
+
+A package can also name functions the installer runs once its content is in
+place (server 0.7.31+; manifest rules in `raisindb-content-modeling` section 6):
+
+```yaml
+post_install:
+  - function: /lib/launchpad/create-default-board   # same path as under provides.functions
+    input: { board: welcome }
+```
+
+Writing a function for that job:
+
+- It receives `input` **flat** (like a direct invoke, no `flow_input`), and runs
+  as the **system**: no row-level security, no person, no home. A function that
+  insists on a person refuses it; one that admits an internal run accepts it.
+- It runs on **every** install job, so it must be idempotent: look up by a
+  stable key before creating, set instead of increment, return success when
+  the work is already done. Throwing fails the install (content stays
+  installed, `status: failed`); installing again re-runs every hook.
+- At most 330 s per hook, 1200 s for all hooks of one install.
+- Never put secrets in `input` (it is stored with the job); read them inside
+  the function.
+- A hook does initial set-up; a trigger reacts to later edits. When the same
+  work must happen at install and on every later change, point both at the
+  same function.
 
 ---
 

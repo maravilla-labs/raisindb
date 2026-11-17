@@ -1,6 +1,6 @@
 ---
 name: raisindb-virtual-mount-adapters
-description: "Build custom connector adapters for RaisinDB virtual mounts: sync external systems (mail, calendars, drives, any API) into nodes and push local edits back. Covers the adapter operation contract (capabilities/list/get_changes/update/submit/subscribe), error taxonomy, cursors and has_more, bidirectional mappers, the receipt-etag and item-build-parity contracts, diverged-fields subsets, conflict policies (RemoteWins/LocalWins), write modes (state_only/mirror/submit), `accepts_content` (without which a file mount never pushes an edit), why a locally-created node under a mount path is NOT adopted unless `create_node_types` says so, `remap` as the migration path for a changed mapper, resolvers, echo prevention, the field-tested traps, and SHIPPING A MOUNT BUNDLE — the `mount_bundles` preset on your connector template that lets the admin console mint your connector's whole mount layout in one click, including per-entry target workspaces and the prompts that ask an operator for a mailbox, a site or a drive. Use whenever the user wants a connector, adapter, integration sync, virtual mount, two-way sync with an external service, or mentions raisin:VirtualMount, raisin:Integration, get_changes, or 'sync X into RaisinDB'."
+description: "Build custom connector adapters for RaisinDB virtual mounts: sync external systems (mail, calendars, drives, any API) into nodes and push local edits back. Covers the adapter operation contract (capabilities/list/get_changes/update/submit/subscribe), error taxonomy, cursors and has_more, bidirectional mappers, the receipt-etag and item-build-parity contracts, diverged-fields subsets, conflict policies (RemoteWins/LocalWins), write modes (state_only/mirror/submit), `accepts_content` (without which a file mount never pushes an edit), why a locally-created node under a mount path is NOT adopted unless `create_node_types` says so, `remap` as the migration path for a changed mapper, resolvers, echo prevention, the field-tested traps, and SHIPPING A MOUNT BUNDLE — the `mount_bundles` preset on your connector template that lets the admin console mint your connector's whole mount layout in one click, including per-entry target workspaces and the prompts that ask an operator for a mailbox, a site or a drive, and SETTING A CONNECTOR UP WITHOUT THE CONSOLE over HTTP (instances from a template, oauth/start with return_to, server-side mount-bundles) plus updating an adapter package without a restart. Use whenever the user wants a connector, adapter, integration sync, virtual mount, two-way sync with an external service, or mentions raisin:VirtualMount, raisin:Integration, get_changes, or 'sync X into RaisinDB'."
 ---
 
 # RaisinDB Virtual-Mount Adapters
@@ -450,14 +450,15 @@ properties:
 
 Rules worth knowing before you author one:
 
-- **Nothing server-side reads this.** It is instantiated client-side into
-  ordinary `raisin:VirtualMount` nodes by `planBundle`
-  (`packages/admin-console/src/api/integrations.ts`), and once created they owe
-  the bundle nothing — they are edited like any other mount. So a bundle is a
-  starting point, not a binding.
-- **`node_types` is load-bearing.** The console checks it against the target
-  workspace's `allowed_node_types` and refuses to create while a type is
-  missing. Without that check the mount is created, rejects 100% of items,
+- **A bundle is a starting point, not a binding.** It is instantiated into
+  ordinary `raisin:VirtualMount` nodes, by the console (`planBundle`,
+  `packages/admin-console/src/api/integrations.ts`) or by the server
+  (`POST …/mount-bundles`, a tested Rust port of the same rule, see "Set a
+  connector up without the console"). Once created the mounts owe the bundle
+  nothing; they are edited like any other mount.
+- **`node_types` is load-bearing.** The console and the server check it against
+  the target workspace's `allowed_node_types` and refuse to create while a type
+  is missing (server: `409 WORKSPACE_GATE`). Without that check the mount is created, rejects 100% of items,
   reports `outcome: "ok"`, and flips `backfill_complete` — permanently empty.
   Ship the matching `workspace_patches` in your manifest, `raisin:Folder`
   included, at the root level too.
@@ -489,6 +490,45 @@ Two reference bundles ship today: Stripe (one workspace, seven resources, three
 write modes) and Microsoft 365 (two workspaces, prompts, mail as four mounts
 sharing one root).
 
+## Set a connector up without the console (server 0.7.31+)
+
+A control plane (or an agent) can do everything the console does over HTTP. A
+tenant admin calls `/api/integrations/{repo}/…`; an operator holding the
+superadmin bearer calls the same handlers under
+`/management/integrations/{repo}/…` with `x-tenant-id`. All require admin.
+
+| Step | Call |
+|---|---|
+| Install the adapter package | `POST /management/packages/{repo}/main/head/{package}/raisin:install?mode=skip` |
+| Instance from the template | `POST …/instances` `{ template, name?, title? }`: copies `/connectors/<t>` to `/integrations/<name>` without accounts, capabilities or secrets. Idempotent. |
+| Consent link | `POST …/oauth/start` `{ integration_path, return_to? }` → `{ auth_url, state }` |
+| Read / configure the connection | `GET …/connections?integration_path=…`; `PATCH …/connections/{account_id}` `{ integration_path, config }`. `config` REPLACES the stored map: read it first and send the whole map. |
+| Mounts | `POST …/mount-bundles` `{ integration_path, bundle_id?, keys?, account_ref?, target_workspace?, target_branch?, root?, answers?, dry_run? }` |
+
+- **`mount-bundles`** defaults to the only bundle, its `default` entries, the
+  bundle's `default_workspace` / `default_root` and the only connection; an
+  instance without bundles uses its template's. `answers` fill the bundle's
+  `prompts`. It refuses with nothing created on an unknown key, a missing
+  required answer, no connected account (`409 NO_CONNECTED_ACCOUNT`), several
+  connections with none named, or a workspace gate failure (`409
+  WORKSPACE_GATE`). A mount already there (by name, or by workspace and path)
+  is reported `exists`, so the call is safe to repeat. Each new mount gets its
+  first sync queued at once. Use `dry_run` to see the plan.
+- **`return_to`** on `oauth/start` sends the browser back to your app after
+  consent instead of the console relay page. Only `https` origins on the
+  server's allow-list are accepted (`[integrations] oauth_return_origins`, else
+  `RAISIN_INTEGRATIONS_OAUTH_RETURN_ORIGINS`, comma-separated; neither set =
+  every `return_to` refused with `400 RETURN_TO_NOT_ALLOWED`). The callback
+  answers `302` with `integration_status=connected|error` (plus `error`,
+  `error_description`) merged into the query; no code or token travels.
+- **The OAuth `state` is in-process**, single-use, 10 minutes: mint the consent
+  link when the person clicks, not ahead of time; with several nodes the
+  callback must reach the node that minted it.
+
+Reference: `docs/concepts/virtual-nodes.md` ("Setting a connector up without
+the console", "`return_to`"), handlers in
+`crates/raisin-transport-http/src/handlers/integrations/`.
+
 ## Ship it
 
 An adapter ships as a builtin or installable package:
@@ -507,3 +547,12 @@ my-adapter/
 Multi-file adapters work in every execution path (the module map is loaded
 by the engine). Keep files under 300 lines; split modules like the builtins
 do (http.js, changes.js, read.js, write.js, mount.js).
+
+**Updating a builtin adapter package needs no restart.** Land the new
+definition in the server's overlay directory (`packages/<name>/...`, mirroring
+`builtin-packages/`), then `POST /api/management/system-definitions/reload`,
+review `GET /api/management/repositories/{tenant}/{repo}/system-updates` and
+apply with `POST …/system-updates/apply` (`docs/SYSTEM_DEFINITIONS.md`). An
+installable adapter package is simply installed again. A restart is needed
+only when the server must load a new native plugin library (`RAISIN_PLUGIN_DIR`
+is scanned at start-up).

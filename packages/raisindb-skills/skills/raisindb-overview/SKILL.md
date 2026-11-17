@@ -139,6 +139,26 @@ provides:
     - myapp
 ```
 
+### Set-up after install: `post_install`, not a seed script
+
+Set-up that needs code (create a store through its function, post opening
+stock, publish) goes in the manifest as `post_install` hooks: absolute paths of
+`raisin:Function`s with an `input` object, run in order as the system after the
+content is installed, on `main` only, on every install job (so every `deploy
+--install`). They must be idempotent. Server 0.7.31+, CLI 0.5.14+. Full rules
+and the hook / content / migration decision: `raisindb-content-modeling`
+section 6.
+
+```yaml
+post_install:
+  - function: /lib/myapp/create-store
+    input: { key: main }
+```
+
+A site that ships its own package deploys it from its pipeline BEFORE the app
+release (validate, then `deploy --install` in `skip` mode so editors' changes
+survive); the hooks replace whatever a seed script used to do by hand.
+
 ### Reconciling updates — `.raisin-sync.yaml`
 
 `raisindb deploy --install` / `raisindb package install` **create** new content
@@ -180,10 +200,13 @@ Two ways to push a change deliberately:
      only if missing; the safe default for user-owned trees) and `replace`
      (package is source of truth — always overwrite). `merge`/`update` also
      parse but aren't specially handled yet — they just fall through to
-     whichever top-level install mode the CLI/server used (`skip` by default;
-     `raisindb deploy --install` and `raisindb package install` don't
-     currently expose a flag to change it), so use `skip`/`replace` in this
-     file for an actual per-path guarantee.
+     whichever top-level install mode the CLI/server used, so use
+     `skip`/`replace` in this file for an actual per-path guarantee. The
+     top-level mode: `raisindb package install` sends none (server default
+     `skip`); `raisindb deploy --install` sends `--mode sync` unless you pass
+     `--mode skip` or `--mode overwrite`; the HTTP install takes `?mode=`.
+     `sync` updates existing nodes from the package, so a deploy that must
+     keep editors' work passes `--mode skip`.
    - **Resolution:** the **last** matching `filters` entry wins by path prefix
      (`/{workspace}{node_path}`, e.g. `/functions/lib/foo`); otherwise
      `defaults.mode` applies. Keep `defaults` conservative and carve out only
