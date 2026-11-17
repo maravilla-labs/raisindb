@@ -15,6 +15,7 @@ import {
   getJobInfo as apiGetJobInfo,
   subscribeToJobEvents,
   PackageSummary,
+  type PostInstallResult,
   JobEvent,
 } from '../api.js';
 import {
@@ -751,14 +752,76 @@ export function formatInstallFailure(
   );
 }
 
-/** How long to wait for an install job to reach a terminal state */
-const INSTALL_POLL_TIMEOUT_MS = 180_000;
-const INSTALL_POLL_INTERVAL_MS = 1_000;
+/**
+ * How long to wait for an install to finish, post_install hooks included. The
+ * server gives the hooks 1200 s in all (330 s each) AFTER the content is in, so
+ * the old 180 s returned long before a slow hook could fail.
+ */
+export const INSTALL_POLL_TIMEOUT_MS = 25 * 60_000;
+const INSTALL_POLL_INTERVAL_MS = 2_000;
+
+/** What one poll concluded. */
+export type InstallVerdict =
+  | { done: false }
+  | { done: true; ok: true }
+  | { done: true; ok: false; detail?: string };
 
 /**
- * Poll the package list until the named package reaches a terminal install
- * state. Success criterion is status === 'installed' (not just job
- * completion); status === 'failed' throws with the server's error detail.
+ * Decide from one poll whether the install is over.
+ *
+ * The JOB is the authority when the server answers for it: the package node
+ * says `installed` as soon as the content is in, which is BEFORE the
+ * post_install hooks run, so a CLI that stopped there reported success for an
+ * install whose hook then failed (and the pipeline went green). The job only
+ * completes after the hooks.
+ *
+ * Without a job answer (no job id, a server without the job route, a purged
+ * job) the node decides, and an `installed` node that declares hooks is not
+ * done until their results are recorded.
+ */
+export function installVerdict(
+  job: { status?: string; error?: string } | null,
+  pkg: PackageSummary | undefined
+): InstallVerdict {
+  const status = job?.status;
+  if (status === 'Completed') {
+    if (pkg?.status === 'failed') return { done: true, ok: false, detail: pkg.error };
+    return { done: true, ok: true };
+  }
+  if (status === 'Failed' || status === 'Cancelled') {
+    return { done: true, ok: false, detail: pkg?.error || job?.error || undefined };
+  }
+  if (status) return { done: false }; // Scheduled | Running | Executing
+
+  if (!pkg) return { done: false };
+  const nodeStatus = pkg.status || (pkg.installed ? 'installed' : '');
+  if (nodeStatus === 'failed') return { done: true, ok: false, detail: pkg.error };
+  if (nodeStatus === 'installed') {
+    const hooks = pkg.postInstallHooks ?? 0;
+    if (hooks > 0 && !(pkg.postInstallResults && pkg.postInstallResults.length > 0)) {
+      return { done: false };
+    }
+    if (pkg.postInstallResults?.some((r) => r.status === 'failed')) {
+      return { done: true, ok: false, detail: pkg.error };
+    }
+    return { done: true, ok: true };
+  }
+  return { done: false };
+}
+
+/** One line per hook, for the console. */
+export function formatPostInstallResults(results: PostInstallResult[] | undefined): string[] {
+  if (!results || results.length === 0) return [];
+  return results.map((r) => {
+    const took = typeof r.duration_ms === 'number' ? ` (${r.duration_ms} ms)` : '';
+    const why = r.error ? `: ${r.error}` : '';
+    return `  post_install ${r.function}: ${r.status}${took}${why}`;
+  });
+}
+
+/**
+ * Wait until the install, post_install hooks included, is over. Prints status
+ * changes and each hook's result; throws on failure or timeout.
  */
 async function waitForInstalled(
   repo: string,
@@ -768,50 +831,55 @@ async function waitForInstalled(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastStatus = '';
+  let hooksAnnounced = false;
 
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, INSTALL_POLL_INTERVAL_MS));
 
-    let pkg;
+    const job = jobId ? await apiGetJobInfo(jobId) : null;
+    let pkg: PackageSummary | undefined;
     try {
       const packages = await apiListPackages(repo);
       pkg = packages.find((p) => p.name === packageName);
     } catch {
-      continue; // transient network/API error — keep polling
+      // transient network/API error — the job answer may still decide
     }
-    if (!pkg) continue;
 
-    const status = pkg.status || (pkg.installed ? 'installed' : '');
+    const status = pkg?.status || (pkg?.installed ? 'installed' : '');
     if (status && status !== lastStatus) {
       console.log(`  status: ${status}`);
       lastStatus = status;
     }
+    if (
+      !hooksAnnounced &&
+      status === 'installed' &&
+      (pkg?.postInstallHooks ?? 0) > 0 &&
+      job?.status !== 'Completed'
+    ) {
+      console.log(`  running ${pkg!.postInstallHooks} post_install hook(s)...`);
+      hooksAnnounced = true;
+    }
 
-    if (status === 'installed') {
-      return;
-    }
-    if (status === 'failed') {
-      // Prefer the error on the package node; fall back to the job record
-      // (older repos may have a raisin:Package schema without `error`).
-      let detail = pkg.error;
-      if (!detail && jobId) {
-        const job = await apiGetJobInfo(jobId);
-        detail = job?.error || undefined;
-      }
-      throw new Error(formatInstallFailure(packageName, detail, jobId));
-    }
+    const verdict = installVerdict(job, pkg);
+    if (!verdict.done) continue;
+
+    for (const line of formatPostInstallResults(pkg?.postInstallResults)) console.log(line);
+    if (verdict.ok) return;
+    throw new Error(formatInstallFailure(packageName, verdict.detail, jobId));
   }
 
   throw new Error(
-    `Timed out waiting for package '${packageName}' to install (last status: ${lastStatus || 'unknown'})`
+    `Timed out after ${Math.round(timeoutMs / 60_000)} min waiting for package '${packageName}' ` +
+      `to finish installing, post_install hooks included (last status: ${lastStatus || 'unknown'})` +
+      (jobId ? `; job ${jobId} may still be running` : '')
   );
 }
 
 /**
  * Installs a package by name (requires server connection).
  *
- * Waits for the background install job and reports the final lifecycle
- * state ('installed' = success, 'failed' = error with detail).
+ * Waits for the background install job, post_install hooks included, prints
+ * each hook's result, and fails when the job or a hook failed.
  */
 export async function installPackage(
   packageName: string,

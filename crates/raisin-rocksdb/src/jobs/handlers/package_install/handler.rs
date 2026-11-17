@@ -703,6 +703,11 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 PropertyValue::String("installed".to_string()),
             );
             node.properties.remove("error");
+            // The previous install's hook results are not this install's. The
+            // hooks run after this commit and record their own; until then the
+            // node must not answer "the hooks ran" with stale ones (the CLI
+            // waits for results to appear when it cannot ask the job).
+            node.properties.remove("post_install_results");
             // Keep the hooks on the node, so an export rebuilt from it (no
             // original archive) still declares them.
             match raisin_packages::post_install_to_property(post_install) {

@@ -39,6 +39,32 @@ export interface PackageSummary {
   /** Error detail when status === 'failed' */
   error?: string;
   installedAt?: string;
+  /** How many `post_install` hooks the installed manifest declares. */
+  postInstallHooks?: number;
+  /** What the hooks of the latest install did, once they ran. */
+  postInstallResults?: PostInstallResult[];
+}
+
+/** One `post_install` hook's outcome, as the server records it on the package node. */
+export interface PostInstallResult {
+  function: string;
+  /** `completed`, `failed`, or `skipped` (an earlier hook failed, or not `main`). */
+  status: string;
+  duration_ms?: number;
+  error?: string;
+}
+
+/** Count the hooks in the node's `post_install` property (a JSON string of the list). */
+export function countPostInstallHooks(value: unknown): number | undefined {
+  let list: unknown = value;
+  if (typeof value === 'string') {
+    try {
+      list = JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+  return Array.isArray(list) ? list.length : undefined;
 }
 
 export interface NodeInfo {
@@ -190,6 +216,10 @@ export async function listPackages(repo: string): Promise<PackageSummary[]> {
     status: node.properties?.status as string | undefined,
     error: node.properties?.error as string | undefined,
     installedAt: node.properties?.installed_at as string | undefined,
+    postInstallHooks: countPostInstallHooks(node.properties?.post_install),
+    postInstallResults: Array.isArray(node.properties?.post_install_results)
+      ? (node.properties?.post_install_results as PostInstallResult[])
+      : undefined,
   }));
 }
 
