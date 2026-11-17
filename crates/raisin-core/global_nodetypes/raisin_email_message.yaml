@@ -5,7 +5,15 @@ description: >-
   blocked, complained): `message_id` is what a webhook payload names.
   `status` starts at `accepted` and only ever advances.
 icon: mail
-version: 1
+# v2: `accepted_at`/`last_event_at` corrected from `String` to `Date`, as `raisin:Mail` v4 did.
+# The server writes them as RFC3339 (`occurred_at` is normalised from the
+# provider's timestamp, or left out when it carries no zone), and a `Date`
+# declaration is what every other built-in `_at` property says.
+# `coerce_declared_dates` parses the stored string spelling on the next write,
+# so no migration. The type change is classified breaking, so an existing repo
+# keeps `String` until an admin applies it; writes keep working either way
+# (`coerce_dates_declared_as_string` covers the old declaration).
+version: 2
 strict: false
 indexable: true
 index_types: [Property]
@@ -78,11 +86,11 @@ properties:
       description: Caller-defined id, e.g. the delivery node id.
 
   - name: accepted_at
-    type: String
+    type: Date
     required: false
 
   - name: last_event_at
-    type: String
+    type: Date
     required: false
 
   - name: last_error

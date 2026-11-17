@@ -93,6 +93,68 @@ fn s<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str).filter(|x| !x.is_empty())
 }
 
+/// A provider timestamp as RFC3339 UTC, or `None` when it cannot be read
+/// WITHOUT GUESSING.
+///
+/// `raisin:EmailEvent.occurred_at` is declared `Date`, and a `Date` write
+/// refuses a string that is not RFC3339. Providers do not all send RFC3339:
+/// Brevo's `date` is `2023-03-10 09:40:24` with no offset, and Resend has used
+/// both `2024-02-22T23:41:12.126Z` and a Postgres-style
+/// `2024-02-22 23:41:12.126+00`. Storing those verbatim would make the event
+/// write fail and the webhook be retried until the provider gives up, so the
+/// event and the status change it carries would be lost over a timestamp.
+///
+/// Accepted: RFC3339; a date-time with a numeric offset and a space separator;
+/// epoch seconds or milliseconds (number or digit string). A date-time without
+/// an offset is NOT accepted: its zone is unknown, and a wrong instant is worse
+/// than none (`received_at` still says when the event arrived).
+pub fn normalize_timestamp(v: &Value) -> Option<String> {
+    use chrono::{DateTime, TimeZone, Utc};
+    let from_epoch = |n: i64| {
+        // Below 10^11 is seconds (until the year 5138), above it milliseconds.
+        let dt = if n.abs() < 100_000_000_000 {
+            Utc.timestamp_opt(n, 0).single()
+        } else {
+            Utc.timestamp_millis_opt(n).single()
+        };
+        dt.map(|d| d.to_rfc3339())
+    };
+    match v {
+        Value::Number(n) => n.as_i64().and_then(from_epoch),
+        Value::String(raw) => {
+            let t = raw.trim();
+            if t.is_empty() {
+                return None;
+            }
+            if t.chars().all(|c| c.is_ascii_digit()) {
+                return t.parse::<i64>().ok().and_then(from_epoch);
+            }
+            if let Ok(dt) = DateTime::parse_from_rfc3339(t) {
+                return Some(dt.with_timezone(&Utc).to_rfc3339());
+            }
+            // `2024-02-22 23:41:12.126+00` / `+0000` / `+00:00`.
+            for fmt in [
+                "%Y-%m-%d %H:%M:%S%.f%#z",
+                "%Y-%m-%d %H:%M:%S%.f%:z",
+                "%Y-%m-%d %H:%M:%S%.f%z",
+            ] {
+                if let Ok(dt) = DateTime::parse_from_str(t, fmt) {
+                    return Some(dt.with_timezone(&Utc).to_rfc3339());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The first of `keys` on `v` that normalises to a timestamp.
+fn first_timestamp(v: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|k| v.get(*k))
+        .find_map(normalize_timestamp)
+}
+
 /// Brevo transactional webhook: one object, or an array of them.
 pub fn parse_brevo(body: &Value) -> Vec<FeedbackEvent> {
     let items: Vec<&Value> = match body {
@@ -120,7 +182,9 @@ pub fn parse_brevo(body: &Value) -> Vec<FeedbackEvent> {
                 _ => return None,
             };
             let email = s(e, "email");
-            let when = s(e, "date").or_else(|| s(e, "ts_event"));
+            // Epoch fields first: they carry their own zone. Brevo's `date`
+            // has none and is only used if it happens to carry an offset.
+            let when = first_timestamp(e, &["ts_epoch", "ts_event", "ts", "date"]);
             Some(FeedbackEvent {
                 dedupe_key: key(&[
                     "brevo",
@@ -133,7 +197,7 @@ pub fn parse_brevo(body: &Value) -> Vec<FeedbackEvent> {
                 message_id: message_id.to_string(),
                 kind,
                 email: email.map(str::to_string),
-                occurred_at: when.map(str::to_string),
+                occurred_at: when,
                 detail: s(e, "reason").map(str::to_string),
             })
         })
@@ -181,7 +245,7 @@ pub fn parse_resend(body: &Value, delivery_id: &str) -> Vec<FeedbackEvent> {
         message_id: message_id.to_string(),
         kind,
         email: email.map(str::to_string),
-        occurred_at: s(body, "created_at").map(str::to_string),
+        occurred_at: first_timestamp(body, &["created_at"]),
         detail: detail.map(str::to_string),
     }]
 }
@@ -272,6 +336,77 @@ mod tests {
         });
         assert_eq!(parse_resend(&body, "msg_1")[0].kind, "soft_bounce");
         assert!(parse_resend(&json!({"type": "email.received"}), "x").is_empty());
+    }
+
+    #[test]
+    fn occurred_at_is_rfc3339_or_absent() {
+        let ev = parse_brevo(&json!({
+            "event": "delivered", "message-id": "<1@b>",
+            "date": "2023-03-10 09:40:24", "ts_event": 1700000000
+        }));
+        assert_eq!(
+            ev[0].occurred_at.as_deref(),
+            Some("2023-11-14T22:13:20+00:00")
+        );
+        // ts_epoch is milliseconds and wins.
+        let ev = parse_brevo(&json!({
+            "event": "delivered", "message-id": "<1@b>",
+            "ts_epoch": 1700000000123_i64, "ts_event": 1700000000
+        }));
+        assert_eq!(
+            ev[0].occurred_at.as_deref(),
+            Some("2023-11-14T22:13:20.123+00:00")
+        );
+        // A zone-less date alone is not guessed at.
+        let ev = parse_brevo(&json!({
+            "event": "delivered", "message-id": "<1@b>", "date": "2023-03-10 09:40:24"
+        }));
+        assert_eq!(ev[0].occurred_at, None);
+
+        let resend = |created_at: &str| {
+            parse_resend(
+                &json!({ "type": "email.delivered", "created_at": created_at,
+                         "data": {"email_id": "abc", "to": ["a@b.c"]} }),
+                "msg_1",
+            )[0]
+            .occurred_at
+            .clone()
+        };
+        assert_eq!(
+            resend("2024-02-22T23:41:12.126Z").as_deref(),
+            Some("2024-02-22T23:41:12.126+00:00")
+        );
+        assert_eq!(
+            resend("2024-02-22 23:41:12.126+00").as_deref(),
+            Some("2024-02-22T23:41:12.126+00:00")
+        );
+        assert_eq!(resend("yesterday"), None);
+    }
+
+    #[test]
+    fn every_normalised_timestamp_is_rfc3339() {
+        for v in [
+            json!(1700000000),
+            json!("1700000000"),
+            json!(1700000000123_i64),
+            json!("2026-01-01T00:00:00Z"),
+            json!("2026-01-01T01:00:00+01:00"),
+            json!("2026-01-01 00:00:00+0000"),
+        ] {
+            let out = normalize_timestamp(&v).unwrap_or_else(|| panic!("{v}"));
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&out).is_ok(),
+                "{v} -> {out}"
+            );
+        }
+        for v in [
+            json!(""),
+            json!("2026-01-01 00:00:00"),
+            json!(null),
+            json!(true),
+        ] {
+            assert_eq!(normalize_timestamp(&v), None, "{v}");
+        }
     }
 
     #[test]
