@@ -7,7 +7,7 @@ use raisin_rocksdb::{AuthService, RocksDBStorage};
 #[cfg(all(feature = "pgwire", feature = "storage-rocksdb"))]
 use raisin_transport_pgwire::{
     ApiKeyValidator, PgWireConfig, PgWireServer, RaisinAuthHandler, RaisinExtendedQueryHandler,
-    RaisinSimpleQueryHandler,
+    RaisinSimpleQueryHandler, ValidatedApiKey,
 };
 #[cfg(all(feature = "pgwire", feature = "storage-rocksdb"))]
 use std::sync::Arc;
@@ -18,12 +18,17 @@ use tokio::task::JoinHandle;
 #[cfg(all(feature = "pgwire", feature = "storage-rocksdb"))]
 pub struct AuthServiceValidator {
     auth_service: Arc<AuthService>,
+    /// Where a scoped key's roles are read from.
+    storage: Arc<RocksDBStorage>,
 }
 
 #[cfg(all(feature = "pgwire", feature = "storage-rocksdb"))]
 impl AuthServiceValidator {
-    pub fn new(auth_service: Arc<AuthService>) -> Self {
-        Self { auth_service }
+    pub fn new(auth_service: Arc<AuthService>, storage: Arc<RocksDBStorage>) -> Self {
+        Self {
+            auth_service,
+            storage,
+        }
     }
 }
 
@@ -41,6 +46,34 @@ impl ApiKeyValidator for AuthServiceValidator {
             Ok(None) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// The same resolver HTTP uses (`PermissionService::resolve_scoped_key`),
+    /// so a scoped key means the same on both wires.
+    async fn validate_api_key_scoped(
+        &self,
+        api_key: &str,
+    ) -> Result<Option<ValidatedApiKey>, String> {
+        let Some(key) = self
+            .auth_service
+            .validate_api_key(api_key)
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        if !key.is_active {
+            return Ok(None);
+        }
+        let key_auth = raisin_core::PermissionService::new(self.storage.clone())
+            .resolve_scoped_key(&key, "main")
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Some(ValidatedApiKey {
+            scope_repo: key.scope.as_ref().map(|s| s.repo.clone()),
+            key_auth,
+            user_id: key.user_id,
+            tenant_id: key.tenant_id,
+        }))
     }
 
     async fn has_pgwire_access(&self, tenant_id: &str, user_id: &str) -> Result<bool, String> {
@@ -167,7 +200,7 @@ pub fn start_pgwire_server(
     max_connections: usize,
 ) -> JoinHandle<()> {
     // Create auth handler
-    let validator = AuthServiceValidator::new(auth_service);
+    let validator = AuthServiceValidator::new(auth_service, storage.clone());
     let param_provider = RaisinServerParameterProvider;
     let auth_handler = Arc::new(RaisinAuthHandler::new(validator, param_provider));
 

@@ -135,7 +135,9 @@ pub use services::permission_cache::{
 pub use services::permission_cache_registry::{
     invalidate_all_permission_caches, register_permission_cache,
 };
-pub use services::permission_service::{CachedPermissionService, PermissionService};
+pub use services::permission_service::{
+    admin_grant_in, scoped_key_principal, CachedPermissionService, PermissionService,
+};
 pub use services::reference_resolver::{node_to_json_value, ReferenceResolver};
 pub use services::schema_stats_cache::{
     new_shared_cache as new_shared_schema_stats_cache,

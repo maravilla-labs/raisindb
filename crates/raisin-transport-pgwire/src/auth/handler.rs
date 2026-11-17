@@ -183,25 +183,28 @@ where
                         )))
                     })?;
 
-                let validation_result =
-                    self.validator
-                        .validate_api_key(&api_key)
-                        .await
-                        .map_err(|e| {
-                            PgWireError::UserError(Box::new(ErrorInfo::new(
-                                "FATAL".to_string(),
-                                "XX000".to_string(),
-                                format!("Authentication error: {}", e),
-                            )))
-                        })?;
+                let validation_result = self
+                    .validator
+                    .validate_api_key_scoped(&api_key)
+                    .await
+                    .map_err(|e| {
+                        PgWireError::UserError(Box::new(ErrorInfo::new(
+                            "FATAL".to_string(),
+                            "XX000".to_string(),
+                            format!("Authentication error: {}", e),
+                        )))
+                    })?;
 
-                let (user_id, api_key_tenant_id) = validation_result.ok_or_else(|| {
+                let validated = validation_result.ok_or_else(|| {
                     PgWireError::UserError(Box::new(ErrorInfo::new(
                         "FATAL".to_string(),
                         "28P01".to_string(),
                         "Invalid API key".to_string(),
                     )))
                 })?;
+
+                let user_id = validated.user_id.clone();
+                let api_key_tenant_id = validated.tenant_id.clone();
 
                 if api_key_tenant_id != provided_tenant_id {
                     let error_info = ErrorInfo::new(
@@ -217,6 +220,41 @@ where
                         .feed(PgWireBackendMessage::ErrorResponse(error))
                         .await?;
                     client.close().await?;
+                    return Ok(());
+                }
+
+                // A SCOPED key works in its one repository and nowhere else,
+                // and its scope is its whole grant: there is no admin user
+                // whose pgwire flag could add to (or vouch for) it.
+                if let Some(scope_repo) = validated.scope_repo.as_deref() {
+                    if scope_repo != repository {
+                        let error_info = ErrorInfo::new(
+                            "FATAL".to_string(),
+                            "28000".to_string(),
+                            format!(
+                                "This API key is scoped to repository '{}' and cannot connect to '{}'",
+                                scope_repo, repository
+                            ),
+                        );
+                        client
+                            .feed(PgWireBackendMessage::ErrorResponse(ErrorResponse::from(
+                                error_info,
+                            )))
+                            .await?;
+                        client.close().await?;
+                        return Ok(());
+                    }
+                    let Some(key_auth) = validated.key_auth.clone() else {
+                        return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                            "FATAL".to_string(),
+                            "XX000".to_string(),
+                            "Scoped API key has no resolved context".to_string(),
+                        ))));
+                    };
+                    let context = ConnectionContext::new(api_key_tenant_id, user_id, repository)
+                        .with_key_auth(key_auth);
+                    self.store_context(client, context);
+                    finish_authentication(client, self.parameter_provider.as_ref()).await;
                     return Ok(());
                 }
 

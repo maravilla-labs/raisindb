@@ -21,8 +21,10 @@
 
 mod cached;
 mod parsing;
+mod scoped;
 
 pub use cached::CachedPermissionService;
+pub use scoped::{admin_grant_in, scoped_key_principal};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

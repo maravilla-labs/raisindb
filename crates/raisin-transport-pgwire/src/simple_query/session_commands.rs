@@ -34,6 +34,16 @@ where
     where
         C: ClientInfo,
     {
+        // A scoped key may not switch to another identity: `SET app.user`
+        // decodes the token WITHOUT verifying it (an admin key's trusted
+        // "act as"), so allowing it here would let a site key become anyone.
+        if context.is_scoped() {
+            return Response::Error(Box::new(ErrorInfo::new(
+                "ERROR".to_string(),
+                "42501".to_string(),
+                "SET app.user is not available to a scoped API key".to_string(),
+            )));
+        }
         let jwt = match Self::extract_jwt_from_set_query(query) {
             Some(jwt) => jwt,
             None => {

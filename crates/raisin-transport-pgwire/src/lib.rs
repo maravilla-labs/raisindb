@@ -73,7 +73,7 @@ pub mod type_mapping;
 pub mod type_mapping_binary;
 
 // Re-exports
-pub use auth::{ApiKeyValidator, ConnectionContext, RaisinAuthHandler};
+pub use auth::{ApiKeyValidator, ConnectionContext, RaisinAuthHandler, ValidatedApiKey};
 pub use error::{PgWireTransportError, Result};
 pub use extended_query::{RaisinExtendedQueryHandler, RaisinQueryParser, RaisinStatement};
 pub use result_encoder::{infer_schema_from_rows, ColumnInfo, ResultEncoder};

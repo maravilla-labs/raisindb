@@ -112,7 +112,7 @@ where
                     &current_context.tenant_id,
                     &current_context.repository,
                     &branch,
-                    current_context.identity_auth().cloned(),
+                    current_context.effective_auth(),
                 )
                 .await;
 

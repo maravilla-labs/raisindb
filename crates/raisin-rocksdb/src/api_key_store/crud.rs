@@ -3,7 +3,7 @@
 use super::ApiKeyStore;
 use crate::cf;
 use raisin_error::Result;
-use raisin_models::api_key::ApiKey;
+use raisin_models::api_key::{ApiKey, ApiKeyScope, SCOPED_KEY_OWNER};
 
 impl ApiKeyStore {
     /// Create a new API key
@@ -15,6 +15,27 @@ impl ApiKeyStore {
         user_id: &str,
         name: &str,
     ) -> Result<(ApiKey, String)> {
+        self.create_key(tenant_id, user_id, name, None)
+    }
+
+    /// Create a SCOPED key: no owner, authority = `scope` only. Stored under
+    /// [`SCOPED_KEY_OWNER`], so the tenant's scoped keys list with one prefix.
+    pub fn create_scoped_api_key(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        scope: ApiKeyScope,
+    ) -> Result<(ApiKey, String)> {
+        self.create_key(tenant_id, SCOPED_KEY_OWNER, name, Some(scope))
+    }
+
+    fn create_key(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        name: &str,
+        scope: Option<ApiKeyScope>,
+    ) -> Result<(ApiKey, String)> {
         let cf = self.db.cf_handle(cf::ADMIN_USERS).ok_or_else(|| {
             raisin_error::Error::Backend("admin_users column family not found".to_string())
         })?;
@@ -24,7 +45,7 @@ impl ApiKeyStore {
         let (raw_token, key_hash, key_prefix) = Self::generate_token();
 
         // Create API key object
-        let api_key = ApiKey::new(
+        let mut api_key = ApiKey::new(
             key_id.clone(),
             user_id.to_string(),
             tenant_id.to_string(),
@@ -32,6 +53,7 @@ impl ApiKeyStore {
             key_hash.clone(),
             key_prefix,
         );
+        api_key.scope = scope;
 
         // Store the API key
         let key = Self::build_key(tenant_id, user_id, &key_id);

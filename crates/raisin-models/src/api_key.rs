@@ -19,6 +19,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::timestamp::StorageTimestamp;
 
+/// The owner id every SCOPED key is stored under. A scoped key belongs to no
+/// admin user: it is minted by the operator for a service (a site's server
+/// side), and its authority is its scope, never an owner's.
+pub const SCOPED_KEY_OWNER: &str = "__scoped__";
+
+/// What a scoped key may do: act in ONE repository with exactly these roles.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiKeyScope {
+    /// The only repository the key works in.
+    pub repo: String,
+    /// Role ids of that repository's `raisin:access_control`.
+    pub roles: Vec<String>,
+}
+
 /// An API key for programmatic access
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiKey {
@@ -40,6 +54,15 @@ pub struct ApiKey {
     pub last_used_at: Option<StorageTimestamp>,
     /// Whether the key is active (can be revoked)
     pub is_active: bool,
+    /// `None`: an admin's own key, which acts with its owner's (system)
+    /// authority, as before. `Some`: a scoped key, which resolves to the RLS
+    /// context of `roles` in `repo` and nothing else.
+    ///
+    /// LAST and defaulted: keys are stored as MessagePack arrays, and a record
+    /// written before this field existed has one element fewer, which serde
+    /// fills with the default.
+    #[serde(default)]
+    pub scope: Option<ApiKeyScope>,
 }
 
 impl ApiKey {
@@ -62,7 +85,19 @@ impl ApiKey {
             created_at: StorageTimestamp::now(),
             last_used_at: None,
             is_active: true,
+            scope: None,
         }
+    }
+
+    /// The same key, scoped.
+    pub fn with_scope(mut self, scope: ApiKeyScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Whether this key is scoped (carries no owner authority).
+    pub fn is_scoped(&self) -> bool {
+        self.scope.is_some()
     }
 
     /// Record that this key was used
@@ -103,6 +138,8 @@ pub struct ApiKeyResponse {
     pub created_at: StorageTimestamp,
     pub last_used_at: Option<StorageTimestamp>,
     pub is_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ApiKeyScope>,
 }
 
 impl From<ApiKey> for ApiKeyResponse {
@@ -114,6 +151,7 @@ impl From<ApiKey> for ApiKeyResponse {
             created_at: key.created_at,
             last_used_at: key.last_used_at,
             is_active: key.is_active,
+            scope: key.scope,
         }
     }
 }
@@ -121,6 +159,46 @@ impl From<ApiKey> for ApiKeyResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key stored before `scope` existed is an UNSCOPED key, not a decode
+    /// error: records are MessagePack arrays, one element shorter.
+    #[test]
+    fn a_record_from_before_scopes_decodes_as_unscoped() {
+        #[derive(Serialize)]
+        struct OldApiKey {
+            key_id: String,
+            user_id: String,
+            tenant_id: String,
+            name: String,
+            key_hash: String,
+            key_prefix: String,
+            created_at: StorageTimestamp,
+            last_used_at: Option<StorageTimestamp>,
+            is_active: bool,
+        }
+        let old = OldApiKey {
+            key_id: "k".into(),
+            user_id: "u".into(),
+            tenant_id: "t".into(),
+            name: "n".into(),
+            key_hash: "h".into(),
+            key_prefix: "raisin_ab".into(),
+            created_at: StorageTimestamp::now(),
+            last_used_at: None,
+            is_active: true,
+        };
+        let bytes = rmp_serde::to_vec(&old).unwrap();
+        let key: ApiKey = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(key.scope.is_none());
+        assert!(!key.is_scoped());
+
+        let scoped = key.with_scope(ApiKeyScope {
+            repo: "studio".into(),
+            roles: vec!["studio_viewer".into()],
+        });
+        let back: ApiKey = rmp_serde::from_slice(&rmp_serde::to_vec(&scoped).unwrap()).unwrap();
+        assert_eq!(back.scope.unwrap().repo, "studio");
+    }
 
     #[test]
     fn test_api_key_creation() {
