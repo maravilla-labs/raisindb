@@ -266,6 +266,17 @@ async fn a_scoped_key_is_refused_in_another_repository() {
 }
 
 #[tokio::test]
+async fn a_scoped_key_is_refused_for_another_tenant() {
+    let env = env("scoped-other-tenant").await;
+    let (_, token) = mint(&env, &["site_reader"]);
+    let mut req = get(&node_uri(REPO, "stories", "public-page"), &token);
+    req.headers_mut()
+        .insert("x-tenant-id", "some-other-tenant".parse().unwrap());
+    let (status, text) = send(&env.app, req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+}
+
+#[tokio::test]
 async fn a_scoped_key_is_refused_on_management_and_account_routes() {
     let env = env("scoped-management").await;
     let (_, token) = mint(&env, &["site_reader"]);
