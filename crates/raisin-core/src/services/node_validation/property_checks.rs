@@ -509,6 +509,15 @@ pub(super) fn coerce_declared_dates(node: &mut Node, resolved: &ResolvedNodeType
                 node.properties
                     .insert(name.to_string(), PropertyValue::Date(ts));
             }
+            // A CALENDAR date (`2026-11-06`, RFC 3339 `full-date`) or a LOCAL
+            // date-time with no offset (`2026-11-06T09:30`, what a date-time
+            // input sends and what means "in the event's own zone") is a date,
+            // not garbage, and it is what every date picker writes. It has no
+            // instant, so it cannot become a `Date` without inventing a zone:
+            // it stays the String it always was, which the type check accepts
+            // and which keeps its property-index entry exactly as before this
+            // pass existed. Refusing it made every date-only field unwritable.
+            Err(_) if is_calendar_or_local(trimmed) => {}
             Err(_) => {
                 return Err(Error::Validation(format!(
                     "Property '{}' is declared Date but '{}' is not a valid RFC3339 timestamp",
@@ -520,6 +529,21 @@ pub(super) fn coerce_declared_dates(node: &mut Node, resolved: &ResolvedNodeType
 
     coerce_dates_declared_as_string(node, resolved);
     Ok(())
+}
+
+/// `YYYY-MM-DD`, or `YYYY-MM-DDTHH:MM` / `…:SS` / `…:SS.fff` with no offset, as
+/// a real calendar date and time.
+fn is_calendar_or_local(s: &str) -> bool {
+    if chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok() {
+        return true;
+    }
+    [
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S%.f",
+    ]
+    .iter()
+    .any(|f| chrono::NaiveDateTime::parse_from_str(s, f).is_ok())
 }
 
 /// The mirror image: a `Date` VALUE against a declaration that still says

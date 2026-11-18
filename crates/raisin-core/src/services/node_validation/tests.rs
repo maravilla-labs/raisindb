@@ -1108,6 +1108,37 @@ async fn a_timestamp_validates_in_either_spelling_on_a_date_property() {
         "the string spelling must be coerced to Date, so both doors agree"
     );
 
+    // A calendar date and a local date-time are dates without an instant: they
+    // stay the String they were (no zone is invented), and the write succeeds.
+    for spelling in ["2026-11-06", "2026-11-06T09:30", "2026-11-06T09:30:15"] {
+        let mut props = HashMap::new();
+        props.insert(
+            "capabilities_checked_at".to_string(),
+            PropertyValue::String(spelling.to_string()),
+        );
+        let mut node = create_test_node("test:Integration", props);
+        validator
+            .validate_and_stamp("ws1", &mut node)
+            .await
+            .unwrap_or_else(|e| panic!("{spelling} must be accepted, got: {e}"));
+        assert_eq!(
+            node.properties.get("capabilities_checked_at"),
+            Some(&PropertyValue::String(spelling.to_string())),
+            "{spelling} must be kept as typed"
+        );
+    }
+    // An impossible calendar date is not a date.
+    let mut props = HashMap::new();
+    props.insert(
+        "capabilities_checked_at".to_string(),
+        PropertyValue::String("2026-02-30".to_string()),
+    );
+    let mut node = create_test_node("test:Integration", props);
+    assert!(validator
+        .validate_and_stamp("ws1", &mut node)
+        .await
+        .is_err());
+
     // A string that is not a timestamp is still refused, by name — the same
     // posture as the decimal coercion, rather than storing a pseudo-date.
     let mut props = HashMap::new();
