@@ -503,6 +503,13 @@ export class ConversationStore {
     }
   }
 
+  /** Add a tool call, or update the one already listed under that id (never two entries per id). */
+  private upsertToolCall(info: ToolCallInfo): void {
+    const i = this._activeToolCalls.findIndex((c) => c.id === info.id);
+    if (i < 0) this._activeToolCalls.push(info);
+    else if (this._activeToolCalls[i].status === 'running') this._activeToolCalls[i] = { ...this._activeToolCalls[i], ...info };
+  }
+
   private handleClientToolCall(event: ClientToolCallEvent): void {
     if (!this.clientTools) return;
     if (!this.ownClientIds.has(event.client_id)) return; // another tab's turn
@@ -510,7 +517,9 @@ export class ConversationStore {
     this.handledClientCalls.add(event.call_id);
     this.markStreamingActivity();
 
-    this._activeToolCalls.push({
+    // The engine ALSO announces this call as `tool_call_started` with the same
+    // id; one entry per call id, or a keyed list in the UI renders it twice.
+    this.upsertToolCall({
       id: event.call_id,
       functionName: event.name,
       arguments: event.args,
@@ -628,7 +637,7 @@ export class ConversationStore {
           arguments: event.arguments,
           status: 'running',
         };
-        this._activeToolCalls.push(info);
+        this.upsertToolCall(info);
         this.notify();
         if (this.clientTools) void this.recoverClientCalls();
         break;

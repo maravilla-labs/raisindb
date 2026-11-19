@@ -216,6 +216,19 @@ describe('ConversationStore client tools', () => {
     expect(h.store.getSnapshot().activeToolCalls[0].status).toBe('completed');
   });
 
+  it('keeps ONE entry per call id when the engine also announced it as tool_call_started', async () => {
+    const h = harness({ execute: async () => ({ ok: true }) });
+    await h.store.sendMessage('hello');
+    h.emit({ type: 'tool_call_started', toolCallId: 'call-1', functionName: 'page__insert_blocks', arguments: {}, timestamp: 'now' } as ChatEvent);
+    h.emit(h.callEvent());
+    h.emit({ type: 'tool_call_started', toolCallId: 'call-1', functionName: 'page__insert_blocks', arguments: {}, timestamp: 'now' } as ChatEvent);
+    expect(h.store.getSnapshot().activeToolCalls.filter((c) => c.id === 'call-1')).toHaveLength(1);
+    await h.flush();
+    const calls = h.store.getSnapshot().activeToolCalls.filter((c) => c.id === 'call-1');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].status).toBe('completed');
+  });
+
   it("ignores calls addressed to another tab's client_id", async () => {
     const execute = vi.fn(async () => ({ ok: true }));
     const h = harness({ execute });
