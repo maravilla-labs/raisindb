@@ -6,6 +6,7 @@
  */
 
 import { PROJECT_FUNCTION } from '../agent-shared/run-names.js';
+import { allowedClientTools, pageToolName } from '../agent-shared/client-tools.js';
 import { PLAN_SCHEMAS, planCardView, planStats, approvalSubject } from './plan.js';
 import { toolContext, countFingerprint, note } from './state.js';
 import { childFacts } from './children.js';
@@ -13,7 +14,7 @@ import { childFacts } from './children.js';
 /** The `tools_offered` of a model turn. Plan tools are domain tools. */
 export function offers(state) {
   if (state.after_turn === 'summarise') return [];
-  return state.tools.map((t) => (t.kind === 'domain'
+  const mine = state.tools.map((t) => (t.kind === 'domain'
     ? {
       name: t.name, kind: 'domain', function_path: null,
       description: t.description || `Planning: ${t.domain_op}`,
@@ -25,6 +26,19 @@ export function offers(state) {
       // The model-turn function resolves the real schema from the function node.
       schema: { type: 'object' },
     }));
+  return mine.concat(clientOffers(state));
+}
+
+/**
+ * The page's tools the agent's policy allows, as `page.<name>` (contract §3).
+ * They carry their own schema: no function node holds it.
+ */
+export function clientOffers(state) {
+  return allowedClientTools(state.client).map((t) => ({
+    name: pageToolName(t.name), kind: 'client', function_path: null, client_tool: t.name,
+    ...(t.description ? { description: t.description } : {}),
+    schema: t.inputSchema || { type: 'object' },
+  }));
 }
 
 /** Authoritative facts the model turn renders into context (never prose). */
@@ -36,6 +50,7 @@ export function facts(state) {
     progress: state.progress,
     recent_writes: state.writes.slice(-20).map((w) => ({ workspace: w.workspace, path: w.path, action: w.action })),
     pending_steer: state.steer_pending,
+    ...(state.client && state.client.policy && state.client.context ? { client_context: state.client.context } : {}),
     diagnostics: state.diagnostics.slice(-5),
     last_turn_op: state.last_turn ? state.last_turn.op_id : null,
     ...(childFacts(state) ? { children: childFacts(state) } : {}),
@@ -134,9 +149,14 @@ export function dispatchNext(state, fx, run) {
     countFingerprint(state, next.fp);
     state.progress.tool_calls += 1;
     state.turn_stats.calls += 1;
+    // A page tool's call goes to the relay with the call described apart from
+    // the model's own arguments (which never share a level with ours).
+    const args = next.client
+      ? { client_call: next.client, __raisin_context: toolContext(state, run) }
+      : { ...(next.args || {}), __raisin_context: toolContext(state, run) };
     const effectId = fx.push('call_tool', {
       tool: next.function_path,
-      args: { ...(next.args || {}), __raisin_context: toolContext(state, run) },
+      args,
       mutating: next.mutating,
       replay_safe: next.replay_safe,
       interruptible: true,
@@ -147,6 +167,7 @@ export function dispatchNext(state, fx, run) {
     state.awaiting = {
       kind: 'tool', effect_id: effectId, call_id: next.call_id, name: next.name,
       function_path: next.function_path, args: next.args || {},
+      ...(next.client ? { client: true, resume_key: next.client.resume_key } : {}),
     };
     return;
   }

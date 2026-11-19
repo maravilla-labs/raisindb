@@ -15,6 +15,7 @@ mod cancellation;
 mod checkpoints;
 mod children;
 mod children_ctl;
+mod client_tools;
 mod domain;
 mod domain_finalize;
 mod fencing;

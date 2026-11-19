@@ -10,6 +10,8 @@ import {
 } from './state.js';
 import { applyPlanCall, attributeEvidence } from './plan.js';
 import { dispatchNext, askModel, finishRun, terminal, requestApproval } from './steps.js';
+import { clientCall, clientQueueEntry, applyClientAnswer } from './client.js';
+import { pageToolName } from '../agent-shared/client-tools.js';
 import { trackChildren, scopeRefusal, scopeViolations, continueWait, handbackOf } from './children.js';
 
 function refuse(state, callId, message, extra = {}) {
@@ -50,6 +52,25 @@ export function onModelTurn(state, ev, run, fx) {
     }
     const tool = findTool(state, call.name);
     if (!tool) {
+      // A page tool (`page.x`): the agent's client policy and the page's current tools decide.
+      const page = clientCall(state, call, (r) => state.results.push(r));
+      if (page && page !== true) {
+        const fp = fingerprint(pageToolName(page.bare), call.args);
+        const seen = state.fingerprints[fp] || 0;
+        const queuedTwin = state.queue.some((q) => q.fp === fp);
+        if (seen >= state.cfg.loop_limit || queuedTwin) {
+          state.progress.loop_hits += 1;
+          const msg = queuedTwin
+            ? `\`${pageToolName(page.bare)}\` was called twice with identical arguments in one turn; it runs once.`
+            : `\`${pageToolName(page.bare)}\` has already run ${seen} time(s) with exactly these arguments; read the page again, change the approach, or finish.`;
+          note(state, 'loop_detected', msg, 'warning');
+          refuse(state, id, msg, { loop_detected: true });
+          continue;
+        }
+        state.queue.push(clientQueueEntry(state, call, page, fp));
+        continue;
+      }
+      if (page === true) continue;
       const names = state.tools.map((t) => t.name).sort().join(', ') || 'none';
       refuse(state, id, `\`${call.name}\` is not a tool offered to you, so it was not run. The tools offered to you are: ${names}.`);
       continue;
@@ -104,6 +125,11 @@ export function onToolResult(state, ev, run, fx) {
   const awaiting = state.awaiting;
   if (awaiting.kind === 'project') return afterProjection(state, fx, run, awaiting.then);
   const env = d.envelope;
+  // The page answered a page tool's call: apply what it reports, answer the call.
+  if (awaiting.client && env && env.source === 'client') {
+    applyClientAnswer(state, env, awaiting);
+    return dispatchNext(state, fx, run);
+  }
   // A child's hand-back answered a wait: learn it, then wait for the rest.
   if (handbackOf(env)) {
     trackChildren(state, env);

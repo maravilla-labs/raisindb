@@ -44,6 +44,7 @@
 
 pub mod api;
 pub mod api_child;
+pub mod api_client;
 pub mod api_driver;
 pub mod api_follow;
 pub mod budget;

@@ -234,9 +234,20 @@ pub fn tool_result(op_id: &str, output: Value) -> OperationResult {
         .get("resume_key")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    // A waiting tool may bound its wait (`expires_in_ms`); absent waits
+    // without a deadline. Only a positive number counts.
+    let expires_in_ms = if outcome == OpOutcome::Waiting {
+        output
+            .get("expires_in_ms")
+            .and_then(Value::as_u64)
+            .filter(|ms| *ms > 0)
+    } else {
+        None
+    };
     OperationResult {
         outcome: Some(outcome),
         resume_key,
+        expires_in_ms,
         payload: Some(output),
         ..OperationResult::default()
     }
@@ -761,5 +772,52 @@ mod tool_usage_tests {
         let mut no_subject = ctx("fc_1", 1);
         no_subject.subject = None;
         record_tool_usage(&storage, &no_subject, "/lib/t", &usage()).await;
+    }
+}
+
+/// A waiting tool's `expires_in_ms` bounds its wait (client tools).
+#[cfg(test)]
+mod waiting_deadline_tests {
+    use super::*;
+
+    fn waiting(extra: Value) -> Value {
+        let mut env = json!({
+            "envelope": "raisin.tool-result/1", "operation_id": "o", "status": "waiting",
+            "resume_key": "client:c1",
+        });
+        if let (Some(e), Some(x)) = (env.as_object_mut(), extra.as_object()) {
+            e.extend(x.clone());
+        }
+        env
+    }
+
+    #[test]
+    fn a_waiting_envelope_carries_its_deadline() {
+        let r = tool_result("o", waiting(json!({ "expires_in_ms": 120000 })));
+        assert_eq!(r.outcome, Some(OpOutcome::Waiting));
+        assert_eq!(r.resume_key.as_deref(), Some("client:c1"));
+        assert_eq!(r.expires_in_ms, Some(120_000));
+    }
+
+    #[test]
+    fn no_deadline_unless_a_positive_number_is_given() {
+        assert_eq!(tool_result("o", waiting(json!({}))).expires_in_ms, None);
+        assert_eq!(
+            tool_result("o", waiting(json!({ "expires_in_ms": 0 }))).expires_in_ms,
+            None
+        );
+        assert_eq!(
+            tool_result("o", waiting(json!({ "expires_in_ms": "soon" }))).expires_in_ms,
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_waiting_result_has_a_deadline() {
+        let done = json!({
+            "envelope": "raisin.tool-result/1", "operation_id": "o", "status": "succeeded",
+            "expires_in_ms": 5000,
+        });
+        assert_eq!(tool_result("o", done).expires_in_ms, None);
     }
 }

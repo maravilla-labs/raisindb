@@ -33,6 +33,10 @@ pub struct OperationResult {
     pub tool_calls: Vec<CallId>,
     /// For `Waiting`: the key a delivery will name.
     pub resume_key: Option<String>,
+    /// For `Waiting`: how long the parked operation may wait for its
+    /// delivery, in ms. `None` waits without a deadline; when set, the
+    /// External request expires and the recovery sweep closes it.
+    pub expires_in_ms: Option<u64>,
 }
 
 /// A result at least this big is "large": checkpoints reference it.
@@ -126,7 +130,7 @@ pub fn apply_finish(
                     requested_by: Some(op.op_id.clone()),
                     effect_id: op.effect_id.clone(),
                     created_seq: tx.next_seq(),
-                    expires_at_ms: None,
+                    expires_at_ms: result.expires_in_ms.map(|ms| now.saturating_add(ms)),
                 };
                 tx.push(RunEventKind::RequestOpened {
                     request: request.clone(),

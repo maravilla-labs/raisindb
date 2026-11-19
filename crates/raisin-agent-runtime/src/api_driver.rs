@@ -170,6 +170,9 @@ pub struct FinishRequest {
     /// For `waiting`: the key an external delivery will name.
     #[serde(default)]
     pub resume_key: Option<String>,
+    /// For `waiting`: how long the delivery may take, in ms (default: no deadline).
+    #[serde(default)]
+    pub expires_in_ms: Option<u64>,
 }
 
 /// Record an operation's result.
@@ -188,6 +191,7 @@ pub async fn finish(
         payload: req.payload,
         tool_calls: req.tool_calls.into_iter().map(CallId).collect(),
         resume_key: req.resume_key,
+        expires_in_ms: req.expires_in_ms,
     };
     let op = OperationId(op_id.to_string());
     Ok(host

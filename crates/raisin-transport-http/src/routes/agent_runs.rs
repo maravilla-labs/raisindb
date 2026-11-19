@@ -13,6 +13,7 @@ use crate::state::AppState;
 pub(crate) fn agent_run_routes(state: &AppState) -> Router<AppState> {
     use crate::handlers::agent_runs as h;
     use crate::handlers::agent_runs_children as c;
+    use crate::handlers::agent_runs_client as k;
     use crate::handlers::agent_runs_stream as s;
     Router::new()
         .route(
@@ -65,6 +66,11 @@ pub(crate) fn agent_run_routes(state: &AppState) -> Router<AppState> {
             get(c::read_checkpoint),
         )
         .route("/api/agent-runs/{repo}/{run}/usage", get(c::usage))
+        .route(
+            "/api/agent-runs/{repo}/{run}/client-result",
+            post(k::client_result),
+        )
+        // The catch-all stays LAST: a named route registered after it is shadowed.
         .route("/api/agent-runs/{repo}/{run}/{action}", post(h::run_action))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

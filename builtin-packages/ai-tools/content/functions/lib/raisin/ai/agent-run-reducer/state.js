@@ -5,6 +5,9 @@
  */
 
 import { DIGEST_ALG, canonicalJson, normToolName, turnMessagePath } from '../agent-shared/run-names.js';
+import {
+  parsePolicy, cleanClient, cleanTools, cleanContext, clientState, UNTRUSTED_NOTICE,
+} from '../agent-shared/client-tools.js';
 
 export const STATE_VERSION = 1;
 export const DEFAULTS = Object.freeze({
@@ -87,6 +90,9 @@ export function initState(input, seq) {
     },
     ctx: src.context && typeof src.context === 'object' ? src.context : {},
     tools,
+    // Browser tools: the agent's policy + what the page offers THIS turn.
+    // Replaced on every user input and by a client result (setClient).
+    client: clientState(parsePolicy(src.client_policy), cleanClient(src.client)),
     awaiting: null,
     queue: [],
     results: [],
@@ -109,6 +115,28 @@ export function initState(input, seq) {
     model_retries: 0,
     diagnostics: [],
   };
+}
+
+/**
+ * Replace what the page offers. `client` is `{client_id, tools, context}` as
+ * the page sent it (null = the page offers nothing); `policy` replaces the
+ * agent's policy when given. A part left out of `client` keeps what the run
+ * held: a result carries the tools and the context on their own.
+ */
+export function setClient(state, client, policy) {
+  const cur = state.client || clientState(null, null);
+  const next = { ...cur };
+  if (policy !== undefined) next.policy = policy ? parsePolicy(policy) : null;
+  if (client === null) {
+    next.tools = [];
+    next.context = null;
+    next.client_id = null;
+  } else if (client) {
+    if (client.client_id !== undefined) next.client_id = client.client_id || null;
+    if (client.tools !== undefined) next.tools = cleanTools(client.tools);
+    if (client.context !== undefined) next.context = cleanContext(client.context);
+  }
+  state.client = next;
 }
 
 /** The offered tool a model's call names, by `-`/`_`-insensitive name. */
@@ -179,6 +207,23 @@ export function boundedContent(value, max, ref) {
     full_result_ref: ref || null,
     note: 'The result was larger than the context budget; the preview is the start of it.',
   };
+}
+
+/**
+ * What the model reads for a page tool's answer: `{ok, content?, error?}`;
+ * content the page marked untrusted is framed as data, once, here — the
+ * transcript keeps this shape, so every later turn reads it framed too.
+ */
+export function contentOfClientEnvelope(env) {
+  const p = env && env.payload && typeof env.payload === 'object' ? env.payload : {};
+  const out = { ok: p.ok === true };
+  if (p.error !== undefined && p.error !== null) out.error = p.error;
+  if (env && env.untrusted === true) {
+    out.untrusted = true;
+    out.notice = UNTRUSTED_NOTICE;
+  }
+  if (p.content !== undefined) out.content = p.content;
+  return out;
 }
 
 /** What the model reads for a tool envelope. */

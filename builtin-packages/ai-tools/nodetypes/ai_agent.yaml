@@ -367,4 +367,25 @@ properties:
       min: 1
       max: 200
 
+  - name: client_tools
+    title: Client Tools (browser)
+    type: Object
+    required: false
+    description: |
+      Lets this agent use the tools of the page its user is looking at (a
+      browser page's WebMCP tools). Absent = no browser tools: nothing changes.
+
+      The page offers its current tools with every message; the agent sees the
+      ones this policy allows as `page.<name>`. A call runs in the user's
+      browser and its result comes back through the SDK; if the page does not
+      answer within `timeout_ms` the agent is told the page is unavailable.
+      Results a page marks untrusted are shown to the model as data, never as
+      instructions.
+
+      Shape:
+        kind: webmcp          # the only kind
+        allow: ["*"]          # globs over page tool names (default: all)
+        deny: []              # globs to refuse, applied after allow
+        timeout_ms: 120000    # how long a call may wait (default 120000, max 600000)
+
 allowed_children: []

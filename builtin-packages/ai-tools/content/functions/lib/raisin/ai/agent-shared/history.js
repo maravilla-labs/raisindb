@@ -7,6 +7,7 @@
  */
 
 import { log } from './logger.js';
+import { attachmentsOfMessage } from './message-images.js';
 
 const MAX_HISTORY_MESSAGES = 50;
 
@@ -188,6 +189,12 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
     }
 
     const entry = { role: props.role, content };
+    // Files the person attached: the model turn turns them into content parts
+    // on the latest such message (message-images.js) and removes this marker.
+    if (props.role === 'user' && options?.withAttachments === true) {
+      const attached = attachmentsOfMessage(props);
+      if (attached.length) entry.__attachments = attached;
+    }
     const toolResultEntries = [];
 
     if (props.role === 'assistant') {

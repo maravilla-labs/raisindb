@@ -20,6 +20,7 @@ import { resolveToolsParallel } from './tools.js';
 import { LOAD_SKILL_TOOL_NAME, LOAD_SKILL_FUNCTION } from './skills.js';
 import { planOpOf } from './run-names.js';
 import { REPLAY_SAFE_TOOL_PATHS } from './tool-meta.js';
+import { wireToolName } from './client-tools.js';
 
 const DESCRIPTION_CHARS = 1000;
 
@@ -93,7 +94,9 @@ export async function offerDefinitions(toolsOffered) {
   return offers.map((t) => {
     const resolved = byPath.get(t.function_path);
     if (resolved) return definition(t.name, t.description || resolved.description, resolved.parameters);
-    return definition(t.name, t.description, t.schema);
+    // A page tool (`page.x`) goes to the provider as `page__x`: providers
+    // refuse dots in a tool name. The reducer maps both back.
+    return definition(t.kind === 'client' ? wireToolName(t.name) : t.name, t.description, t.schema);
   });
 }
 

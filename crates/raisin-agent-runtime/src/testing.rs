@@ -86,6 +86,8 @@ pub struct ExecBehavior {
     pub tool_calls: Vec<CallId>,
     /// Waiting: resume key.
     pub resume_key: Option<String>,
+    /// Waiting: how long the delivery may take, ms.
+    pub expires_in_ms: Option<u64>,
     /// Usage.
     pub usage: Option<OpUsage>,
 }
@@ -203,6 +205,7 @@ impl OperationExecutor for RecordingExecutor {
             payload: b.payload,
             tool_calls: b.tool_calls,
             resume_key: b.resume_key,
+            expires_in_ms: b.expires_in_ms,
         };
         self.results
             .lock()

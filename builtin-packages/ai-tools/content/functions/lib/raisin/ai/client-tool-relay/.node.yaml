@@ -1,0 +1,24 @@
+node_type: raisin:Function
+properties:
+  name: client-tool-relay
+  title: Client tool relay
+  description: >-
+    Hands a model's call of a PAGE tool (a tool that runs in the user's browser)
+    to the page: emits the conversation event the page's SDK answers, then
+    parks the operation under the resume key client:<call_id> until the page
+    posts its result (or the call's timeout passes). Issued by the run's
+    reducer for page.* tools, never by a model.
+  language: javascript
+  entry_file: index.js:handler
+  execution_mode: Sync
+  # Reads the conversation's stream channel; the run it acts for is verified first.
+  execution_context: system
+  enabled: true
+  input_schema:
+    type: object
+    properties:
+      client_call:
+        type: object
+        description: "{ call_id, resume_key, name, args, client_id, timeout_ms }"
+  resource_limits:
+    timeout_ms: 15000

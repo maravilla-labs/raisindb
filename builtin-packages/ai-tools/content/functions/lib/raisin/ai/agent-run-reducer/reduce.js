@@ -19,11 +19,12 @@
  */
 
 import { REDUCER_CONTRACT } from '../agent-shared/run-names.js';
-import { Effects, initState, runInput, note } from './state.js';
+import { Effects, initState, runInput, note, setClient } from './state.js';
 import { adoptPlan, projection } from './plan.js';
 import { onModelTurn, onToolResult, onOperationFailed } from './turn.js';
 import { askModel, dispatchNext, terminal } from './steps.js';
 import { interruptWait } from './children.js';
+import { closeClientCall, interruptClientCall } from './client.js';
 
 const TERMINAL = new Set(['completed', 'failed', 'stopped']);
 const GUARDED = new Set(['model_turn_completed', 'tool_result', 'operation_failed', 'operation_cancelled']);
@@ -101,6 +102,12 @@ export function reduce(req) {
       onRequestResolved(state, ev, run, fx);
       break;
     case 'request_closed':
+      // A page tool's wait ended without an answer (the deadline passed): the
+      // model is told the page was unavailable, never left waiting.
+      if (closeClientCall(state)) {
+        dispatchNext(state, fx, run);
+        break;
+      }
       onRequestResolved(state, { ...ev, data: { ...(ev.data || {}), decision: 'reject', reason: `request ${ev.data && ev.data.reason}` } }, run, fx);
       break;
     case 'resumed':
@@ -150,6 +157,11 @@ function onUserInput(state, ev, run, fx) {
   if (text && !(inp && inp.message_path)) {
     state.steer_texts = (state.steer_texts || []).concat(String(text).slice(0, 4000)).slice(-5);
   }
+  // The page's tools and context are replaced by what this message carries
+  // (a message from a client without tools clears them).
+  if (inp && typeof inp === 'object' && (inp.message_path || inp.client !== undefined)) {
+    setClient(state, inp.client || null, inp.client_policy);
+  }
   const open = Array.isArray(run.open_requests) ? run.open_requests : [];
   for (const r of open) fx.push('withdraw_request', { request_id: r.request_id });
   if (state.plan && state.plan.status === 'pending_approval' && state.plan.approval) {
@@ -162,8 +174,9 @@ function onUserInput(state, ev, run, fx) {
     state.plan.approval = null;
     state.plan_dirty = true;
   }
-  // Waiting on child runs: the withdraw above releases the wait; answer it.
-  interruptWait(state, run);
+  // Waiting on a page tool or on child runs: the withdraw above releases the
+  // wait; answer it.
+  if (!interruptClientCall(state, run)) interruptWait(state, run);
   if (state.awaiting && state.awaiting.kind !== 'approval' && state.awaiting.kind !== 'input') return;
   state.awaiting = null;
   dispatchNext(state, fx, run);

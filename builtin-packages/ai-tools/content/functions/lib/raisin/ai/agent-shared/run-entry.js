@@ -19,6 +19,7 @@ import { resolveRunTools } from './run-tools.js';
 import { latestOpenPlan } from './run-plan-card.js';
 import { DEFAULT_RUN_REDUCER, DEFAULT_MODEL_TURN_FUNCTION } from './run-names.js';
 import { getEffectiveExecutionMode, requiresPlanApproval } from './utils.js';
+import { clientInputOf } from './client-tools.js';
 import { runIdOfChat, getRun, isTerminal, controlRun, commandFor } from './run-control.js';
 
 const nowIso = () => new Date().toISOString();
@@ -153,6 +154,9 @@ export function buildCreateRequest({ workspace, chatPath, chat, message, agentPr
       message_path: message.path,
       tools,
       plan: plan || null,
+      // Browser tools the page offers this turn (+ the agent's policy) and the
+      // message's files; see client-tools.js.
+      ...clientInputOf(message, agentProps),
       config: {
         execution_mode: mode,
         requires_approval: requiresPlanApproval(mode) && tools.some((t) => t.domain_op === 'plan.create'),
@@ -215,10 +219,12 @@ function raisedBudgets(view) {
 }
 
 /** Steer `message` into the live run; null when the run could not take it. */
-async function steer(ctx, runId, view, message) {
+async function steer(ctx, runId, view, message, agentProps) {
   const key = message.id || message.path;
   const ack = await controlRun(runId, commandFor('steer', {
-    input: { text: messageText(message), message_path: message.path },
+    // The page's CURRENT tools and context travel with every message: the
+    // reducer replaces what it held (client-tools.js).
+    input: { text: messageText(message), message_path: message.path, ...clientInputOf(message, agentProps) },
   }), `steer:${key}`);
   if (!ack || ack.ack === 'rejected') return null;
   // A paused run takes the user's message as "continue": resume it. Not for a
@@ -253,7 +259,7 @@ export async function routeToAgentRun({
     const view = await getRun(liveId);
     if (view && !isTerminal(view)) {
       if (view.run && view.run.create_key === createKey) return { mode: 'duplicate', run_id: liveId };
-      const steered = await steer(ctx, liveId, view, message);
+      const steered = await steer(ctx, liveId, view, message, agentProps);
       if (steered) return steered;
     }
   }
@@ -292,7 +298,7 @@ export async function routeToAgentRun({
     const view = await getRun(runId);
     if (view && view.run && view.run.create_key === createKey) return { mode: 'duplicate', run_id: runId };
     if (view && !isTerminal(view)) {
-      const steered = await steer(ctx, runId, view, message);
+      const steered = await steer(ctx, runId, view, message, agentProps);
       if (steered) {
         await markChatRun(workspace, chatPath, chat, runId);
         return steered;

@@ -66,6 +66,7 @@ provides:
     - /functions/lib/raisin/ai/wait-for-agents
     - /functions/lib/raisin/ai/interrupt-agent
     - /functions/lib/raisin/ai/flow-agent-run
+    - /functions/lib/raisin/ai/client-tool-relay
     # The node-development surface as agent tools (raisin.nodeDev.*)
     - /functions/lib/raisin/node-dev/node-stat
     - /functions/lib/raisin/node-dev/node-list

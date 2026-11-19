@@ -41,6 +41,8 @@ mod handlers {
     #[cfg(feature = "storage-rocksdb")]
     pub mod agent_runs_children;
     #[cfg(feature = "storage-rocksdb")]
+    pub mod agent_runs_client;
+    #[cfg(feature = "storage-rocksdb")]
     pub mod agent_runs_stream;
     #[cfg(feature = "storage-rocksdb")]
     pub mod ai;
