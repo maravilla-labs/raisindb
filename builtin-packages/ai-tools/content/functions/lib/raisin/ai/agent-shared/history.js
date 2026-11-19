@@ -199,7 +199,7 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
         // Bytes the person's client sent inline; the model turn uses them for
         // the LATEST such message only and removes this marker.
         const meta = props.metadata && typeof props.metadata === 'object' ? props.metadata : null;
-        const inline = meta ? rawInlineOf(meta.attachments) : [];
+        const inline = meta ? rawInlineOf(meta.attachments, meta.attachment_images) : [];
         if (inline.length) entry.__inline = inline;
       }
     }

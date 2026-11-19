@@ -106,7 +106,19 @@ export function buildMessageMetadata(
     metadata.client = client;
   }
   if (options?.attachments && options.attachments.length > 0) {
-    metadata.attachments = options.attachments;
+    // An attachment is a reference envelope ({raisin:ref, raisin:workspace}), and the server
+    // normalizes a stored reference to exactly those keys: anything else on it (inline image
+    // bytes, the file name, the type) would be dropped on write. So the inline bytes travel in
+    // their own list, keyed by the attachment's path, and the envelope keeps only the reference.
+    const images: Array<{ path: string; name?: string; media_type: string; data: string }> = [];
+    metadata.attachments = options.attachments.map((a) => {
+      const { inline, ...rest } = a as typeof a & { inline?: { media_type: string; data: string } };
+      if (inline && typeof inline.data === 'string' && inline.data) {
+        images.push({ path: String(rest['raisin:ref'] ?? ''), name: rest.name, media_type: inline.media_type, data: inline.data });
+      }
+      return rest;
+    });
+    if (images.length > 0) metadata.attachment_images = images;
   }
   return Object.keys(metadata).length > 0 ? metadata : undefined;
 }

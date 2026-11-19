@@ -23,9 +23,19 @@ const B64 = /^[A-Za-z0-9+/]+={0,2}$/;
  * every attachment that carries an `inline` object. Not yet validated (that is
  * {@link planInlineImages}); this only keeps the history entry small and flat.
  */
-export function rawInlineOf(attachments) {
-  if (!Array.isArray(attachments)) return [];
+export function rawInlineOf(attachments, attachmentImages) {
   const out = [];
+  // Current clients send the bytes in `metadata.attachment_images` (a reference envelope keeps
+  // only its reference keys when stored, so bytes on the envelope never survive the write).
+  if (Array.isArray(attachmentImages)) {
+    for (const img of attachmentImages) {
+      if (!img || typeof img !== 'object' || typeof img.data !== 'string') continue;
+      const name = typeof img.name === 'string' && img.name ? img.name.slice(0, 200) : String(img.path || 'image').split('/').pop();
+      out.push({ name, media_type: img.media_type, data: img.data });
+    }
+    return out;
+  }
+  if (!Array.isArray(attachments)) return [];
   for (const a of attachments) {
     const inline = a && typeof a === 'object' && a.inline && typeof a.inline === 'object' ? a.inline : null;
     if (!inline) continue;

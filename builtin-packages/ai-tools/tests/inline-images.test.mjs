@@ -100,3 +100,32 @@ test('stripInlineBytes never throws', async () => {
   globalThis.raisin = { sql: { query: async () => { throw new Error('down'); } }, nodes: {} };
   assert.equal(await stripInlineBytes('ai', '/c', null), 0);
 });
+
+// The live failure (2026-11-19): a stored attachment is a reference envelope, which the server
+// normalizes to {raisin:ref, raisin:workspace, raisin:path}, dropping `inline`. The bytes now
+// travel in metadata.attachment_images; these pin reading them there and clearing them after.
+test('rawInlineOf reads metadata.attachment_images (bytes off the envelope)', () => {
+  const envelopes = [{ 'raisin:ref': 'X1', 'raisin:workspace': 'assets', 'raisin:path': '/u/p.png' }];
+  const images = [{ path: '/u/p.png', name: 'p.png', media_type: 'image/png', data: 'QUJD' }];
+  assert.deepEqual(rawInlineOf(envelopes, images), [{ name: 'p.png', media_type: 'image/png', data: 'QUJD' }]);
+  assert.deepEqual(rawInlineOf(envelopes, undefined), []);
+});
+
+test('stripInlineBytes removes metadata.attachment_images and keeps the references', async () => {
+  const writes = [];
+  globalThis.raisin = {
+    sql: { query: async () => [
+      { path: '/c/m', created_at: '2026-11-19T10:00:00Z', properties: { role: 'user', metadata: {
+        attachments: [{ 'raisin:ref': 'X1', 'raisin:workspace': 'assets', 'raisin:path': '/u/p.png' }],
+        attachment_images: [{ path: '/u/p.png', media_type: 'image/png', data: 'SECRETBYTES' }],
+        client: { client_id: 'c1' },
+      } } },
+    ] },
+    nodes: { updateProperty: async (ws, path, key, value) => { writes.push({ path, key, value }); } },
+  };
+  assert.equal(await stripInlineBytes('ai', '/c', '2026-11-19T10:01:00Z'), 1);
+  assert.equal(JSON.stringify(writes[0].value).includes('SECRETBYTES'), false);
+  assert.equal('attachment_images' in writes[0].value, false);
+  assert.equal(writes[0].value.attachments[0]['raisin:path'], '/u/p.png');
+  assert.equal(writes[0].value.client.client_id, 'c1');
+});

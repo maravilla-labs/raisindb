@@ -29,15 +29,19 @@ export async function stripInlineBytes(workspace, chatPath, before) {
     for (const row of Array.isArray(rows) ? rows : []) {
       const props = row.properties || {};
       const meta = props.metadata && typeof props.metadata === 'object' ? props.metadata : null;
-      if (props.role !== 'user' || !meta || !Array.isArray(meta.attachments)) continue;
+      if (props.role !== 'user' || !meta) continue;
       if (new Date(row.created_at).getTime() > cutoff) continue;
-      if (!meta.attachments.some((a) => a && typeof a === 'object' && 'inline' in a)) continue;
-      const attachments = meta.attachments.map((a) => {
+      const list = Array.isArray(meta.attachments) ? meta.attachments : [];
+      const onEnvelope = list.some((a) => a && typeof a === 'object' && 'inline' in a);
+      const separate = 'attachment_images' in meta;
+      if (!onEnvelope && !separate) continue;
+      const { attachment_images, ...kept } = meta;
+      const attachments = list.map((a) => {
         if (!a || typeof a !== 'object' || !('inline' in a)) return a;
         const { inline, ...rest } = a;
         return rest;
       });
-      await raisin.nodes.updateProperty(workspace, row.path, 'metadata', { ...meta, attachments });
+      await raisin.nodes.updateProperty(workspace, row.path, 'metadata', list.length ? { ...kept, attachments } : kept);
       rewritten += 1;
     }
   } catch (err) {
