@@ -42,6 +42,8 @@ import { RaisinAbortError, RaisinTimeoutError, classifyHttpError } from './error
 import type { SqlResult } from './protocol';
 import { isRecoveredDoneEvent } from './utils/chat-events';
 import { normalizeHomePath } from './utils/home-path';
+import { AgentRunsApi } from './agent-runs';
+import { buildMessageMetadata, type ClientMessageOptions } from './types/client-tools';
 import type { AnonymousConversation, StartAnonymousOptions, VisitorChat } from './visitor-chat';
 
 // ---------------------------------------------------------------------------
@@ -91,6 +93,12 @@ export interface SendMessageOptions {
    * forever. Set to 0 to disable.
    */
   inactivityTimeoutMs?: number;
+  /** Browser tools + context to attach to the message (`metadata.client`). */
+  client?: ClientMessageOptions['client'];
+  /** Files attached to the message (`metadata.attachments`). */
+  attachments?: ClientMessageOptions['attachments'];
+  /** Use this as the message's `client_id` (default: a fresh UUID). */
+  clientId?: string;
 }
 
 /** Handle for a persistent conversation SSE subscription */
@@ -473,8 +481,14 @@ export class ConversationManager {
 
     logger.debug('[ConversationManager] Starting SSE stream for message send');
 
+    const messageOptions: ClientMessageOptions = {
+      client: options?.client,
+      attachments: options?.attachments,
+      clientId: options?.clientId,
+    };
+
     if (!shouldStream) {
-      await this.createUserMessage(conversationPath, content);
+      await this.createUserMessage(conversationPath, content, messageOptions);
       yield { type: 'waiting', timestamp: new Date().toISOString() };
       return;
     }
@@ -515,7 +529,7 @@ export class ConversationManager {
 
     // Create the user message node
     try {
-      await this.createUserMessage(conversationPath, content);
+      await this.createUserMessage(conversationPath, content, messageOptions);
     } catch (error) {
       logger.error('[ConversationManager] Failed to create user message', error);
       sse.close();
@@ -577,11 +591,15 @@ export class ConversationManager {
    * The message node triggers server-side handlers (via triggers);
    * events arrive via the persistent subscription.
    */
-  async createUserMessage(conversationPath: string, content: string): Promise<void> {
+  async createUserMessage(
+    conversationPath: string,
+    content: string,
+    options?: ClientMessageOptions,
+  ): Promise<string | undefined> {
     logger.debug('[ConversationManager] Creating user message', { path: conversationPath });
     if (this.visitor?.isAnonymous(conversationPath)) {
       await this.visitor.post(conversationPath, content);
-      return;
+      return undefined;
     }
     const workspace = 'raisin:access_control';
     const properties = await this.loadConversationProperties(conversationPath, workspace);
@@ -595,17 +613,24 @@ export class ConversationManager {
     // same flow instance. Sending it through the messaging outbox would require
     // a recipient that flow conversations deliberately do not have and would
     // invoke a standalone agent instead of the workflow agent.
+    const messageId = options?.clientId || crypto.randomUUID();
+    const metadata = buildMessageMetadata(messageId, options);
+
     if (flowInstanceId) {
       await this.httpRequest<void>({
         method: 'POST',
         path: `/api/flows/${this.repository}/instances/${encodeURIComponent(flowInstanceId)}/resume`,
-        body: { resume_data: { message: content } },
+        body: {
+          resume_data: {
+            message: content,
+            ...(metadata ? { metadata, client_id: messageId } : {}),
+          },
+        },
       });
-      return;
+      return messageId;
     }
 
     const { userId, userHome } = await this.ensureCurrentUser();
-    const messageId = crypto.randomUUID();
     const participants = Array.isArray(properties?.participants)
       ? (properties.participants as unknown[])
       : [];
@@ -633,6 +658,7 @@ export class ConversationManager {
       body: { content, message_text: content, thread_id: conversationId },
       conversation_id: conversationId,
       client_id: messageId,
+      ...(metadata ? { metadata } : {}),
       created_at: new Date().toISOString(),
     };
 
@@ -640,6 +666,24 @@ export class ConversationManager {
       `INSERT INTO '${workspace}' (path, node_type, properties) VALUES ($1, 'raisin:Message', $2::jsonb) RETURNING id`,
       [messagePath, JSON.stringify(outboxProperties)],
     );
+    return messageId;
+  }
+
+  /**
+   * The repository's agent-runs HTTP API, over this manager's connection.
+   * Used to post browser tool results (`submitClientToolResult`).
+   */
+  agentRuns(): AgentRunsApi {
+    return new AgentRunsApi(this.repository, {
+      request: <T>(method: string, path: string, body?: unknown): Promise<T> =>
+        this.httpRequest<T>({ method, path, body }),
+      url: (path: string) => `${this.baseUrl}${path}`,
+      headers: (): Record<string, string> => {
+        const token = this.authManager.getAccessToken();
+        return token ? { Authorization: `Bearer ${token}` } : {};
+      },
+      fetch: this.fetchImpl,
+    });
   }
 
   // ==========================================================================

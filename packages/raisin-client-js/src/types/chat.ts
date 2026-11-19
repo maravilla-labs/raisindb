@@ -12,6 +12,8 @@
  * - Threading: `replyTo` field on ChatMessage, `getThread(messagePath)`
  */
 
+import type { ClientToolCallEvent } from './client-tools';
+
 /** Record of a tool call made by the assistant */
 export interface ToolCallRecord {
   /** Tool call ID */
@@ -217,7 +219,8 @@ export type ChatEvent =
   | ChatConversationCreatedEvent
   | ChatMessageSavedEvent
   | ChatMessageDeliveredEvent
-  | ChatLogEvent;
+  | ChatLogEvent
+  | ClientToolCallEvent;
 
 /** Partial text content streamed from the AI agent */
 export interface ChatTextChunkEvent {

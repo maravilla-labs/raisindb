@@ -15,6 +15,7 @@
  *   fenced, and anyone authorized can still stop or steer the run.
  */
 
+import type { ClientToolResultBody, ClientToolResultAck } from './types/client-tools';
 import {
   checkpointBody,
   spawnBody,
@@ -214,6 +215,14 @@ export class AgentRunsApi {
   /** Durable events after `afterSeq` (gap-free; page with the last seq). */
   events(runId: string, afterSeq = 0, limit = 500): Promise<AgentRunEvent[]> {
     return this.transport.request('GET', this.base(runId, `/events?after_seq=${afterSeq}&limit=${limit}`));
+  }
+
+  /**
+   * Post a browser tool's result for a `client_tool_call` event
+   * (contract §5). Retrying with the same `delivery_id` answers `duplicate`.
+   */
+  submitClientToolResult(runId: string, body: ClientToolResultBody): Promise<ClientToolResultAck> {
+    return this.transport.request('POST', this.base(runId, '/client-result'), body);
   }
 
   /** Any control. Retrying with the same `controlId` is a no-op. */

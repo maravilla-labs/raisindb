@@ -464,6 +464,18 @@ export type {
   ChatMessageDeliveredEvent,
   ChatLogEvent,
 } from './types/chat';
+export type {
+  ClientTool,
+  ClientToolResult,
+  ClientToolsProvider,
+  ClientToolsMessageMeta,
+  ClientToolCallEvent,
+  ClientToolResultBody,
+  ClientToolResultAck,
+  ClientMessageOptions,
+  Attachment,
+} from './types/client-tools';
+export { buildMessageMetadata } from './types/client-tools';
 
 // Conversation management (unified API)
 export { ConversationManager, DEFAULT_SEND_MESSAGE_INACTIVITY_TIMEOUT_MS } from './conversations';
@@ -492,6 +504,7 @@ export type {
   ConversationStoreSnapshot,
   ConversationStoreOptions,
   ToolCallInfo,
+  StoreSendMessageOptions,
 } from './stores/conversation-store';
 export { ConversationListStore } from './stores/conversation-list-store';
 export type {

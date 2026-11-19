@@ -23,6 +23,14 @@ import type { ConversationManager, ConversationSubscription } from '../conversat
 import type { StartAnonymousOptions } from '../visitor-chat';
 import type { Database } from '../database';
 import type { ChatMessage, ChatEvent, ChatLogEvent } from '../types/chat';
+import type {
+  Attachment,
+  ClientToolCallEvent,
+  ClientToolResult,
+  ClientToolResultBody,
+  ClientToolsMessageMeta,
+  ClientToolsProvider,
+} from '../types/client-tools';
 import { logger, getLogLevel, LogLevel } from '../logger';
 import { projectPlansFromMessages, type PlanProjection } from '../utils/plan-projection';
 import { isRecoveredDoneEvent } from '../utils/chat-events';
@@ -88,7 +96,23 @@ export interface ConversationStoreOptions {
   streamingTimeoutMs?: number;
   /** Activity watchdog polling interval in ms (default: 30000). Periodically checks backend turn health while streaming. */
   watchdogIntervalMs?: number;
+  /**
+   * Browser tools for this conversation. The store attaches the page's tools
+   * and context to every message it sends, answers `client_tool_call` events
+   * addressed to it, and posts each result with the page's current tools.
+   */
+  clientTools?: ClientToolsProvider;
 }
+
+/** Options for {@link ConversationStore.sendMessage}. */
+export interface StoreSendMessageOptions {
+  attachments?: Attachment[];
+}
+
+/** Margin kept before `expires_at_ms` so a hung tool answers in time. */
+const CLIENT_TOOL_EXPIRY_MARGIN_MS = 1500;
+/** Used when an event carries no usable `expires_at_ms`. */
+const CLIENT_TOOL_DEFAULT_TIMEOUT_MS = 120_000;
 
 type Subscriber = (snapshot: ConversationStoreSnapshot) => void;
 
@@ -107,6 +131,12 @@ export class ConversationStore {
   private manager: ConversationManager;
   private subscribers = new Set<Subscriber>();
   private onEvent?: (event: ChatEvent) => void;
+  private clientTools?: ClientToolsProvider;
+  /** `client_id`s of the messages THIS store sent. */
+  private ownClientIds = new Set<string>();
+  /** `call_id`s already executed (events can be replayed on reconnect). */
+  private handledClientCalls = new Set<string>();
+  private clientToolsWarned = false;
   private createOptions?: ConversationStoreOptions['createOptions'];
 
   // Persistent SSE subscription
@@ -133,6 +163,7 @@ export class ConversationStore {
 
   constructor(options: ConversationStoreOptions) {
     this.manager = options.database.conversations;
+    this.clientTools = options.clientTools;
     this._conversationPath = options.conversationPath ?? null;
     this.createOptions = options.createOptions;
     this.onEvent = options.onEvent;
@@ -220,7 +251,7 @@ export class ConversationStore {
    * If no conversation exists yet and `createOptions` was provided,
    * the conversation is created automatically on the first call.
    */
-  async sendMessage(content: string): Promise<void> {
+  async sendMessage(content: string, sendOptions?: StoreSendMessageOptions): Promise<void> {
     if (this._isStreaming) {
       logger.warn('[ConversationStore] Cannot send message while streaming');
       return;
@@ -279,7 +310,14 @@ export class ConversationStore {
     try {
       this.ensureSubscription();
       await this.subscription!.waitUntilConnected();
-      await this.manager.createUserMessage(this._conversationPath!, content);
+      const clientId = crypto.randomUUID();
+      this.ownClientIds.add(clientId);
+      const client = await this.gatherClient();
+      await this.manager.createUserMessage(this._conversationPath!, content, {
+        client,
+        attachments: sendOptions?.attachments,
+        clientId,
+      });
       // Events arrive via the persistent subscription → handleEvent
     } catch (err) {
       logger.error('[ConversationStore] Send failed', err);
@@ -368,6 +406,102 @@ export class ConversationStore {
   // Internal
   // ==========================================================================
 
+  /** The page's tools + context, or undefined (logged once on failure). */
+  private async gatherClient(): Promise<ClientToolsMessageMeta | undefined> {
+    const provider = this.clientTools;
+    if (!provider) return undefined;
+    try {
+      const tools = await provider.getTools();
+      const context = provider.getContext ? await provider.getContext() : undefined;
+      return { tools, context };
+    } catch (err) {
+      if (!this.clientToolsWarned) {
+        this.clientToolsWarned = true;
+        logger.warn('[ConversationStore] Client tools unavailable, sending without them', err);
+      }
+      return undefined;
+    }
+  }
+
+  private handleClientToolCall(event: ClientToolCallEvent): void {
+    if (!this.clientTools) return;
+    if (!this.ownClientIds.has(event.client_id)) return; // another tab's turn
+    if (this.handledClientCalls.has(event.call_id)) return; // replayed
+    this.handledClientCalls.add(event.call_id);
+    this.markStreamingActivity();
+
+    this._activeToolCalls.push({
+      id: event.call_id,
+      functionName: event.name,
+      arguments: event.args,
+      status: 'running',
+    });
+    this.notify();
+    void this.runClientToolCall(event, this.clientTools);
+  }
+
+  private async runClientToolCall(
+    event: ClientToolCallEvent,
+    provider: ClientToolsProvider,
+  ): Promise<void> {
+    const started = Date.now();
+    const remaining = typeof event.expires_at_ms === 'number' && event.expires_at_ms > 0
+      ? event.expires_at_ms - started - CLIENT_TOOL_EXPIRY_MARGIN_MS
+      : CLIENT_TOOL_DEFAULT_TIMEOUT_MS;
+    const timeoutMs = Math.max(0, remaining);
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<ClientToolResult>((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, error: 'timeout' }), timeoutMs);
+    });
+    const execution = (async (): Promise<ClientToolResult> => {
+      try {
+        const r = await provider.execute(event.name, event.args ?? {});
+        return r && typeof r === 'object' && typeof r.ok === 'boolean'
+          ? r
+          : { ok: false, error: 'invalid tool result' };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    })();
+    const result = await Promise.race([execution, timeout]);
+    clearTimeout(timer);
+
+    const body: ClientToolResultBody = {
+      resume_key: event.resume_key,
+      delivery_id: crypto.randomUUID(),
+      result,
+    };
+    const fresh = await this.gatherClient();
+    if (fresh) {
+      body.client_tools = fresh.tools;
+      if (fresh.context !== undefined) body.client_context = fresh.context;
+    }
+
+    let failed = !result.ok;
+    try {
+      const ack = await this.manager.agentRuns().submitClientToolResult(event.run_id, body);
+      if (ack?.status === 'rejected') {
+        logger.warn('[ConversationStore] Client tool result rejected', ack.reason);
+        failed = true;
+      }
+    } catch (err) {
+      logger.error('[ConversationStore] Posting client tool result failed', err);
+      failed = true;
+    }
+
+    const idx = this._activeToolCalls.findIndex((tc) => tc.id === event.call_id);
+    if (idx >= 0) {
+      this._activeToolCalls[idx] = {
+        ...this._activeToolCalls[idx],
+        status: failed ? 'failed' : 'completed',
+        result: result.ok ? result.content : result.error,
+        durationMs: Date.now() - started,
+      };
+      this.notify();
+    }
+  }
+
   private ensureSubscription(): void {
     if (this.subscription) return;
     if (!this._conversationPath) return;
@@ -418,6 +552,10 @@ export class ConversationStore {
         this.notify();
         break;
       }
+
+      case 'client_tool_call':
+        this.handleClientToolCall(event);
+        break;
 
       case 'tool_call_completed': {
         this.markStreamingActivity();

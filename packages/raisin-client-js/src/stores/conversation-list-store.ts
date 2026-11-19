@@ -19,6 +19,7 @@
 import type { Database } from '../database';
 import type { ConversationType, ConversationListItem } from '../types/chat';
 import { ConversationStore, type ConversationStoreOptions } from './conversation-store';
+import type { ClientToolsProvider } from '../types/client-tools';
 import { logger } from '../logger';
 import { normalizeHomePath } from '../utils/home-path';
 
@@ -154,8 +155,11 @@ export class ConversationListStore {
     participant: string;
     subject?: string;
     input?: Record<string, unknown>;
+    /** Browser tools for this conversation's store (see ConversationStoreOptions.clientTools). */
+    clientTools?: ClientToolsProvider;
   }): Promise<ConversationListItem> {
-    const convo = await this.database.conversations.create(options);
+    const { clientTools, ...createOptions } = options;
+    const convo = await this.database.conversations.create(createOptions);
 
     const listItem: ConversationListItem = {
       id: convo.id,
@@ -169,6 +173,7 @@ export class ConversationListStore {
     };
 
     this._conversations = [listItem, ...this._conversations];
+    if (clientTools) this.getConversationStore(convo.conversationPath, { clientTools });
     this.notify();
     return listItem;
   }
