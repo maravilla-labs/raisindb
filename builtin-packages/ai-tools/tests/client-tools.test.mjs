@@ -449,3 +449,16 @@ test('message attachments are read from metadata', () => {
   assert.deepEqual(attachmentsOfMessage({ metadata: { attachments: [att('a.png')] } }).map((a) => a.name), ['a.png']);
   assert.deepEqual(attachmentsOfMessage({}), []);
 });
+
+test('attachments are named by their PATH once the server normalized the envelope (ref = id)', async () => {
+  const { cleanAttachments } = await import('../content/functions/lib/raisin/ai/agent-shared/client-tools.js');
+  const [a, b] = cleanAttachments([
+    { 'raisin:ref': 'yl6T_O_EpBFUgbBRnnsnD', 'raisin:path': '/uploads/chat/2026/11/hall.jpg', 'raisin:workspace': 'assets', mime_type: 'image/jpeg' },
+    { 'raisin:ref': '/uploads/x.pdf', 'raisin:workspace': 'assets', mime_type: 'application/pdf', name: 'x.pdf' },
+  ]);
+  assert.equal(a['raisin:ref'], '/uploads/chat/2026/11/hall.jpg');
+  assert.equal(a['raisin:id'], 'yl6T_O_EpBFUgbBRnnsnD');
+  assert.equal(a.name, 'hall.jpg');
+  assert.equal(b['raisin:ref'], '/uploads/x.pdf');
+  assert.equal(cleanAttachments(Array.from({ length: 150 }, (_, i) => ({ 'raisin:ref': `/f${i}` }))).length, 100);
+});

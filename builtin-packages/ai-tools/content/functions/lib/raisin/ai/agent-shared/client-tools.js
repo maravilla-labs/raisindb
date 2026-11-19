@@ -168,15 +168,22 @@ export function cleanAttachments(raw) {
   const out = [];
   for (const a of raw) {
     if (!a || typeof a !== 'object') continue;
-    const path = typeof a['raisin:ref'] === 'string' ? a['raisin:ref'] : null;
-    if (!path) continue;
+    const ref = typeof a['raisin:ref'] === 'string' ? a['raisin:ref'] : null;
+    if (!ref) continue;
+    // The server normalizes a stored envelope: `raisin:ref` becomes the node ID
+    // and `raisin:path` appears. The PATH is what an agent can name, read and
+    // put into a field, so it wins whenever it is there.
+    const path = typeof a['raisin:path'] === 'string' && a['raisin:path'] ? a['raisin:path'] : null;
+    const shown = path || ref;
     out.push({
-      'raisin:ref': path.slice(0, 500),
+      'raisin:ref': shown.slice(0, 500),
+      ...(path ? { 'raisin:id': ref.slice(0, 100) } : {}),
       'raisin:workspace': typeof a['raisin:workspace'] === 'string' ? a['raisin:workspace'] : 'assets',
       mime_type: typeof a.mime_type === 'string' ? a.mime_type.slice(0, 100) : '',
-      name: typeof a.name === 'string' ? a.name.slice(0, 200) : path.split('/').pop(),
+      name: typeof a.name === 'string' ? a.name.slice(0, 200) : shown.split('/').pop(),
     });
-    if (out.length >= 16) break;
+    // Matches Studio's per-agent `attachments.max_files` upper bound.
+    if (out.length >= 100) break;
   }
   return out;
 }

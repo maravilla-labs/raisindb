@@ -47,24 +47,60 @@ async fn refuse_non_public_address(url: &str) -> Result<(), raisin_error::Error>
     let parsed = url::Url::parse(url).map_err(|e| {
         raisin_error::Error::Validation(format!("invalid request URL `{url}`: {e}"))
     })?;
+    if parsed.host().is_none() {
+        return Err(raisin_error::Error::Validation(format!(
+            "request URL `{url}` has no host"
+        )));
+    }
+    match literal_address_refusal(&parsed) {
+        Some(reason) => Err(raisin_error::Error::Validation(format!(
+            "URL not allowed by egress policy: {reason}"
+        ))),
+        None => Ok(()),
+    }
+}
 
-    let addr = match parsed.host() {
-        Some(url::Host::Ipv4(a)) => std::net::IpAddr::V4(a),
-        Some(url::Host::Ipv6(a)) => std::net::IpAddr::V6(a),
-        // Judged at resolution time by PublicOnlyResolver.
-        Some(url::Host::Domain(_)) => return Ok(()),
-        None => {
-            return Err(raisin_error::Error::Validation(format!(
-                "request URL `{url}` has no host"
-            )))
-        }
+/// Why `url` must not be dialled because it names a non-public address
+/// LITERALLY, or `None` when it may (a hostname is judged later, at resolution
+/// time, by [`PublicOnlyResolver`]).
+///
+/// Shared by the first request and by EVERY redirect hop: reqwest follows a
+/// redirect to `http://169.254.169.254/` without resolving anything, so the
+/// resolver never sees it and this is the only check standing in the way.
+fn literal_address_refusal(url: &url::Url) -> Option<String> {
+    let addr = match url.host()? {
+        url::Host::Ipv4(a) => std::net::IpAddr::V4(a),
+        url::Host::Ipv6(a) => std::net::IpAddr::V6(a),
+        url::Host::Domain(_) => return None,
     };
-
     function_egress_policy()
         .validate_resolved(&addr.to_string(), &[addr])
-        .map_err(|e| {
-            raisin_error::Error::Validation(format!("URL not allowed by egress policy: {e}"))
-        })
+        .err()
+        .map(|e| e.to_string())
+}
+
+/// Redirects a function fetch may follow before it is refused.
+const MAX_FUNCTION_REDIRECTS: usize = 5;
+
+/// The redirect policy of [`guarded_http_client`]: every hop is held to the same
+/// egress rule as the first URL. A hop to a hostname is covered by the resolver;
+/// a hop to a LITERAL non-public IP is refused here (reqwest's default policy
+/// followed it, which let a public page that answers `302 →
+/// http://169.254.169.254/` hand an internal response to function code).
+fn guarded_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_FUNCTION_REDIRECTS {
+            return attempt.error(format!(
+                "too many redirects (more than {MAX_FUNCTION_REDIRECTS})"
+            ));
+        }
+        match literal_address_refusal(attempt.url()) {
+            Some(reason) => {
+                attempt.error(format!("redirect not allowed by egress policy: {reason}"))
+            }
+            None => attempt.follow(),
+        }
+    })
 }
 
 /// A DNS resolver that refuses to hand back a non-public address.
@@ -126,6 +162,7 @@ fn guarded_http_client() -> reqwest::Client {
         .get_or_init(|| {
             reqwest::Client::builder()
                 .dns_resolver(std::sync::Arc::new(PublicOnlyResolver))
+                .redirect(guarded_redirect_policy())
                 .build()
                 .unwrap_or_else(|e| {
                     // A client that cannot be built with the guard must not fall
@@ -383,5 +420,33 @@ mod egress_guard_tests {
             // No DNS in the sandbox is not a failure of the guard.
             Err(e) => eprintln!("skipped: resolution unavailable ({e})"),
         }
+    }
+
+    /// The check every REDIRECT hop goes through: a literal non-public address is
+    /// refused (reqwest does not resolve a literal IP, so the resolver never sees
+    /// it), a hostname is left to the resolver, and a public literal passes.
+    #[test]
+    fn redirect_hops_to_literal_private_addresses_are_refused() {
+        for bad in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:8088/api",
+            "http://10.0.0.5/",
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+        ] {
+            let url = url::Url::parse(bad).unwrap();
+            assert!(
+                super::literal_address_refusal(&url).is_some(),
+                "{bad} must be refused as a redirect target"
+            );
+        }
+        for ok in ["https://example.com/next", "https://93.184.216.34/"] {
+            let url = url::Url::parse(ok).unwrap();
+            assert!(
+                super::literal_address_refusal(&url).is_none(),
+                "{ok} must be allowed"
+            );
+        }
+        assert_eq!(super::MAX_FUNCTION_REDIRECTS, 5);
     }
 }
