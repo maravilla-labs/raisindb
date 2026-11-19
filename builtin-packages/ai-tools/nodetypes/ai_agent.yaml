@@ -388,4 +388,20 @@ properties:
         deny: []              # globs to refuse, applied after allow
         timeout_ms: 120000    # how long a call may wait (default 120000, max 600000)
 
+  - name: attachments
+    title: Attachments
+    type: Object
+    required: false
+    description: |
+      How the files a person attaches to a message reach the model. The chat
+      uploads them as assets; by default the model reads a text reference per
+      attachment (path, workspace, name, type, plus the asset's alt text,
+      description and an excerpt of its extracted text) and can use that asset
+      in the document being edited.
+
+      Shape:
+        vision: false   # true: image attachments are ALSO sent as image
+                        # content parts (up to 4 per turn, 5 MB each); needs a
+                        # model that accepts images
+
 allowed_children: []

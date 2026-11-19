@@ -377,40 +377,53 @@ test('the relay clamps the timeout to the contract maximum', async () => {
 
 // ── image attachments ──────────────────────────────────────────────────────
 
-function asset(createdBy, { size = 10, data = 'QUJD', mime = 'image/png' } = {}) {
-  return { created_by: createdBy, getResource: () => ({ size, mimeType: mime, getBinary: async () => data }) };
+function asset(createdBy, { size = 10, data = 'QUJD', mime = 'image/png', props = {} } = {}) {
+  return { created_by: createdBy, properties: props, getResource: () => ({ size, mimeType: mime, getBinary: async () => data }) };
 }
 const att = (name, mime = 'image/png') => ({ 'raisin:ref': `/uploads/${name}`, 'raisin:workspace': 'assets', mime_type: mime, name });
 
-test('the latest user message with images becomes content parts; files stay text', async () => {
-  globalThis.raisin = { nodes: { get: async (ws, p) => asset('alice') } };
+test('by default attachments are text asset references with what the asset carries, no pixels', async () => {
+  const props = { alt_text: 'A red door', description: 'Front door', __extracted_text: 'x'.repeat(3000) };
+  globalThis.raisin = { nodes: { get: async () => asset('alice', { props }) } };
   const out = await inlineAttachments([
-    { role: 'system', content: 's' },
     { role: 'user', content: 'old', __attachments: [att('old.png')] },
-    { role: 'assistant', content: 'ok' },
-    { role: 'user', content: 'look', __attachments: [att('a.png'), att('notes.pdf', 'application/pdf')] },
+    { role: 'user', content: 'use this', __attachments: [att('a.png')] },
   ], { owners: ['alice'] });
-  assert.equal(out[1].content, 'old', 'older attachments are not re-sent');
-  assert.equal(out[1].__attachments, undefined);
-  const last = out[3].content;
-  assert.equal(last[0].type, 'text');
-  assert.match(last[0].text, /look/);
-  assert.match(last[0].text, /Attached file: notes\.pdf/);
-  assert.deepEqual(last[1], { type: 'image', data: 'QUJD', media_type: 'image/png' });
+  assert.equal(out[0].content, 'old', 'older attachments are not repeated');
+  assert.equal(typeof out[1].content, 'string');
+  assert.match(out[1].content, /use this/);
+  assert.match(out[1].content, /a\.png \(image\/png\) — assets:\/uploads\/a\.png/);
+  assert.match(out[1].content, /alt text: A red door/);
+  assert.match(out[1].content, /description: Front door/);
+  const excerpt = out[1].content.match(/extracted text \(excerpt\): (x+)/)[1];
+  assert.equal(excerpt.length, 1500);
   assert.equal(out.some((m) => '__attachments' in m), false);
 });
 
-test('an image the sender did not create is not read', async () => {
-  globalThis.raisin = { nodes: { get: async () => asset('someone-else') } };
-  const out = await inlineAttachments([{ role: 'user', content: 'look', __attachments: [att('a.png')] }], { owners: ['alice'] });
-  assert.equal(out[0].content[1].type, 'text');
-  assert.match(out[0].content[1].text, /not readable for this conversation/);
+test('with vision the latest images are ALSO sent as image parts', async () => {
+  globalThis.raisin = { nodes: { get: async () => asset('alice') } };
+  const out = await inlineAttachments([
+    { role: 'user', content: 'look', __attachments: [att('a.png'), att('notes.pdf', 'application/pdf')] },
+  ], { owners: ['alice'], vision: true });
+  const c = out[0].content;
+  assert.match(c[0].text, /Attached asset: notes\.pdf/);
+  assert.match(c[0].text, /Attached asset: a\.png/);
+  assert.deepEqual(c[1], { type: 'image', data: 'QUJD', media_type: 'image/png' });
+  assert.equal(c.length, 2, 'a pdf is never an image part');
 });
 
-test('images over 5 MB and beyond four per turn are listed, not sent', async () => {
+test('an asset the sender did not create is listed bare: no details, no pixels', async () => {
+  globalThis.raisin = { nodes: { get: async () => asset('someone-else', { props: { alt_text: 'secret' } }) } };
+  const out = await inlineAttachments([{ role: 'user', content: 'look', __attachments: [att('a.png')] }], { owners: ['alice'], vision: true });
+  assert.equal(typeof out[0].content, 'string');
+  assert.match(out[0].content, /a\.png/);
+  assert.doesNotMatch(out[0].content, /secret/);
+});
+
+test('with vision, images over 5 MB and beyond four per turn are listed, not sent', async () => {
   globalThis.raisin = { nodes: { get: async (ws, p) => (p.includes('big') ? asset('alice', { size: 6 * 1024 * 1024 }) : asset('alice')) } };
   const many = [att('big.png'), ...Array.from({ length: MAX_IMAGES_PER_TURN + 1 }, (_, i) => att(`i${i}.png`))];
-  const out = await inlineAttachments([{ role: 'user', content: 'x', __attachments: many }], { owners: ['alice'] });
+  const out = await inlineAttachments([{ role: 'user', content: 'x', __attachments: many }], { owners: ['alice'], vision: true });
   const parts = out[0].content;
   assert.equal(parts.filter((p) => p.type === 'image').length, MAX_IMAGES_PER_TURN - 1);
   assert.ok(parts.some((p) => p.type === 'text' && /too large/.test(p.text)));

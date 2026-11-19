@@ -162,7 +162,7 @@ export async function handler(input = {}) {
     const context = await buildContext(ctx, agentProps, modelId, request, systemPrompt, excluded);
     // The latest user message's images become content parts (the marker the
     // history entries carry is removed either way).
-    context.messages = await inlineAttachments(context.messages, { owners: attachmentOwners(rec, ctx) });
+    context.messages = await inlineAttachments(context.messages, { owners: attachmentOwners(rec, ctx), vision: !!(agentProps.attachments && agentProps.attachments.vision === true) });
 
     // 4. Provider request.
     const t0 = log.time();

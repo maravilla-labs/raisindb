@@ -1,5 +1,5 @@
 /**
- * Image attachments of a user message → content parts on that turn.
+ * Attachments of a user message → asset references (and, with vision, image parts) on that turn.
  *
  * A message may carry `metadata.attachments` (`{raisin:ref, raisin:workspace,
  * mime_type, name}`, see client-tools.js). On the model request, the LATEST
@@ -38,16 +38,29 @@ function label(a) {
   return `${a.name || a['raisin:ref'].split('/').pop()} (${a.mime_type || 'unknown type'}) — ${a['raisin:workspace']}:${a['raisin:ref']}`;
 }
 
-/** One image attachment → an image part, or a text note saying why not. */
-async function imagePart(a, owners) {
+export const MAX_EXCERPT_CHARS = 1500;
+
+/** What the asset already carries (pipeline output), as short text; '' when nothing. */
+function assetFacts(node) {
+  const p = (node && node.properties) || {};
+  const out = [];
+  const add = (k, v) => {
+    if (typeof v === 'string' && v.trim()) out.push(`  ${k}: ${v.trim().slice(0, 500)}`);
+  };
+  add('title', p.title);
+  add('alt text', p.alt_text);
+  add('description', p.description || p.caption);
+  if (Array.isArray(p.keywords) && p.keywords.length) add('keywords', p.keywords.join(', '));
+  const text = typeof p.__extracted_text === 'string' ? p.__extracted_text.trim() : '';
+  if (text) out.push(`  extracted text (excerpt): ${text.slice(0, MAX_EXCERPT_CHARS)}${text.length > MAX_EXCERPT_CHARS ? ' …' : ''}`);
+  return out.join('\n');
+}
+
+/** An image attachment of a vision agent → an image part, or a note saying why not. */
+async function imagePart(a, node) {
   try {
-    const node = await raisin.nodes.get(a['raisin:workspace'], a['raisin:ref']);
-    if (!node) return { type: 'text', text: `[Attached image not found: ${label(a)}]` };
-    if (!ownedBy(node, owners)) {
-      return { type: 'text', text: `[Attached image not readable for this conversation: ${label(a)}]` };
-    }
     const resource = typeof node.getResource === 'function' ? node.getResource('file') : null;
-    if (!resource) return { type: 'text', text: `[Attached image has no file: ${label(a)}]` };
+    if (!resource) return { type: 'text', text: `[Attached image has no file to show: ${label(a)}]` };
     const size = Number(resource.size);
     if (Number.isFinite(size) && size > MAX_IMAGE_BYTES) {
       return { type: 'text', text: `[Attached image too large to show (${size} bytes, limit ${MAX_IMAGE_BYTES}): ${label(a)}]` };
@@ -65,12 +78,22 @@ async function imagePart(a, owners) {
   }
 }
 
+async function readNode(a) {
+  try {
+    return await raisin.nodes.get(a['raisin:workspace'], a['raisin:ref']);
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
  * `messages` (history entries, some carrying `__attachments`) → provider
  * messages. The marker is always removed; the latest user message that has
- * attachments gets its content parts.
+ * attachments gets a text reference per attachment (path, workspace, name,
+ * type, alt text / description / extracted-text excerpt) and, only with
+ * `vision` (agent `attachments.vision: true`), image parts as well.
  */
-export async function inlineAttachments(messages, { owners = [] } = {}) {
+export async function inlineAttachments(messages, { owners = [], vision = false } = {}) {
   const list = Array.isArray(messages) ? messages : [];
   let last = -1;
   for (let i = list.length - 1; i >= 0; i--) {
@@ -87,20 +110,27 @@ export async function inlineAttachments(messages, { owners = [] } = {}) {
       continue;
     }
     const parts = [];
-    const notes = [];
+    const lines = [];
     let images = 0;
     for (const a of __attachments) {
-      if (/^image\//i.test(a.mime_type) && images < MAX_IMAGES_PER_TURN) {
-        images += 1;
-        parts.push(await imagePart(a, owners));
-      } else if (/^image\//i.test(a.mime_type)) {
-        notes.push(`[Attached image not shown (more than ${MAX_IMAGES_PER_TURN} this turn): ${label(a)}]`);
-      } else {
-        notes.push(`[Attached file: ${label(a)}]`);
+      // The asset is the attachment: a reference the agent can use in the open
+      // document, with what the pipeline already knows about it. The details
+      // (and the pixels) are read only for assets the sender created.
+      const node = await readNode(a);
+      const mine = !!node && ownedBy(node, owners);
+      const facts = mine ? assetFacts(node) : '';
+      lines.push(`[Attached asset: ${label(a)}${facts ? `\n${facts}` : ''}]`);
+      if (vision && mine && /^image\//i.test(a.mime_type)) {
+        if (images < MAX_IMAGES_PER_TURN) {
+          images += 1;
+          parts.push(await imagePart(a, node));
+        } else {
+          lines.push(`[Image not shown (more than ${MAX_IMAGES_PER_TURN} this turn): ${a.name}]`);
+        }
       }
     }
-    const text = [typeof entry.content === 'string' ? entry.content : '', ...notes].filter(Boolean).join('\n');
-    out.push({ ...entry, content: [{ type: 'text', text: text || '(attached)' }, ...parts] });
+    const text = [typeof entry.content === 'string' ? entry.content : '', ...lines].filter(Boolean).join('\n');
+    out.push({ ...entry, content: parts.length ? [{ type: 'text', text: text || '(attached)' }, ...parts] : (text || '(attached)') });
   }
   return out;
 }
