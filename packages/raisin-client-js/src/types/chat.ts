@@ -108,6 +108,11 @@ export interface ChatMessage {
   id?: string;
   /** Node path in the database */
   path?: string;
+  /**
+   * The message's `metadata` (e.g. `attachments`: reference envelopes of the files it
+   * carries). Inline image bytes are never included.
+   */
+  metadata?: Record<string, unknown>;
   /** Finish reason from AI (e.g., 'stop', 'tool_calls') */
   finishReason?: string;
   /** Internal orchestration dispatch phase */

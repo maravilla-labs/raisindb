@@ -308,6 +308,10 @@ export class ConversationStore {
       role: 'user',
       content,
       timestamp: new Date().toISOString(),
+      // The attachments show at once (as thumbnails), before the stored message comes back.
+      ...(sendOptions?.attachments?.length
+        ? { metadata: { attachments: sendOptions.attachments.map(({ inline: _bytes, ...a }: any) => a) } }
+        : {}),
     };
     this._messages.push(userMessage);
 
@@ -866,6 +870,7 @@ export class ConversationStore {
           if (f.path) e.path = f.path;
           if (f.messageType) e.messageType = f.messageType;
           if (f.data) e.data = f.data;
+          if (f.metadata) e.metadata = f.metadata;
           if (f.children) e.children = f.children;
           if (f.finishReason) e.finishReason = f.finishReason;
         }
@@ -886,6 +891,7 @@ export class ConversationStore {
           if (f.path) e.path = f.path;
           if (f.messageType) e.messageType = f.messageType;
           if (f.data) e.data = f.data;
+          if (f.metadata) e.metadata = f.metadata;
           if (f.children) e.children = f.children;
         }
         await this.rebuildToolCallState();
@@ -902,6 +908,7 @@ export class ConversationStore {
           if (f.path) e.path = f.path;
           if (f.messageType) e.messageType = f.messageType;
           if (f.data) e.data = f.data;
+          if (f.metadata) e.metadata = f.metadata;
           if (f.children) e.children = f.children;
         }
         await this.rebuildToolCallState();

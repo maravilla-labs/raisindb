@@ -1029,6 +1029,11 @@ export class ConversationManager {
       if (props.data && typeof props.data === 'object' && !Array.isArray(props.data)) {
         message.data = props.data as Record<string, unknown>;
       }
+      if (props.metadata && typeof props.metadata === 'object' && !Array.isArray(props.metadata)) {
+        // Bytes sent for a vision model are not part of the message as shown.
+        const { attachment_images: _bytes, ...meta } = props.metadata as Record<string, unknown>;
+        message.metadata = meta;
+      }
 
       if (Array.isArray(props.tool_calls) && props.tool_calls.length > 0) {
         message.toolCalls = props.tool_calls.map((tc: any) => ({
