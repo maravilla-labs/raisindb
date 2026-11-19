@@ -311,12 +311,37 @@ impl GroqProvider {
         .await
     }
 
+    /// The Chat Completions array form of a user message, only when it carries
+    /// an image. Text-only messages keep the bare-string `content` they always
+    /// had. An inline image goes as a `data:` URL, a remote one as its URL —
+    /// both are legal `image_url.url` values.
+    fn user_parts(msg: &Message) -> Option<Vec<GroqContentPart>> {
+        let images = msg.image_parts();
+        if images.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::with_capacity(images.len() + 1);
+        let text = msg.effective_text();
+        if !text.is_empty() {
+            parts.push(GroqContentPart::Text { text });
+        }
+        for image in images {
+            if let Some(url) = image.as_url() {
+                parts.push(GroqContentPart::ImageUrl {
+                    image_url: GroqImageUrl { url },
+                });
+            }
+        }
+        Some(parts)
+    }
+
     /// Converts our Message type to Groq/OpenAI format
     fn convert_message(msg: &Message) -> GroqMessage {
         match msg.role {
             Role::User => GroqMessage {
                 role: "user".to_string(),
                 content: Some(msg.content.clone()),
+                parts: Self::user_parts(msg),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -328,6 +353,7 @@ impl GroqProvider {
                 } else {
                     Some(msg.content.clone())
                 },
+                parts: None,
                 tool_calls: msg.tool_calls.as_ref().map(|calls| {
                     calls
                         .iter()
@@ -347,6 +373,7 @@ impl GroqProvider {
             Role::Tool => GroqMessage {
                 role: "tool".to_string(),
                 content: Some(msg.content.clone()),
+                parts: None,
                 tool_calls: None,
                 tool_call_id: msg.tool_call_id.clone(),
                 name: msg.name.clone(),
@@ -354,6 +381,7 @@ impl GroqProvider {
             Role::System => GroqMessage {
                 role: "system".to_string(),
                 content: Some(msg.content.clone()),
+                parts: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,

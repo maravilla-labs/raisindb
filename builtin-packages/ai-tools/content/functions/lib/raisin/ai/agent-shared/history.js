@@ -8,6 +8,7 @@
 
 import { log } from './logger.js';
 import { attachmentsOfMessage } from './message-images.js';
+import { rawInlineOf } from './inline-images.js';
 
 const MAX_HISTORY_MESSAGES = 50;
 
@@ -193,7 +194,14 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
     // on the latest such message (message-images.js) and removes this marker.
     if (props.role === 'user' && options?.withAttachments === true) {
       const attached = attachmentsOfMessage(props);
-      if (attached.length) entry.__attachments = attached;
+      if (attached.length) {
+        entry.__attachments = attached;
+        // Bytes the person's client sent inline; the model turn uses them for
+        // the LATEST such message only and removes this marker.
+        const meta = props.metadata && typeof props.metadata === 'object' ? props.metadata : null;
+        const inline = meta ? rawInlineOf(meta.attachments) : [];
+        if (inline.length) entry.__inline = inline;
+      }
     }
     const toolResultEntries = [];
 

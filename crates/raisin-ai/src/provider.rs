@@ -311,7 +311,8 @@ pub fn reject_unsupported_images(provider: &str, messages: &[crate::types::Messa
     Err(ProviderError::UnsupportedOperation(format!(
         "the `{provider}` provider cannot send images: {count} image content \
          part(s) were supplied and would have been silently dropped. Providers \
-         that carry images today: ollama, openai, anthropic."
+         that carry images today: ollama, openai, anthropic, groq (and the custom \
+         OpenAI-compatible provider, which is the same client)."
     )))
 }
 

@@ -396,12 +396,18 @@ properties:
       How the files a person attaches to a message reach the model. The chat
       uploads them as assets; the model reads a text reference per attachment
       (name, type, workspace and path) and can use that asset in the document
-      being edited. Nothing about the asset is read on the model's behalf:
-      the run has no permission-checked read of another identity's assets.
+      being edited. The engine reads no asset on the model's behalf: the run
+      has no permission-checked read of another identity's assets.
 
       Shape:
-        vision: false   # reserved: image content parts need a read that is
-                        # checked against the sender's own permissions; until
-                        # then it has no effect
+        vision: false   # true lets the model SEE image attachments. The
+                        # person's own client reads the picture (as that
+                        # person) and sends it inline with the message
+                        # (`attachments[].inline = {media_type, data}`, base64);
+                        # the engine forwards it for the latest message only,
+                        # at most 4 images of about 1.5 MB each, and removes
+                        # the bytes when the run ends. Needs a vision-capable
+                        # model; a model that refuses images is asked again
+                        # without them.
 
 allowed_children: []

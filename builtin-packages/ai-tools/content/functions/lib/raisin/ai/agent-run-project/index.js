@@ -19,6 +19,7 @@ import { log } from '../agent-shared/logger.js';
 import { emitConversationEvent } from '../agent-shared/streaming.js';
 import { resolveAgentOutboxContext, sendAgentOutboxMessage } from '../agent-shared/outbox.js';
 import { readAssistantContent, updateAssistantContent, TERMINAL_FALLBACK_TEXT } from '../agent-shared/utils.js';
+import { stripInlineBytes } from '../agent-shared/inline-strip.js';
 import { loadRunChat, findPreviousTurn } from '../agent-shared/run-transcript.js';
 import { upsertPlanCard, syncPlanCards } from '../agent-shared/run-plan-card.js';
 import { buildEnvelope, errorEnvelope, locator, runContextOf } from '../agent-shared/tool-envelope.js';
@@ -47,6 +48,8 @@ async function finalize(ctx, args, outboxCtx) {
   const last = await findPreviousTurn(ctx.workspace, ctx.chatPath, ctx.runId, null);
   const content = finalContent(args.last_text, finish);
   const writes = [];
+  // The run is over: the image bytes its message carried are not kept.
+  await stripInlineBytes(ctx.workspace, ctx.chatPath, last && last.created_at);
   if (last) {
     const node = await raisin.nodes.get(ctx.workspace, last.path);
     if (node && readAssistantContent(node.properties || {}) !== content) {

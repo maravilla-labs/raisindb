@@ -58,17 +58,61 @@ pub(super) struct GroqToolChoiceFunction {
 }
 
 /// Groq message format (OpenAI-compatible)
-#[derive(Debug, Serialize, Deserialize)]
+///
+/// `content` is the plain-text form every response uses. A REQUEST message that
+/// carries images sets `parts` as well, and then serializes `content` as the
+/// Chat Completions array form (`text` / `image_url` parts); with no `parts` the
+/// wire shape is byte-identical to what it always was.
+#[derive(Debug, Deserialize)]
 pub(super) struct GroqMessage {
     pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_deserializing)]
+    pub parts: Option<Vec<GroqContentPart>>,
+    #[serde(default)]
     pub tool_calls: Option<Vec<GroqToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub name: Option<String>,
+}
+
+/// One part of a multimodal Chat Completions message.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(super) enum GroqContentPart {
+    Text { text: String },
+    ImageUrl { image_url: GroqImageUrl },
+}
+
+/// `{"url": "data:<media>;base64,<data>"}` or a remote URL.
+#[derive(Debug, Serialize, PartialEq)]
+pub(super) struct GroqImageUrl {
+    pub url: String,
+}
+
+impl Serialize for GroqMessage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("role", &self.role)?;
+        if let Some(parts) = &self.parts {
+            map.serialize_entry("content", parts)?;
+        } else if let Some(content) = &self.content {
+            map.serialize_entry("content", content)?;
+        }
+        if let Some(v) = &self.tool_calls {
+            map.serialize_entry("tool_calls", v)?;
+        }
+        if let Some(v) = &self.tool_call_id {
+            map.serialize_entry("tool_call_id", v)?;
+        }
+        if let Some(v) = &self.name {
+            map.serialize_entry("name", v)?;
+        }
+        map.end()
+    }
 }
 
 /// Tool call in Groq format

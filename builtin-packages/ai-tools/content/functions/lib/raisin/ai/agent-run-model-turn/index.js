@@ -37,6 +37,7 @@ import {
   loadRunChat, findPreviousTurn, writeToolResults, writeAssistantTurn, syncSteers, queuedSteerPaths, compactionName,
 } from '../agent-shared/run-transcript.js';
 import { inlineAttachments } from '../agent-shared/message-images.js';
+import { hasImageParts, withoutImageParts } from '../agent-shared/inline-images.js';
 import { buildSystemPrompt, applyBudget, contextBudget, estimateTokens, restateInstructions } from './context.js';
 import { runModelTurn } from './provider.js';
 
@@ -153,13 +154,22 @@ export async function handler(input = {}) {
     const systemPrompt = await buildSystemPrompt({ agentProps, request, memoryOwner, skills, definitions });
     const context = await buildContext(ctx, agentProps, modelId, request, systemPrompt, excluded);
     // The latest user message's attachments become asset references (the
-    // marker the history entries carry is removed either way); nothing is read.
-    context.messages = await inlineAttachments(context.messages);
+    // markers the history entries carry are removed either way); nothing is
+    // read. With `attachments.vision` on, the image bytes the person's own
+    // client sent inline also become image parts, for this message only.
+    const imageReport = {};
+    context.messages = await inlineAttachments(context.messages, {
+      vision: !!(agentProps.attachments && agentProps.attachments.vision === true),
+      report: imageReport,
+    });
+    if (imageReport.dropped && imageReport.dropped.length) {
+      log.warn('model-turn', 'Dropped inline images', { dropped: imageReport.dropped });
+    }
 
     // 4. Provider request.
     const t0 = log.time();
     const maxTokens = Number(agentProps.max_output_tokens) > 0 ? Number(agentProps.max_output_tokens) : undefined;
-    const complete = (messages, { tools, stream }) => raisin.ai.completion({
+    const request1 = (messages, { tools, stream }) => raisin.ai.completion({
       messages,
       model: modelId,
       temperature: agentProps.temperature,
@@ -169,6 +179,18 @@ export async function handler(input = {}) {
       conversation_path: ctx.chatPath,
       conversation_channel: ctx.streamChannel || undefined,
     });
+    // A model that cannot read images must not end the turn: the same request
+    // goes out once more with the images replaced by a note.
+    const complete = async (messages, opts) => {
+      try {
+        return await request1(messages, opts);
+      } catch (err) {
+        if (!hasImageParts(messages)) throw err;
+        log.warn('model-turn', 'Provider refused image parts; retrying without them', { error: String((err && err.message) || err) });
+        imageReport.refused = true;
+        return request1(withoutImageParts(messages), opts);
+      }
+    };
     const turn = await runModelTurn({
       complete,
       messages: restateInstructions(context.messages, request),
@@ -185,7 +207,11 @@ export async function handler(input = {}) {
       finish_reason: turn.finish_reason,
       usage: turn.usage,
       model: turn.model,
-      context: { tokens: context.tokens, dropped: context.dropped },
+      context: {
+        tokens: context.tokens,
+        dropped: context.dropped,
+        ...(imageReport.sent || imageReport.dropped ? { images: { sent: imageReport.refused ? 0 : (imageReport.sent || 0), dropped: imageReport.dropped || [], refused: !!imageReport.refused } } : {}),
+      },
       ...(turn.retries.length ? { retries: turn.retries } : {}),
     };
 

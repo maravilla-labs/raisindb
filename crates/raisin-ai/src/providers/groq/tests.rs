@@ -917,3 +917,64 @@ mod gateway_model_metadata {
         );
     }
 }
+
+// ── images ────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_text_only_user_message_keeps_the_string_content_form() {
+    let msg = Message::user("Hello");
+    let json = serde_json::to_value(GroqProvider::convert_message(&msg)).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"role": "user", "content": "Hello"})
+    );
+}
+
+#[test]
+fn a_user_message_with_an_inline_image_serializes_as_chat_completions_parts() {
+    use crate::types::ContentPart;
+    let msg = Message::user_multimodal(vec![
+        ContentPart::text("what is this?"),
+        ContentPart::image("QUJD", "image/jpeg"),
+    ]);
+    let json = serde_json::to_value(GroqProvider::convert_message(&msg)).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,QUJD"}}
+            ]
+        })
+    );
+}
+
+#[test]
+fn a_remote_image_url_is_passed_through() {
+    use crate::types::ContentPart;
+    let msg = Message::user_multimodal(vec![ContentPart::image_url("https://x.test/a.png")]);
+    let json = serde_json::to_value(GroqProvider::convert_message(&msg)).unwrap();
+    assert_eq!(
+        json["content"],
+        serde_json::json!([{"type": "image_url", "image_url": {"url": "https://x.test/a.png"}}])
+    );
+}
+
+#[test]
+fn a_js_message_with_an_image_part_reaches_the_wire_as_a_data_url() {
+    // The exact shape agent-run-model-turn sends through `raisin.ai.completion`.
+    let msg: Message = serde_json::from_value(serde_json::json!({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image", "data": "QUJD", "media_type": "image/png"}
+        ]
+    }))
+    .unwrap();
+    let json = serde_json::to_value(GroqProvider::convert_message(&msg)).unwrap();
+    assert_eq!(
+        json["content"][1]["image_url"]["url"],
+        "data:image/png;base64,QUJD"
+    );
+}

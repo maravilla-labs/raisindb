@@ -42,6 +42,13 @@ export interface Attachment {
   'raisin:workspace': string;
   mime_type?: string;
   name?: string;
+  /**
+   * The picture itself, for a vision-capable agent: base64 (no `data:` prefix),
+   * already shrunk by the caller (long side <= 1568 px, about 1.5 MB at most,
+   * at most 4 per message). The reference above stays either way. The engine
+   * forwards it for the latest message only and removes it when the run ends.
+   */
+  inline?: { media_type: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif'; data: string };
 }
 
 /** Conversation event: the agent asks the sending page to run a tool. */

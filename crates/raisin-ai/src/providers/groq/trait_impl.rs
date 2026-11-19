@@ -45,10 +45,9 @@ fn as_json_object_request(request: &CompletionRequest) -> CompletionRequest {
 #[async_trait]
 impl AIProviderTrait for GroqProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
-        // Fail LOUDLY rather than dropping the image. See
-        // `provider::reject_unsupported_images` for why silence is the one
-        // unacceptable answer here.
-        crate::provider::reject_unsupported_images("groq", &request.messages)?;
+        // Images are carried (`convert_message` writes them as `image_url`
+        // parts). A model that cannot read them answers with its own error,
+        // which is the loud failure `reject_unsupported_images` exists for.
         Self::validate_chat_model(&request.model)?;
 
         let groq_request = Self::build_chat_request(&request, false);
