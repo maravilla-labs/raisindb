@@ -17,7 +17,7 @@ import {
 } from '../content/functions/lib/raisin/ai/agent-shared/client-tools.js';
 import { offerDefinitions } from '../content/functions/lib/raisin/ai/agent-shared/run-tools.js';
 import { renderFacts } from '../content/functions/lib/raisin/ai/agent-run-model-turn/context.js';
-import { inlineAttachments, attachmentsOfMessage, MAX_IMAGES_PER_TURN } from '../content/functions/lib/raisin/ai/agent-shared/message-images.js';
+import { inlineAttachments, attachmentsOfMessage } from '../content/functions/lib/raisin/ai/agent-shared/message-images.js';
 
 const CHAT = '/agents/a/inbox/chats/c';
 const OPS = new Set(['call_tool', 'request_model_turn', 'request_approval', 'ask_user']);
@@ -321,24 +321,31 @@ test('the page context is rendered into the turn as data', () => {
 
 // ── the relay function ─────────────────────────────────────────────────────
 
-function stubHost({ emitted, runChat = CHAT } = {}) {
+const RECORDED = { call_id: 'c1', name: 'insert_blocks', args: { a: 1 }, client_id: 'tab-1', timeout_ms: 90000, resume_key: 'client:c1' };
+
+/** A host whose run record has `op` as the active operation (a page call by default). */
+function stubHost({ emitted, op, noRuntime = false } = {}) {
+  const active = op === undefined
+    ? { op_id: 'run-1/op/5', for_call_id: 'c1', input: { tool: CLIENT_TOOL_RELAY, args: { client_call: RECORDED } } }
+    : op;
   globalThis.raisin = {
     events: { emit: async (type, payload) => { emitted.push({ type, payload }); } },
-    agentRuns: { get: async () => ({ run: { subject: { workspace: 'ai', path: runChat } } }) },
+    ...(noRuntime ? {} : { agentRuns: { get: async () => ({ run: { subject: { workspace: 'ai', path: CHAT }, state: { activity: { op: active } } } }) } }),
     nodes: { get: async (ws, path) => ({ path, properties: { stream_channel: 'chat:c1' } }) },
   };
 }
 
-const relayInput = (call, over = {}) => ({
-  client_call: call,
-  __raisin_context: { run_id: 'run-1', operation_id: 'run-1/op/5', workspace: 'ai', chat_path: CHAT, ...over },
+/** What core invokes the relay with; everything but the call id is the caller's claim. */
+const relayInput = (claim = {}, ctx = {}) => ({
+  client_call: { call_id: 'c1', ...claim },
+  __raisin_context: { run_id: 'run-1', operation_id: 'run-1/op/5', workspace: 'ai', chat_path: CHAT, ...ctx },
 });
 
-test('the relay emits the contract event and parks the operation under client:<call_id>', async () => {
+test('the relay emits the contract event from the RECORDED call and parks under client:<call_id>', async () => {
   const emitted = [];
   stubHost({ emitted });
   const before = Date.now();
-  const env = await relay(relayInput({ call_id: 'c1', name: 'insert_blocks', args: { a: 1 }, client_id: 'tab-1', timeout_ms: 90000 }));
+  const env = await relay(relayInput());
   assert.equal(env.status, 'waiting');
   assert.equal(env.resume_key, 'client:c1');
   assert.equal(env.expires_in_ms, 90000);
@@ -357,77 +364,84 @@ test('the relay emits the contract event and parks the operation under client:<c
   assert.equal(payload.conversationPath, CHAT);
 });
 
-test('the relay refuses a run that is not about the conversation, and a call outside a run', async () => {
+test('name, args, client_id, timeout and conversation come from the record, never from the input', async () => {
   const emitted = [];
-  stubHost({ emitted, runChat: '/agents/other/inbox/chats/x' });
-  const env = await relay(relayInput({ call_id: 'c1', name: 'x' }));
+  stubHost({ emitted });
+  const env = await relay(relayInput(
+    { name: 'delete_everything', args: { evil: true }, client_id: 'victim-tab', timeout_ms: 600000 },
+    { chat_path: '/agents/victim/inbox/chats/x', workspace: 'other' },
+  ));
+  assert.equal(env.status, 'waiting');
+  assert.equal(env.expires_in_ms, 90000);
+  const { payload } = emitted[0];
+  assert.equal(payload.name, 'insert_blocks');
+  assert.deepEqual(payload.args, { a: 1 });
+  assert.equal(payload.client_id, 'tab-1');
+  assert.equal(payload.conversationPath, CHAT);
+});
+
+test('the relay fails CLOSED without the run runtime', async () => {
+  const emitted = [];
+  stubHost({ emitted, noRuntime: true });
+  const env = await relay(relayInput());
   assert.notEqual(env.status, 'waiting');
   assert.equal(emitted.length, 0);
+});
+
+test('the relay refuses anything but the run\'s active page-tool operation for that call', async () => {
+  for (const [why, op, claim, ctx] of [
+    ['no active operation', null, {}, {}],
+    ['another operation is active', { op_id: 'run-1/op/9', for_call_id: 'c1', input: { tool: CLIENT_TOOL_RELAY, args: { client_call: RECORDED } } }, {}, {}],
+    ['the active operation is another tool', { op_id: 'run-1/op/5', for_call_id: 'c1', input: { tool: '/lib/raisin/ai/weather', args: {} } }, {}, {}],
+    ['the call id is not the recorded one', undefined, { call_id: 'c2' }, {}],
+    ['the call answers another model call', { op_id: 'run-1/op/5', for_call_id: 'c9', input: { tool: CLIENT_TOOL_RELAY, args: { client_call: RECORDED } } }, {}, {}],
+    ['no run context at all', undefined, {}, { run_id: undefined }],
+  ]) {
+    const emitted = [];
+    stubHost({ emitted, op });
+    const env = await relay(relayInput(claim, ctx));
+    assert.notEqual(env.status, 'waiting', why);
+    assert.equal(emitted.length, 0, why);
+  }
+  const emitted = [];
   stubHost({ emitted });
   const direct = await relay({ client_call: { call_id: 'c1', name: 'x' } });
   assert.notEqual(direct.status, 'waiting');
   assert.equal(emitted.length, 0);
 });
 
-test('the relay clamps the timeout to the contract maximum', async () => {
-  stubHost({ emitted: [] });
-  const env = await relay(relayInput({ call_id: 'c1', name: 'x', timeout_ms: 99999999 }));
+test('the recorded timeout is clamped to the contract maximum', async () => {
+  const emitted = [];
+  stubHost({ emitted, op: { op_id: 'run-1/op/5', for_call_id: 'c1', input: { tool: CLIENT_TOOL_RELAY, args: { client_call: { ...RECORDED, timeout_ms: 99999999 } } } } });
+  const env = await relay(relayInput());
   assert.equal(env.expires_in_ms, 600000);
 });
 
 // ── image attachments ──────────────────────────────────────────────────────
 
-function asset(createdBy, { size = 10, data = 'QUJD', mime = 'image/png', props = {} } = {}) {
-  return { created_by: createdBy, properties: props, getResource: () => ({ size, mimeType: mime, getBinary: async () => data }) };
-}
-const att = (name, mime = 'image/png') => ({ 'raisin:ref': `/uploads/${name}`, 'raisin:workspace': 'assets', mime_type: mime, name });
+const att = (name, mime = 'image/png', ws = 'assets') => ({ 'raisin:ref': `/uploads/${name}`, 'raisin:workspace': ws, mime_type: mime, name });
 
-test('by default attachments are text asset references with what the asset carries, no pixels', async () => {
-  const props = { alt_text: 'A red door', description: 'Front door', __extracted_text: 'x'.repeat(3000) };
-  globalThis.raisin = { nodes: { get: async () => asset('alice', { props }) } };
+test('attachments are bare text asset references on the latest message; no node is ever read', async () => {
+  let reads = 0;
+  globalThis.raisin = { nodes: { get: async () => { reads += 1; return { properties: { alt_text: 'secret', __extracted_text: 'secret' } }; } } };
   const out = await inlineAttachments([
     { role: 'user', content: 'old', __attachments: [att('old.png')] },
-    { role: 'user', content: 'use this', __attachments: [att('a.png')] },
-  ], { owners: ['alice'] });
+    { role: 'user', content: 'use this', __attachments: [att('a.png'), att('x.pdf', 'application/pdf')] },
+  ]);
   assert.equal(out[0].content, 'old', 'older attachments are not repeated');
-  assert.equal(typeof out[1].content, 'string');
+  assert.equal(typeof out[1].content, 'string', 'never image parts');
   assert.match(out[1].content, /use this/);
   assert.match(out[1].content, /a\.png \(image\/png\) — assets:\/uploads\/a\.png/);
-  assert.match(out[1].content, /alt text: A red door/);
-  assert.match(out[1].content, /description: Front door/);
-  const excerpt = out[1].content.match(/extracted text \(excerpt\): (x+)/)[1];
-  assert.equal(excerpt.length, 1500);
+  assert.match(out[1].content, /x\.pdf \(application\/pdf\)/);
+  assert.doesNotMatch(out[1].content, /secret/);
+  assert.equal(reads, 0);
   assert.equal(out.some((m) => '__attachments' in m), false);
 });
 
-test('with vision the latest images are ALSO sent as image parts', async () => {
-  globalThis.raisin = { nodes: { get: async () => asset('alice') } };
-  const out = await inlineAttachments([
-    { role: 'user', content: 'look', __attachments: [att('a.png'), att('notes.pdf', 'application/pdf')] },
-  ], { owners: ['alice'], vision: true });
-  const c = out[0].content;
-  assert.match(c[0].text, /Attached asset: notes\.pdf/);
-  assert.match(c[0].text, /Attached asset: a\.png/);
-  assert.deepEqual(c[1], { type: 'image', data: 'QUJD', media_type: 'image/png' });
-  assert.equal(c.length, 2, 'a pdf is never an image part');
-});
-
-test('an asset the sender did not create is listed bare: no details, no pixels', async () => {
-  globalThis.raisin = { nodes: { get: async () => asset('someone-else', { props: { alt_text: 'secret' } }) } };
-  const out = await inlineAttachments([{ role: 'user', content: 'look', __attachments: [att('a.png')] }], { owners: ['alice'], vision: true });
-  assert.equal(typeof out[0].content, 'string');
-  assert.match(out[0].content, /a\.png/);
-  assert.doesNotMatch(out[0].content, /secret/);
-});
-
-test('with vision, images over 5 MB and beyond four per turn are listed, not sent', async () => {
-  globalThis.raisin = { nodes: { get: async (ws, p) => (p.includes('big') ? asset('alice', { size: 6 * 1024 * 1024 }) : asset('alice')) } };
-  const many = [att('big.png'), ...Array.from({ length: MAX_IMAGES_PER_TURN + 1 }, (_, i) => att(`i${i}.png`))];
-  const out = await inlineAttachments([{ role: 'user', content: 'x', __attachments: many }], { owners: ['alice'], vision: true });
-  const parts = out[0].content;
-  assert.equal(parts.filter((p) => p.type === 'image').length, MAX_IMAGES_PER_TURN - 1);
-  assert.ok(parts.some((p) => p.type === 'text' && /too large/.test(p.text)));
-  assert.match(parts[0].text, /more than 4 this turn/);
+test('only the assets workspace is referenced by path', async () => {
+  const out = await inlineAttachments([{ role: 'user', content: 'x', __attachments: [att('p.png', 'image/png', 'ai')] }]);
+  assert.doesNotMatch(out[0].content, /\/uploads\/p\.png/);
+  assert.match(out[0].content, /p\.png/);
 });
 
 test('message attachments are read from metadata', () => {

@@ -4,8 +4,8 @@
  * The run's reducer dispatches a model's call of `page.<name>` here, with the
  * call described in `client_call` (never mixed into the model's own args).
  * This function:
- *   1. verifies the run exists and is about the conversation named in the
- *      run context (it runs as system, so it must not trust a caller);
+ *   1. proves the call against the run's RECORD (see provenCall) and takes the
+ *      call's name, args, client_id and timeout from it, never from its input;
  *   2. emits the `client_tool_call` conversation event on the conversation's
  *      stream channel (docs/webmcp-agent-contract.md §4) — the page's SDK
  *      executes the tool when `client_id` is its own;
@@ -25,30 +25,53 @@ import { log } from '../agent-shared/logger.js';
 import { emitConversationEvent } from '../agent-shared/streaming.js';
 import { loadRunChat } from '../agent-shared/run-transcript.js';
 import { buildEnvelope, errorEnvelope, runContextOf } from '../agent-shared/tool-envelope.js';
-import { CLIENT_RESUME_PREFIX, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS } from '../agent-shared/client-tools.js';
+import { CLIENT_TOOL_RELAY, CLIENT_RESUME_PREFIX, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS } from '../agent-shared/client-tools.js';
 
-async function verifyRun(runId, rc) {
-  if (!raisin.agentRuns || typeof raisin.agentRuns.get !== 'function') return;
-  const view = await raisin.agentRuns.get({ run_id: runId });
-  const subject = view && view.run && view.run.subject;
-  if (!subject || subject.path !== rc.chat_path || (subject.workspace || 'ai') !== (rc.workspace || 'ai')) {
-    throw new Error('client-tool-relay: the run is not about this conversation');
+/**
+ * The relay runs as SYSTEM and its input is whatever the caller sent, so it
+ * proves the call against the RUN RECORD before it emits anything, and takes
+ * what it emits from that record, never from its input:
+ *  - the run must exist (no runtime = refuse: it fails CLOSED);
+ *  - the invoking operation must be the run's ACTIVE operation, a tool call
+ *    to this very function, answering the call_id the input names;
+ *  - name, args, client_id and the timeout come from the arguments the
+ *    reducer recorded on that operation (`client_call`); the conversation
+ *    (workspace, path) from the run's subject.
+ * Anyone else invoking this function directly finds no such operation.
+ */
+async function provenCall(runId, opId, claimedCallId) {
+  if (!raisin.agentRuns || typeof raisin.agentRuns.get !== 'function') {
+    throw new Error('client-tool-relay: the agent run runtime is not available');
   }
+  const view = await raisin.agentRuns.get({ run_id: runId });
+  const rec = view && view.run;
+  const op = rec && rec.state && rec.state.activity && rec.state.activity.op;
+  if (!rec || !op || op.op_id !== opId) {
+    throw new Error('client-tool-relay: not the run\'s active operation');
+  }
+  const recorded = op.input && typeof op.input === 'object' ? op.input : {};
+  if (recorded.tool !== CLIENT_TOOL_RELAY) {
+    throw new Error('client-tool-relay: the active operation is not a page tool call');
+  }
+  const call = recorded.args && recorded.args.client_call;
+  const forCall = typeof op.for_call_id === 'string' ? op.for_call_id : null;
+  if (!call || typeof call.call_id !== 'string' || !call.call_id
+    || call.call_id !== claimedCallId || (forCall && forCall !== call.call_id)) {
+    throw new Error('client-tool-relay: the call is not the one the run recorded');
+  }
+  const subject = rec.subject;
+  if (!subject || !subject.path) throw new Error('client-tool-relay: the run has no conversation');
+  return { call, workspace: subject.workspace || 'ai', chatPath: subject.path };
 }
 
 export async function handler(input = {}) {
   const run = runContextOf(input);
-  const rc = (input && input.__raisin_context) || {};
   const opId = run ? run.operation_id : 'unknown';
-  const call = input && input.client_call;
+  const claimedCallId = input && input.client_call && input.client_call.call_id;
   try {
     if (!run) throw new Error('client-tool-relay runs only inside an agent run');
-    if (!call || typeof call.call_id !== 'string' || !call.call_id || typeof call.name !== 'string' || !call.name) {
-      throw new Error('client-tool-relay needs client_call { call_id, name }');
-    }
-    if (!rc.chat_path) throw new Error('client-tool-relay needs the conversation path');
-    await verifyRun(run.run_id, rc);
-    const base = await loadRunChat({ workspace: rc.workspace || 'ai', path: rc.chat_path });
+    const { call, workspace, chatPath } = await provenCall(run.run_id, opId, claimedCallId);
+    const base = await loadRunChat({ workspace, path: chatPath });
     const timeout = Math.min(Math.max(Number(call.timeout_ms) || DEFAULT_TIMEOUT_MS, 1000), MAX_TIMEOUT_MS);
     const resumeKey = `${CLIENT_RESUME_PREFIX}${call.call_id}`;
     await emitConversationEvent('conversation:client_tool_call', {

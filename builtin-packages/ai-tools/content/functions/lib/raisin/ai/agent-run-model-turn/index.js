@@ -74,14 +74,6 @@ async function verifyRun(ctx) {
   return rec;
 }
 
-/** Who may have attached files to this conversation: the run's owner and the chat's human sender. */
-function attachmentOwners(rec, ctx) {
-  const p = (rec && rec.principal) || {};
-  const chat = (ctx.chat && ctx.chat.properties) || {};
-  return [p.on_behalf_of, p.kind === 'user' ? p.id : null, chat.human_sender_id]
-    .filter((v) => typeof v === 'string' && v);
-}
-
 function checkpointOf(input, facts) {
   return {
     run_id: input.run_id,
@@ -160,9 +152,9 @@ export async function handler(input = {}) {
     const memoryOwner = rec ? memoryOwnerOf(rec) : null;
     const systemPrompt = await buildSystemPrompt({ agentProps, request, memoryOwner, skills, definitions });
     const context = await buildContext(ctx, agentProps, modelId, request, systemPrompt, excluded);
-    // The latest user message's images become content parts (the marker the
-    // history entries carry is removed either way).
-    context.messages = await inlineAttachments(context.messages, { owners: attachmentOwners(rec, ctx), vision: !!(agentProps.attachments && agentProps.attachments.vision === true) });
+    // The latest user message's attachments become asset references (the
+    // marker the history entries carry is removed either way); nothing is read.
+    context.messages = await inlineAttachments(context.messages);
 
     // 4. Provider request.
     const t0 = log.time();
