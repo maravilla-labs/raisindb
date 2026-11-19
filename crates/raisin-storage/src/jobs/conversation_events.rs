@@ -122,6 +122,29 @@ pub enum ConversationEvent {
         reason: Option<String>,
         timestamp: String,
     },
+    /// A tool call the CLIENT (the person's open page) must run: emitted by the
+    /// `/lib/raisin/ai/client-tool-relay` function while the agent run waits on
+    /// `client:<call_id>`. The client answers through
+    /// `POST /api/agent-runs/{repo}/{run}/client-result`. Field names are the
+    /// wire contract the client SDK reads (snake_case, unlike the older events).
+    ClientToolCall {
+        run_id: String,
+        call_id: String,
+        resume_key: String,
+        name: String,
+        #[serde(default)]
+        args: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at_ms: Option<i64>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "conversationPath"
+        )]
+        conversation_path: Option<String>,
+    },
     /// Log message from a backend handler, forwarded to browser console via SSE.
     Log {
         level: String,
@@ -143,6 +166,7 @@ impl ConversationEvent {
             ConversationEvent::MessageSaved { .. } => "message_saved",
             ConversationEvent::Done { .. } => "done",
             ConversationEvent::Waiting { .. } => "waiting",
+            ConversationEvent::ClientToolCall { .. } => "client_tool_call",
             ConversationEvent::Log { .. } => "log",
         }
     }
@@ -297,6 +321,47 @@ impl Drop for ConversationEventSubscription {
 impl Default for ConversationEventBroadcaster {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod client_tool_call_tests {
+    use super::ConversationEvent;
+
+    /// The exact payload `client-tool-relay` emits (plus the routing fields
+    /// `emitConversationEvent` adds) must parse: an event that does not is
+    /// dropped by `raisin.events.emit` with only a warning, so the page never
+    /// hears about the call and the run waits until it expires.
+    #[test]
+    fn relay_payload_parses_and_round_trips() {
+        let data = serde_json::json!({
+            "type": "client_tool_call",
+            "run_id": "r1",
+            "call_id": "functions.page.get_block:0",
+            "resume_key": "client:functions.page.get_block:0",
+            "name": "get_block",
+            "args": { "id": "hero-1" },
+            "client_id": "c1",
+            "expires_at_ms": 1795089999999i64,
+            "conversationPath": "/agents/a/inbox/chats/chat-1",
+            "channel": "chat:chat-1"
+        });
+        let ev: ConversationEvent = serde_json::from_value(data).expect("relay payload must parse");
+        assert_eq!(ev.event_type(), "client_tool_call");
+        let out = serde_json::to_value(&ev).unwrap();
+        assert_eq!(out["type"], "client_tool_call");
+        assert_eq!(out["resume_key"], "client:functions.page.get_block:0");
+        assert_eq!(out["args"]["id"], "hero-1");
+        assert_eq!(out["client_id"], "c1");
+    }
+
+    #[test]
+    fn minimal_payload_parses() {
+        let ev: ConversationEvent = serde_json::from_value(serde_json::json!({
+            "type": "client_tool_call", "run_id": "r", "call_id": "c", "resume_key": "client:c", "name": "n"
+        }))
+        .unwrap();
+        assert_eq!(ev.event_type(), "client_tool_call");
     }
 }
 
