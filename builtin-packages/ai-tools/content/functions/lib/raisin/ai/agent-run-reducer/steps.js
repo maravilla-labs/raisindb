@@ -35,7 +35,11 @@ export function offers(state) {
  */
 export function clientOffers(state) {
   return allowedClientTools(state.client).map((t) => ({
-    name: pageToolName(t.name), kind: 'client', function_path: null, client_tool: t.name,
+    // `domain` is the contract's kind for a tool core never executes (the call
+    // comes back to the reducer, which relays it); `client_tool` marks it a page
+    // tool. The Rust ToolKind has no other value: a new kind here is
+    // `response_undecodable` (v0.7.36).
+    name: pageToolName(t.name), kind: 'domain', function_path: null, client_tool: t.name,
     ...(t.description ? { description: t.description } : {}),
     schema: t.inputSchema || { type: 'object' },
   }));

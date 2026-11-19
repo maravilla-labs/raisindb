@@ -88,7 +88,8 @@ test('the page tools are offered as page.<name> with their own schema, under the
   const r = await s.start();
   const offered = r.effects[0].tools_offered;
   assert.deepEqual(offered.map((t) => t.name), ['page.get_document']);
-  assert.equal(offered[0].kind, 'client');
+  assert.equal(offered[0].kind, 'domain', 'a kind the Rust ToolKind knows');
+  assert.equal(offered[0].client_tool, 'get_document');
   assert.deepEqual(offered[0].schema.properties, { path: { type: 'string' } });
   assert.equal(offered[0].description, 'Read the page');
 });
@@ -305,7 +306,7 @@ test('clientInputOf carries the policy, the page and the attachments of a messag
 
 test('model definitions give a page tool the provider-safe name and its own schema', async () => {
   const defs = await offerDefinitions([
-    { name: 'page.insert_blocks', kind: 'client', function_path: null, description: 'Add', schema: { type: 'object', properties: { blocks: { type: 'array' } } } },
+    { name: 'page.insert_blocks', kind: 'domain', client_tool: 'insert_blocks', function_path: null, description: 'Add', schema: { type: 'object', properties: { blocks: { type: 'array' } } } },
   ]);
   assert.equal(defs[0].function.name, 'page__insert_blocks');
   assert.equal(defs[0].function.description, 'Add');

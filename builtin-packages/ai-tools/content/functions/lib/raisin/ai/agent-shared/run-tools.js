@@ -96,7 +96,7 @@ export async function offerDefinitions(toolsOffered) {
     if (resolved) return definition(t.name, t.description || resolved.description, resolved.parameters);
     // A page tool (`page.x`) goes to the provider as `page__x`: providers
     // refuse dots in a tool name. The reducer maps both back.
-    return definition(t.kind === 'client' ? wireToolName(t.name) : t.name, t.description, t.schema);
+    return definition(t.client_tool ? wireToolName(t.name) : t.name, t.description, t.schema);
   });
 }
 
