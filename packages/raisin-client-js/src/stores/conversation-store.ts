@@ -31,6 +31,7 @@ import type {
   ClientToolsMessageMeta,
   ClientToolsProvider,
 } from '../types/client-tools';
+import { ClientCallScanner } from './client-call-scanner';
 import { logger, getLogLevel, LogLevel } from '../logger';
 import { projectPlansFromMessages, type PlanProjection } from '../utils/plan-projection';
 import { isRecoveredDoneEvent } from '../utils/chat-events';
@@ -111,6 +112,10 @@ export interface StoreSendMessageOptions {
 
 /** Margin kept before `expires_at_ms` so a hung tool answers in time. */
 const CLIENT_TOOL_EXPIRY_MARGIN_MS = 1500;
+/** How often the authoritative run-log scan runs while a turn is live. */
+const CLIENT_RECOVERY_POLL_MS = 2000;
+/** The poll stops once nothing is open and nothing was sent for this long. */
+const CLIENT_RECOVERY_IDLE_MS = 120_000;
 /** Used when an event carries no usable `expires_at_ms`. */
 const CLIENT_TOOL_DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -137,6 +142,12 @@ export class ConversationStore {
   /** `call_id`s already executed (events can be replayed on reconnect). */
   private handledClientCalls = new Set<string>();
   private clientToolsWarned = false;
+  // Authoritative recovery of client calls from the run's event log
+  private scanner: ClientCallScanner | null = null;
+  private recovering = false;
+  private recoverAgain = false;
+  private recoveryTimer: ReturnType<typeof setInterval> | null = null;
+  private lastSendAt = 0;
   private createOptions?: ConversationStoreOptions['createOptions'];
 
   // Persistent SSE subscription
@@ -173,6 +184,9 @@ export class ConversationStore {
     // Auto-subscribe to existing conversation
     if (this._conversationPath) {
       this.ensureSubscription();
+      if (this.clientTools) {
+        this.subscription?.waitUntilConnected().then(() => this.recoverClientCalls(), () => {});
+      }
     } else if (this.createOptions?.anonymous) {
       // An anonymous store resumes the tab's visitor conversation, if any.
       void this.resumeAnonymous();
@@ -318,6 +332,11 @@ export class ConversationStore {
         attachments: sendOptions?.attachments,
         clientId,
       });
+      this.lastSendAt = Date.now();
+      if (this.clientTools) {
+        void this.recoverClientCalls();
+        this.startRecoveryPoll();
+      }
       // Events arrive via the persistent subscription → handleEvent
     } catch (err) {
       logger.error('[ConversationStore] Send failed', err);
@@ -390,6 +409,7 @@ export class ConversationStore {
     this.stop();
     this.clearStreamingTimer();
     this.stopWatchdog();
+    this.stopRecoveryPoll();
     this.subscription?.unsubscribe();
     this.subscription = null;
     this.subscribers.clear();
@@ -420,6 +440,66 @@ export class ConversationStore {
         logger.warn('[ConversationStore] Client tools unavailable, sending without them', err);
       }
       return undefined;
+    }
+  }
+
+  /**
+   * Answer the open client calls recorded in the active run's event log.
+   * Authoritative twin of the `client_tool_call` event: both feed
+   * {@link handleClientToolCall}, which dedups by call_id.
+   */
+  async recoverClientCalls(): Promise<void> {
+    if (!this.clientTools || !this._conversationPath) return;
+    if (this.recovering) {
+      this.recoverAgain = true;
+      return;
+    }
+    this.recovering = true;
+    try {
+      do {
+        this.recoverAgain = false;
+        await this.scanRunOnce();
+      } while (this.recoverAgain);
+    } catch (err) {
+      logger.debug('[ConversationStore] Client call recovery failed', err);
+    } finally {
+      this.recovering = false;
+    }
+  }
+
+  private async scanRunOnce(): Promise<void> {
+    if (!this._conversationPath) return;
+    if (!this.scanner || this.scanner.terminal) {
+      const runId = await this.manager.getActiveAgentRunId(this._conversationPath);
+      if (!runId) return;
+      if (this.scanner?.runId === runId) return; // same terminal run, nothing new
+      this.scanner = new ClientCallScanner(runId);
+    }
+    const scanner = this.scanner;
+    const events = await this.manager.agentRuns().events(scanner.runId, scanner.lastSeq);
+    scanner.ingest(events);
+    for (const call of scanner.openCalls()) this.handleClientToolCall(call);
+  }
+
+  private startRecoveryPoll(): void {
+    if (this.recoveryTimer) return;
+    this.recoveryTimer = setInterval(() => {
+      void this.recoveryTick();
+    }, CLIENT_RECOVERY_POLL_MS);
+  }
+
+  private stopRecoveryPoll(): void {
+    if (this.recoveryTimer) clearInterval(this.recoveryTimer);
+    this.recoveryTimer = null;
+  }
+
+  private async recoveryTick(): Promise<void> {
+    await this.recoverClientCalls();
+    const scanner = this.scanner;
+    const idle = Date.now() - this.lastSendAt > CLIENT_RECOVERY_IDLE_MS;
+    const live = this._isStreaming || this._isWaiting;
+    if (!live || scanner?.terminal || (idle && !scanner?.hasOpen)) {
+      this.stopRecoveryPoll();
     }
   }
 
@@ -550,6 +630,7 @@ export class ConversationStore {
         };
         this._activeToolCalls.push(info);
         this.notify();
+        if (this.clientTools) void this.recoverClientCalls();
         break;
       }
 
@@ -584,6 +665,7 @@ export class ConversationStore {
         this.notify();
         // Deferred reload: pick up canonical messages from node tree
         this.deferredReload();
+        if (this.clientTools) void this.recoverClientCalls();
         break;
       }
 

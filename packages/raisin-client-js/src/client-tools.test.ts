@@ -5,6 +5,8 @@ import type { AuthManager } from './auth';
 import type { SqlResult } from './protocol';
 import type { Database } from './database';
 import type { ChatEvent } from './types/chat';
+import type { AgentRunEvent } from './agent-runs';
+import { CLIENT_TOOL_RELAY } from './stores/client-call-scanner';
 import type {
   ClientToolCallEvent,
   ClientToolResultBody,
@@ -137,7 +139,10 @@ function harness(provider: Partial<ClientToolsProvider> & { execute: ClientTools
   let emit: (e: ChatEvent) => void = () => {};
   const created: any[] = [];
   const submitted: Array<{ runId: string; body: ClientToolResultBody }> = [];
+  const log: AgentRunEvent[] = [];
+  const state = { runId: 'r1' as string | null, eventCalls: 0 };
   const manager = {
+    getActiveAgentRunId: async () => state.runId,
     subscribe: (_p: string, on: (e: ChatEvent) => void) => {
       emit = on;
       return { unsubscribe() {}, waitUntilConnected: async () => {} };
@@ -147,6 +152,10 @@ function harness(provider: Partial<ClientToolsProvider> & { execute: ClientTools
       return opts.clientId;
     }),
     agentRuns: () => ({
+      events: async (_run: string, after = 0) => {
+        state.eventCalls++;
+        return log.filter((e) => e.seq > after);
+      },
       submitClientToolResult: async (runId: string, body: ClientToolResultBody) => {
         submitted.push({ runId, body });
         return { status: 'applied' as const };
@@ -170,7 +179,7 @@ function harness(provider: Partial<ClientToolsProvider> & { execute: ClientTools
     expires_at_ms: Date.now() + 60000, ...over,
   });
   const flush = () => new Promise((r) => setTimeout(r, 0));
-  return { store, created, submitted, emit: (e: ChatEvent) => emit(e), callEvent, flush };
+  return { store, created, submitted, log, state, emit: (e: ChatEvent) => emit(e), callEvent, flush };
 }
 
 describe('ConversationStore client tools', () => {
@@ -249,5 +258,122 @@ describe('ConversationStore client tools', () => {
     expect(h.submitted).toHaveLength(1);
     expect(h.submitted[0].body.result).toEqual({ ok: false, error: 'timeout' });
     expect(Date.now()).toBeLessThan(expires);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Recovery from the run's event log
+// ---------------------------------------------------------------------------
+
+let seqNo = 0;
+const ev = (kind: Record<string, unknown>): AgentRunEvent => ({ run_id: 'r1', seq: ++seqNo, at_ms: Date.now(), kind: kind as any });
+const effectEv = (callId: string, clientId: string) =>
+  ev({
+    type: 'domain_applied',
+    effects: [{
+      effect_id: `e-${callId}`, kind: 'call_tool', tool: CLIENT_TOOL_RELAY,
+      args: { client_call: { call_id: callId, resume_key: `client:${callId}`, name: 'insert_blocks', args: { n: 2 }, client_id: clientId, timeout_ms: 60000 } },
+    }],
+  });
+const openedEv = (callId: string, over: Record<string, unknown> = {}) =>
+  ev({
+    type: 'request_opened',
+    request: {
+      request_id: `req-${callId}`,
+      kind: { kind: 'external', op_id: 'op', resume_key: `client:${callId}`, tool: CLIENT_TOOL_RELAY, ...over },
+      expires_at_ms: Date.now() + 60000,
+    },
+  });
+
+describe('ConversationStore client call recovery', () => {
+  it('recovers an open call from the run log and answers it once', async () => {
+    const execute = vi.fn(async () => ({ ok: true, content: 'x' }));
+    const h = harness({ execute });
+    await h.store.sendMessage('hello'); // before the call exists
+    const cid = h.created[0].opts.clientId;
+    h.log.push(effectEv('k1', cid), openedEv('k1'));
+    await h.store.recoverClientCalls();
+    await h.flush();
+    expect(execute).toHaveBeenCalledWith('insert_blocks', { n: 2 });
+    expect(h.submitted).toHaveLength(1);
+    expect(h.submitted[0].body.resume_key).toBe('client:k1');
+    await h.store.recoverClientCalls();
+    await h.flush();
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not answer a call that was resolved or closed later', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    const h = harness({ execute });
+    await h.store.sendMessage('hello');
+    const cid = h.created[0].opts.clientId;
+    h.log.push(effectEv('k2', cid), openedEv('k2'), ev({ type: 'request_resolved', request_id: 'req-k2' }));
+    h.log.push(effectEv('k3', cid), openedEv('k3'), ev({ type: 'request_closed', request_id: 'req-k3', reason: 'expired' }));
+    await h.store.recoverClientCalls();
+    await h.flush();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('ignores foreign client ids and non-client requests', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    const h = harness({ execute });
+    await h.store.sendMessage('hello');
+    h.log.push(effectEv('k4', 'other-tab'), openedEv('k4'));
+    h.log.push(effectEv('k5', h.created[0].opts.clientId), openedEv('k5', { tool: '/lib/other', resume_key: 'ext:k5' }));
+    await h.store.recoverClientCalls();
+    await h.flush();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('does not double-execute when the SSE event and the recovery both deliver the call', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    const h = harness({ execute });
+    await h.store.sendMessage('hello');
+    const cid = h.created[0].opts.clientId;
+    h.emit(h.callEvent({ call_id: 'k6', resume_key: 'client:k6' }));
+    h.log.push(effectEv('k6', cid), openedEv('k6'));
+    await h.store.recoverClientCalls();
+    await h.flush();
+    // and the reverse order: recovery first, then SSE
+    h.log.push(effectEv('k7', cid), openedEv('k7'));
+    await h.store.recoverClientCalls();
+    h.emit(h.callEvent({ call_id: 'k7', resume_key: 'client:k7' }));
+    await h.flush();
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(h.submitted.map((s) => s.body.resume_key).sort()).toEqual(['client:k6', 'client:k7']);
+  });
+
+  it('polls with after_seq and stops once the run is terminal', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness({ execute: async () => ({ ok: true }) });
+      await h.store.sendMessage('hello');
+      const cid = h.created[0].opts.clientId;
+      h.log.push(effectEv('k8', cid), openedEv('k8'));
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(h.submitted).toHaveLength(1); // found by the poll
+      h.log.push(ev({ type: 'terminal', status: 'completed', outcome: {} }));
+      await vi.advanceTimersByTimeAsync(2100);
+      const callsAfterTerminal = h.state.eventCalls;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(h.state.eventCalls).toBe(callsAfterTerminal); // poll stopped
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops polling after the idle window when nothing is open', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness({ execute: async () => ({ ok: true }) });
+      await h.store.sendMessage('hello');
+      await vi.advanceTimersByTimeAsync(125_000);
+      const n = h.state.eventCalls;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(h.state.eventCalls).toBe(n);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

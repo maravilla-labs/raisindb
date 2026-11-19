@@ -670,6 +670,17 @@ export class ConversationManager {
   }
 
   /**
+   * The id of the conversation's active agent run
+   * (`active_agent_run_id` on the conversation node), or null.
+   */
+  async getActiveAgentRunId(conversationPath: string): Promise<string | null> {
+    if (this.visitor?.isAnonymous(conversationPath)) return null;
+    const props = await this.loadConversationProperties(conversationPath);
+    const id = props?.active_agent_run_id;
+    return typeof id === 'string' && id.length > 0 ? id : null;
+  }
+
+  /**
    * The repository's agent-runs HTTP API, over this manager's connection.
    * Used to post browser tool results (`submitClientToolResult`).
    */
