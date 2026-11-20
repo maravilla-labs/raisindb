@@ -10,7 +10,7 @@ import {
 } from './state.js';
 import { applyPlanCall, attributeEvidence } from './plan.js';
 import { dispatchNext, askModel, finishRun, terminal, requestApproval } from './steps.js';
-import { clientCall, clientQueueEntry, applyClientAnswer } from './client.js';
+import { clientCall, clientQueueEntry, applyClientAnswer, clientSucceeded } from './client.js';
 import { pageToolName } from '../agent-shared/client-tools.js';
 import { trackChildren, scopeRefusal, scopeViolations, continueWait, handbackOf } from './children.js';
 
@@ -127,7 +127,11 @@ export function onToolResult(state, ev, run, fx) {
   const env = d.envelope;
   // The page answered a page tool's call: apply what it reports, answer the call.
   if (awaiting.client && env && env.source === 'client') {
+    // A page tool is a tool like any other for the plan: what it did while a task was in progress is that task's
+    // evidence (the page reports `ok: false` for a refusal or failure). Without this, an agent that works through
+    // page tools could never complete a task.
     applyClientAnswer(state, env, awaiting);
+    attributeEvidence(state, ev.operation_id, clientSucceeded(env), 0);
     return dispatchNext(state, fx, run);
   }
   // A child's hand-back answered a wait: learn it, then wait for the rest.

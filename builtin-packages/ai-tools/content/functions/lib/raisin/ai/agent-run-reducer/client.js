@@ -78,6 +78,11 @@ export function applyClientAnswer(state, env, awaiting) {
   return ok;
 }
 
+/** The page tool ran AND did what it was asked: a refusal or failure arrives as `payload.ok: false`. A plan task's evidence. */
+export function clientSucceeded(env) {
+  return !!env && env.status === 'succeeded' && !(env.payload && typeof env.payload === 'object' && env.payload.ok === false);
+}
+
 /** The wait for a page tool's answer ended without one (expired, or closed): the page is unavailable. */
 export function closeClientCall(state) {
   const aw = state.awaiting;

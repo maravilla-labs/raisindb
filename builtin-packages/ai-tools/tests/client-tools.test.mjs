@@ -462,3 +462,37 @@ test('attachments are named by their PATH once the server normalized the envelop
   assert.equal(b['raisin:ref'], '/uploads/x.pdf');
   assert.equal(cleanAttachments(Array.from({ length: 150 }, (_, i) => ({ 'raisin:ref': `/f${i}` }))).length, 100);
 });
+
+test('a page tool that succeeds while a task is in progress is that task\'s evidence; a refused one is not', async () => {
+  const PLAN_TOOLS = [
+    { name: 'fetch-url', kind: 'function', function_path: '/lib/demo/fetch', mutating: false, replay_safe: true },
+    { name: 'create-plan', kind: 'domain', domain_op: 'plan.create' },
+    { name: 'update-task', kind: 'domain', domain_op: 'plan.update_task' },
+  ];
+  const s = sim(base({ tools: PLAN_TOOLS }));
+  await s.start();
+  await s.modelDone([
+    { call_id: 'p', name: 'create_plan', args: { title: 'P', tasks: [{ title: 'one' }, { title: 'two' }] } },
+    { call_id: 'u1', name: 'update_task', args: { task_id: 't1', status: 'in_progress' } },
+  ]);
+  // (the plan card projection runs first when the plan changed)
+  if (s.op().kind === 'call_tool' && s.op().args && s.op().args.reason) await s.send('tool_result', { envelope: { envelope: 'raisin.tool-result/1', operation_id: 'proj', status: 'succeeded', payload: {}, writes: [] } }, { effect_id: s.op().effect_id, operation_id: 'run-1/op/proj1' });
+  await s.modelDone([{ call_id: 'c1', name: 'page.insert_blocks', args: { blocks: [] } }]);
+  await s.answer({ ok: true, content: { inserted: 1 } });
+  await s.modelDone([
+    { call_id: 'u2', name: 'update_task', args: { task_id: 't1', status: 'completed' } },
+    { call_id: 'u3', name: 'update_task', args: { task_id: 't2', status: 'in_progress' } },
+  ]);
+  assert.equal(s.state.plan.tasks[0].status, 'completed', 'page work counts as evidence');
+  if (s.op().kind === 'call_tool' && s.op().args && s.op().args.reason) await s.send('tool_result', { envelope: { envelope: 'raisin.tool-result/1', operation_id: 'proj', status: 'succeeded', payload: {}, writes: [] } }, { effect_id: s.op().effect_id, operation_id: 'run-1/op/proj2' });
+  await s.modelDone([{ call_id: 'c2', name: 'page.insert_blocks', args: { blocks: [1] } }]);
+  // The page ran the call but the tool refused (the person said no): status succeeded, payload.ok false.
+  const eff = s.park();
+  s.open = [];
+  await s.send('tool_result', {
+    call_id: eff.for_call_id, tool: eff.tool,
+    envelope: { envelope: 'raisin.tool-result/1', operation_id: 'client:y', source: 'client', status: 'succeeded', payload: { ok: false, error: 'declined' } },
+  }, { effect_id: eff.effect_id, operation_id: 'run-1/op/98' });
+  await s.modelDone([{ call_id: 'u4', name: 'update_task', args: { task_id: 't2', status: 'completed' } }]);
+  assert.equal(s.state.plan.tasks[1].status, 'in_progress', 'a refused page call is no evidence');
+});
