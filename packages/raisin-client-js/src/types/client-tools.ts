@@ -48,7 +48,10 @@ export interface Attachment {
    * at most 4 per message). The reference above stays either way. The engine
    * forwards it for the latest message only and removes it when the run ends.
    */
-  inline?: { media_type: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif'; data: string };
+  /** One picture, or one per PDF page (each sent as its own image). */
+  inline?:
+    | { media_type: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif'; data: string }
+    | Array<{ media_type: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif'; data: string }>;
 }
 
 /** Conversation event: the agent asks the sending page to run a tool. */
@@ -112,10 +115,16 @@ export function buildMessageMetadata(
     // their own list, keyed by the attachment's path, and the envelope keeps only the reference.
     const images: Array<{ path: string; name?: string; media_type: string; data: string }> = [];
     metadata.attachments = options.attachments.map((a) => {
-      const { inline, ...rest } = a as typeof a & { inline?: { media_type: string; data: string } };
-      if (inline && typeof inline.data === 'string' && inline.data) {
-        images.push({ path: String(rest['raisin:ref'] ?? ''), name: rest.name, media_type: inline.media_type, data: inline.data });
-      }
+      type Bytes = { media_type: string; data: string };
+      const { inline, ...rest } = a as typeof a & { inline?: Bytes | Bytes[] };
+      // One picture, or several (a PDF's pages, each its own image named with its page).
+      const list = (Array.isArray(inline) ? inline : inline ? [inline] : []).filter(
+        (b): b is Bytes => !!b && typeof b.data === 'string' && b.data.length > 0,
+      );
+      list.forEach((b, k) => {
+        const name = list.length > 1 && rest.name ? `${rest.name} (page ${k + 1})` : rest.name;
+        images.push({ path: String(rest['raisin:ref'] ?? ''), name, media_type: b.media_type, data: b.data });
+      });
       return rest;
     });
     if (images.length > 0) metadata.attachment_images = images;

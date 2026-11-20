@@ -21,3 +21,21 @@ describe('buildMessageMetadata', () => {
     expect('attachment_images' in meta).toBe(false);
   });
 });
+
+describe('buildMessageMetadata with several pictures on one attachment', () => {
+  it('sends each PDF page as its own image, named with its page, and keeps one envelope', () => {
+    const meta = buildMessageMetadata('m1', {
+      attachments: [
+        {
+          'raisin:ref': '/u/order.pdf', 'raisin:workspace': 'assets', mime_type: 'application/pdf', name: 'order.pdf',
+          inline: [{ media_type: 'image/jpeg', data: 'UDE=' }, { media_type: 'image/jpeg', data: 'UDI=' }],
+        },
+      ],
+    } as never)!;
+    expect((meta.attachments as unknown[]).length).toBe(1);
+    expect(meta.attachment_images).toEqual([
+      { path: '/u/order.pdf', name: 'order.pdf (page 1)', media_type: 'image/jpeg', data: 'UDE=' },
+      { path: '/u/order.pdf', name: 'order.pdf (page 2)', media_type: 'image/jpeg', data: 'UDI=' },
+    ]);
+  });
+});
