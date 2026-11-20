@@ -258,6 +258,27 @@ test('turns without a successful tool call end the run as blocked', async () => 
   assert.equal(s.state.finish.outcome, 'blocked');
 });
 
+test('a message that arrives while a stalled run is finishing gets a real model turn, not a final-projection loop', async () => {
+  const s = sim({ text: 'x', tools: TOOLS, config: { no_progress_limit: 2 } });
+  await s.start();
+  let op = 1;
+  const next = () => `run-1/op/${++op}`;
+  for (const q of ['a', 'b']) {
+    await s.modelDone('', [{ call_id: q, name: 'search', args: { q } }], next());
+    const eff = s.op();
+    await s.send('operation_failed', { error_class: 'tool_error', message: 'boom', call_id: q }, { effect_id: eff.effect_id, operation_id: next() });
+  }
+  const proj = s.op();
+  assert.equal(proj.args.reason, 'final');
+  // The person writes while the final projection runs ("??").
+  await s.send('user_input', { steer_id: 'run-1/steer/1', input: { text: '??' } });
+  await s.send('tool_result', { envelope: ok() }, { effect_id: proj.effect_id, operation_id: next() });
+  const after = s.op();
+  assert.equal(after.kind, 'request_model_turn', 'the steer is answered by the model');
+  assert.equal(s.state.finish, null);
+  assert.equal(s.state.steer_pending, false);
+});
+
 test('a retryable model failure retries, then fails the run through the projection', async () => {
   const s = sim({ text: 'x', tools: TOOLS, config: { model_retry_limit: 1 } });
   await s.start();

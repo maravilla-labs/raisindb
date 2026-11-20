@@ -202,6 +202,11 @@ function afterProjection(state, fx, run, then) {
     // is consumed, so answer it instead of ending the run.
     if (state.steer_pending) {
       state.finish = null;
+      // The person's message is new direction: the model gets a real turn. Without this reset, a run that was
+      // finishing because of the no-progress limit would hit that limit again in askModel, finish again, find the
+      // steer still pending, and loop on the final projection until the budget ran out.
+      state.progress.no_progress = 0;
+      state.turn_stats = { calls: 0, ok: 0 };
       return askModel(state, fx);
     }
     return terminal(state, fx);
