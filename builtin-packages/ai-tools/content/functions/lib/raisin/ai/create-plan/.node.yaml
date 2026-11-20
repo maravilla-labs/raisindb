@@ -41,6 +41,9 @@ properties:
               description: "Task priority level"
           required:
             - title
+      ask_approval:
+        type: "boolean"
+        description: "Only when the agent's execution mode is agent_decides: true makes the user approve THIS plan before any task runs (plans that create, change, send, publish or delete things, touch many records, or are hard to undo); false or omitted runs it straight away (reads, lookups, small edits asked for exactly). Ignored in every other mode."
     required:
       - title
       - tasks

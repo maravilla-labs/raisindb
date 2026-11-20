@@ -15,7 +15,7 @@ import { TOOL_META } from '../agent-shared/tool-meta.js';
  */
 async function handler(input) {
   const enveloped = await runEnvelope(input, TOOL_META.createPlan, handler); if (enveloped) return enveloped;
-  const { title, description, tasks, __raisin_context } = input;
+  const { title, description, tasks, ask_approval, __raisin_context } = input;
   const workspace = __raisin_context?.workspace || 'ai';
   const msgPath = __raisin_context?.msg_path;
   const executionMode = __raisin_context?.execution_mode || 'automatic';
@@ -30,7 +30,8 @@ async function handler(input) {
   const requiresApproval =
     executionMode === 'step_by_step' ||
     executionMode === 'manual' ||
-    executionMode === 'approve_then_auto';
+    executionMode === 'approve_then_auto' ||
+    (executionMode === 'agent_decides' && ask_approval === true);
   const planStatus = requiresApproval ? 'pending_approval' : 'in_progress';
 
   // Create plan node under the assistant message

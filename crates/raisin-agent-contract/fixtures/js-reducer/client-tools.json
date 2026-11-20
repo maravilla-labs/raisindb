@@ -124,6 +124,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -358,6 +359,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -511,6 +513,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -716,6 +719,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -910,6 +914,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -1131,6 +1136,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -1275,6 +1281,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -1488,6 +1495,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -1628,6 +1636,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -1799,6 +1808,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -1926,6 +1936,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -2140,6 +2151,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -2283,6 +2295,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -2502,6 +2515,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,
@@ -2673,6 +2687,7 @@
     "cfg": {
      "execution_mode": "automatic",
      "requires_approval": false,
+     "approval_optional": false,
      "loop_limit": 3,
      "loop_hits_limit": 3,
      "no_progress_limit": 4,

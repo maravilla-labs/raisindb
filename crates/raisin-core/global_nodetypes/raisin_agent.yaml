@@ -76,7 +76,7 @@ properties:
     type: String
     required: false
     default: automatic
-    description: "Task execution mode: 'automatic' (no approval), 'step_by_step' (approve each task), 'manual' (approve plan before execution)"
+    description: "Task execution mode: 'automatic' (no approval), 'approve_then_auto' (approve the plan, then run it), 'step_by_step' (approve each task), 'manual' (approve plan before execution), 'agent_decides' (the agent chooses per plan, with create_plan's ask_approval)"
 
   - name: execution_context
     type: String

@@ -6,7 +6,7 @@ import { log } from './logger.js';
 
 /** Fallback text when an assistant turn produces no content. */
 const TERMINAL_FALLBACK_TEXT = 'I could not generate a complete response. Please try again.';
-const EXECUTION_MODES = new Set(['automatic', 'approve_then_auto', 'step_by_step', 'manual']);
+const EXECUTION_MODES = new Set(['automatic', 'approve_then_auto', 'step_by_step', 'manual', 'agent_decides']);
 
 /**
  * Return the system prompt addition for planning capabilities.
@@ -36,7 +36,18 @@ function getPlanningSystemPromptAddition(executionMode) {
   3) update_task(completed)
 - Then STOP and wait for the next user continue signal before starting another task.`;
 
+  const agentDecidesInstructions = `IMPORTANT - Agent Decides Mode:
+- YOU decide, per plan, whether the user approves it before you start: create_plan with ask_approval true or false.
+- Ask (ask_approval: true) when the plan creates, changes, sends, publishes or deletes things the user should see first,
+  touches many records, or is costly or hard to undo. Do not ask for plans that only read, look up or summarize, or for
+  small edits the user asked for in exactly those words.
+- With ask_approval true, stop after create_plan: the user approves or rejects it. After approval, run every task
+  without stopping. After a rejection, read the user's reason and propose a changed plan or ask what they want.
+- With ask_approval false, run every task straight away, as in automatic mode.
+- For each task: update_task(in_progress) -> do the work with tools -> update_task(completed). Finish with a summary.`;
+
   const modeInstructions = {
+    agent_decides: agentDecidesInstructions,
     automatic: automaticInstructions,
     approve_then_auto: approveThenAutoInstructions,
     step_by_step: stepByStepInstructions,
@@ -82,6 +93,11 @@ function getEffectiveExecutionMode(executionMode) {
 function requiresPlanApproval(executionMode) {
   const mode = getEffectiveExecutionMode(executionMode);
   return mode === 'manual' || mode === 'step_by_step' || mode === 'approve_then_auto';
+}
+
+/** `agent_decides`: no plan waits by default, and create_plan's `ask_approval: true` makes THIS plan wait. */
+function planApprovalOptional(executionMode) {
+  return getEffectiveExecutionMode(executionMode) === 'agent_decides';
 }
 
 /**
@@ -247,4 +263,5 @@ export {
   hasCompletedToolCalls,
   getEffectiveExecutionMode,
   requiresPlanApproval,
+  planApprovalOptional,
 };

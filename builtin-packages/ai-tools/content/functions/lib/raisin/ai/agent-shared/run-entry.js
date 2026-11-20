@@ -18,7 +18,7 @@ import { emitConversationEvent } from './streaming.js';
 import { resolveRunTools } from './run-tools.js';
 import { latestOpenPlan } from './run-plan-card.js';
 import { DEFAULT_RUN_REDUCER, DEFAULT_MODEL_TURN_FUNCTION } from './run-names.js';
-import { getEffectiveExecutionMode, requiresPlanApproval } from './utils.js';
+import { getEffectiveExecutionMode, planApprovalOptional, requiresPlanApproval } from './utils.js';
 import { clientInputOf } from './client-tools.js';
 import { runIdOfChat, getRun, isTerminal, controlRun, commandFor } from './run-control.js';
 
@@ -160,6 +160,7 @@ export function buildCreateRequest({ workspace, chatPath, chat, message, agentPr
       config: {
         execution_mode: mode,
         requires_approval: requiresPlanApproval(mode) && tools.some((t) => t.domain_op === 'plan.create'),
+        approval_optional: planApprovalOptional(mode) && tools.some((t) => t.domain_op === 'plan.create'),
         ...(agentProps.run_config && typeof agentProps.run_config === 'object' ? agentProps.run_config : {}),
         ...(grant ? { node_dev: grant } : {}),
       },

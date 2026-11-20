@@ -192,6 +192,28 @@ test('an approval-gated plan waits, and approval resumes it with the digest boun
   assert.equal(answer.status, 'approved');
 });
 
+test('agent_decides: a plan the agent asks approval for waits; one it does not ask for runs', async () => {
+  const asked = sim({ text: 'plan it', tools: TOOLS, config: { execution_mode: 'agent_decides', approval_optional: true } });
+  await asked.start();
+  await asked.modelDone('', [{ call_id: 'p', name: 'create_plan', args: { title: 'P', tasks: [{ title: 'one' }], ask_approval: true } }]);
+  await asked.toolDone(ok());
+  assert.equal(asked.last.effects[0].kind, 'request_approval');
+  assert.equal(asked.state.plan.status, 'pending_approval');
+
+  const free = sim({ text: 'plan it', tools: TOOLS, config: { execution_mode: 'agent_decides', approval_optional: true } });
+  await free.start();
+  await free.modelDone('', [{ call_id: 'p', name: 'create_plan', args: { title: 'P', tasks: [{ title: 'one' }] } }]);
+  assert.equal(free.state.plan.status, 'active');
+  assert.ok(!free.last.effects.some((e) => e.kind === 'request_approval'));
+});
+
+test('ask_approval is ignored outside agent_decides', async () => {
+  const s = sim({ text: 'plan it', tools: TOOLS, config: { execution_mode: 'automatic' } });
+  await s.start();
+  await s.modelDone('', [{ call_id: 'p', name: 'create_plan', args: { title: 'P', tasks: [{ title: 'one' }], ask_approval: true } }]);
+  assert.equal(s.state.plan.status, 'active');
+});
+
 test('a steer while waiting for approval withdraws the request and asks the model', async () => {
   const s = sim({ text: 'plan it', tools: TOOLS, config: { requires_approval: true } });
   await s.start();

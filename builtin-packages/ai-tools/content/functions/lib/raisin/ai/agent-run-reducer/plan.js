@@ -159,7 +159,7 @@ export function applyPlanCall(state, op, args, callId, opId) {
       no: state.plan_seq,
       title: String(a.title).slice(0, 300),
       description: typeof a.description === 'string' ? a.description.slice(0, 2000) : '',
-      status: state.cfg.requires_approval ? 'pending_approval' : 'active',
+      status: state.cfg.requires_approval || (state.cfg.approval_optional && a.ask_approval === true) ? 'pending_approval' : 'active',
       anchor_op: opId,
       card_path: null,
       approval: null,

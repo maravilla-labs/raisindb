@@ -75,6 +75,8 @@ export function initState(input, seq) {
     cfg: {
       execution_mode: cfgIn.execution_mode || 'automatic',
       requires_approval: cfgIn.requires_approval === true,
+      // `agent_decides`: create_plan's own `ask_approval: true` gates that plan.
+      approval_optional: cfgIn.approval_optional === true,
       loop_limit: num(cfgIn.loop_limit, DEFAULTS.loop_limit),
       loop_hits_limit: num(cfgIn.loop_hits_limit, DEFAULTS.loop_hits_limit),
       no_progress_limit: num(cfgIn.no_progress_limit, DEFAULTS.no_progress_limit),
