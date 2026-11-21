@@ -30,6 +30,8 @@ export const PLAN_SCHEMAS = Object.freeze({
     properties: {
       title: { type: 'string', description: 'Plan objective' },
       description: { type: 'string' },
+      ask_approval: { type: 'boolean', description: 'Ask the person to approve this plan before you start (only when the agent lets you decide).' },
+      replace: { type: 'boolean', description: 'Start over: discard the current plan that still has open steps. Without it a second plan is refused; prefer add_task or update_task.' },
       tasks: {
         type: 'array',
         items: {
@@ -72,13 +74,15 @@ function task(i, t) {
     completion_requested: false,
     evidence: [],
     notes: null,
+    last_action: null,
   };
 }
 
 /** A plan carried over from an earlier run of the same conversation. */
 export function adoptPlan(input) {
   if (!input || !Array.isArray(input.tasks) || input.tasks.length === 0) return null;
-  // An approval belongs to the run that asked for it; it is never carried over.
+  // An approval belongs to the run that asked for it; it is never carried over
+  // (its card is closed instead: see `closedCarried`).
   if (input.status === 'pending_approval') return null;
   const tasks = input.tasks.slice(0, MAX_TASKS).map((t, i) => {
     const out = task(i + 1, t);
@@ -95,8 +99,39 @@ export function adoptPlan(input) {
     anchor_op: input.anchor_op || null,
     card_path: input.card_path || null,
     approval: null,
+    carried: true,
+    touched: false,
     tasks,
   };
+}
+
+/**
+ * The card of a carried plan that was still awaiting approval: its approval
+ * belonged to the run that asked, so the card is closed as cancelled instead
+ * of staying pending for ever. `[]` when there is nothing to close.
+ */
+export function closedCarried(input) {
+  if (!input || input.status !== 'pending_approval' || !input.card_path || !Array.isArray(input.tasks)) return [];
+  return [{
+    no: Number(input.no) || 1,
+    title: String(input.title || 'Plan').slice(0, 300),
+    description: String(input.description || ''),
+    status: 'cancelled',
+    anchor_op: input.anchor_op || null,
+    card_path: input.card_path,
+    approval_digest: null,
+    tasks: input.tasks.slice(0, MAX_TASKS).map((t, i) => ({
+      key: (typeof t.key === 'string' && t.key) || `t${i + 1}`,
+      title: String(t.title || `Task ${i + 1}`).slice(0, 300),
+      description: typeof t.description === 'string' ? t.description.slice(0, 1000) : '',
+      priority: t.priority || 'normal',
+      status: ['pending', 'in_progress', 'completed', 'failed', 'cancelled'].includes(t.status) ? t.status : 'pending',
+      completion_requested: false,
+      evidence_ops: [],
+      notes: null,
+      last_action: null,
+    })),
+  }];
 }
 
 function view(plan) {
@@ -132,15 +167,40 @@ export function hasEvidence(t, functionToolCount) {
   return t.evidence[t.evidence.length - 1].ok === true;
 }
 
-/** Attribute a tool outcome to every task in progress. */
-export function attributeEvidence(state, opId, ok, writes) {
-  if (!state.plan) return;
-  for (const t of state.plan.tasks) {
+/**
+ * Attribute a tool outcome to every task in progress. A success while NO task
+ * is in progress starts the first pending one (the model skipped the ceremony;
+ * the work is real). `label` is the short human name of what ran.
+ */
+export function attributeEvidence(state, opId, ok, writes, label) {
+  const plan = state.plan;
+  if (!plan) return;
+  if (ok && plan.status === 'active' && !plan.tasks.some((t) => t.status === 'in_progress')) {
+    const next = plan.tasks.find((t) => t.status === 'pending');
+    if (next) {
+      next.status = 'in_progress';
+      plan.touched = true;
+      state.plan_dirty = true;
+    }
+  }
+  for (const t of plan.tasks) {
     if (t.status !== 'in_progress') continue;
     t.evidence.push({ op: opId, ok, writes });
     if (t.evidence.length > MAX_EVIDENCE) t.evidence.shift();
+    plan.touched = true;
+    // Does not re-project by itself (one extra operation per tool call); it rides the next projection.
+    if (ok && label) t.last_action = label;
   }
-  // Evidence alone does not re-project the card: its statuses did not move.
+}
+
+function normTitle(v) {
+  return String(v || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+/** A short, human label of what a tool did: its title, else its name as words. */
+export function actionLabel(title, name) {
+  const t = typeof title === 'string' && title.trim() ? title.trim() : String(name || '').replace(/^page[._]+/, '').replace(/[-_.]+/g, ' ').trim();
+  return t.slice(0, 80);
 }
 
 /**
@@ -153,6 +213,20 @@ export function applyPlanCall(state, op, args, callId, opId) {
   if (op === 'plan.create') {
     if (!a.title || !Array.isArray(a.tasks) || a.tasks.length === 0) {
       return { content: { success: false, error: 'create_plan needs a title and at least one task' } };
+    }
+    const cur = state.plan;
+    if (cur && cur.status === 'active' && cur.tasks.some((t) => OPEN.has(t.status))) {
+      if (a.replace !== true) {
+        return {
+          content: {
+            success: false,
+            error: 'plan_exists',
+            message: 'A plan with open steps already exists. Continue it (update_task), add to it (add_task), or pass replace: true to start over.',
+            tasks: view(cur).tasks,
+          },
+        };
+      }
+      state.closed_plans.push({ ...cardOf(cur), status: 'cancelled', approval_digest: null });
     }
     state.plan_seq += 1;
     state.plan = {
@@ -182,6 +256,11 @@ export function applyPlanCall(state, op, args, callId, opId) {
   if (op === 'plan.add_task') {
     if (!a.title) return { content: { success: false, error: 'add_task needs a title' } };
     if (state.plan.tasks.length >= MAX_TASKS) return { content: { success: false, error: `a plan holds at most ${MAX_TASKS} tasks` } };
+    const dup = state.plan.tasks.find((x) => normTitle(x.title) === normTitle(a.title));
+    if (dup) {
+      return { content: { success: true, duplicate: true, task_id: dup.key, status: dup.status, message: 'That step already exists.' } };
+    }
+    state.plan.touched = true;
     const t = task(state.plan.tasks.length + 1, a);
     state.plan.tasks.push(t);
     state.plan_dirty = true;
@@ -194,25 +273,26 @@ export function applyPlanCall(state, op, args, callId, opId) {
     const t = findTask(state.plan, a);
     if (!t) return { content: { success: false, error: 'No such task. Use the task_id from create_plan (e.g. "t1").', tasks: view(state.plan).tasks } };
     const status = String(a.status || '');
+    state.plan.touched = true;
     if (typeof a.notes === 'string') t.notes = a.notes.slice(0, 1000);
     if (status === 'completed') {
       t.completion_requested = true;
       state.plan_dirty = true;
       if (t.status === 'completed') return { content: { success: true, task_id: t.key, status: 'completed', message: 'Already completed.' } };
       if (!hasEvidence(t, fnTools)) {
+        const n = (state.refusals[t.key] || 0) + 1;
+        state.refusals[t.key] = n;
+        let message = t.evidence.length
+          ? 'Not completed: the last tool operation for this task failed. If the change already went through, do not repeat it: a read that confirms the result counts as evidence.'
+          : 'Not completed: no tool operation has succeeded while this task was in progress. Do the work with your tools; a read that confirms the result counts as evidence. If you already made the change, do not repeat the create or change you already made: read it back to confirm it.';
+        if (n >= 2) message += ' Stop requesting completion; verify with a read tool or mark the step failed with a note.';
         return {
-          content: {
-            success: false,
-            task_id: t.key,
-            status: t.status,
-            refused: 'no_evidence',
-            message: t.evidence.length
-              ? 'Not completed: the last tool operation for this task failed. Fix it and try again before requesting completion.'
-              : 'Not completed: no tool operation has succeeded while this task was in progress. Mark it in_progress, do the work with your tools, then request completion.',
-          },
+          content: { success: false, task_id: t.key, status: t.status, refused: 'no_evidence', message },
+          ...(n >= 3 ? { stop: 'no_progress' } : {}),
         };
       }
       t.status = 'completed';
+      state.refusals[t.key] = 0;
       return { content: { success: true, task_id: t.key, status: 'completed', ...nextHint(state.plan) }, completed: true };
     }
     if (!['pending', 'in_progress', 'failed', 'cancelled'].includes(status)) {
@@ -277,16 +357,15 @@ export function projection(state) {
         completion_requested: t.completion_requested,
         proof: t.status === 'completed' ? 'tool_evidence' : (t.completion_requested ? 'missing' : 'none'),
         ...(t.status === 'cancelled' ? { cancelled: true } : {}),
+        ...(t.last_action ? { last_action: t.last_action } : {}),
       },
     })),
     summary: `${plan.title}: ${s.done}/${s.total} completed`,
   };
 }
 
-/** The card the projection operation writes. */
-export function planCardView(state) {
-  const plan = state.plan;
-  if (!plan) return null;
+/** A plan as the card the projection operation writes. */
+export function cardOf(plan) {
   return {
     no: plan.no,
     title: plan.title,
@@ -295,10 +374,18 @@ export function planCardView(state) {
     anchor_op: plan.anchor_op,
     card_path: plan.card_path || null,
     approval_digest: plan.approval ? plan.approval.digest : null,
+    ...(plan.carried && !plan.touched ? { carried: true } : {}),
     tasks: plan.tasks.map((t) => ({
       key: t.key, title: t.title, description: t.description, priority: t.priority, status: t.status,
       completion_requested: t.completion_requested,
       evidence_ops: t.evidence.filter((e) => e.ok).map((e) => e.op).slice(-5),
+      notes: t.notes || null,
+      last_action: t.last_action || null,
     })),
   };
+}
+
+/** The card the projection operation writes. */
+export function planCardView(state) {
+  return state.plan ? cardOf(state.plan) : null;
 }

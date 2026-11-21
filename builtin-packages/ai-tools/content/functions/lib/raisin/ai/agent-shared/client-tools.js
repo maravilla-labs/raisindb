@@ -71,8 +71,10 @@ function cleanTool(t) {
   if (t.annotations && typeof t.annotations === 'object') {
     for (const [k, v] of Object.entries(t.annotations)) if (typeof v === 'boolean') ann[k] = v;
   }
+  const title = typeof t.title === 'string' ? t.title.trim().slice(0, 80) : '';
   return {
     name,
+    ...(title ? { title } : {}),
     description: typeof t.description === 'string' ? t.description.slice(0, MAX_DESCRIPTION_CHARS) : '',
     inputSchema: schema,
     annotations: ann,

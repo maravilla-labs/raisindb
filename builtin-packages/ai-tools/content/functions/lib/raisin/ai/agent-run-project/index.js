@@ -37,10 +37,30 @@ async function verifyRun(ctx) {
   return view;
 }
 
+/**
+ * What the person reads. The model's own words win; when the runtime ended
+ * the run (or the run did not succeed) and the model said nothing usable, the
+ * engine's plain summary stands in. The generic "try again" line is only for a
+ * normal turn that produced no text.
+ */
 function finalContent(lastText, finish) {
-  const base = lastText && lastText.trim() ? lastText.trim() : TERMINAL_FALLBACK_TEXT;
-  if (!finish || finish.outcome === 'succeeded' || !finish.status_statement) return base;
-  return `${base}\n\nStatus (from the runtime): ${finish.status_statement}`;
+  const text = lastText && lastText.trim() ? lastText.trim() : '';
+  const statement = finish && finish.status_statement;
+  // A runtime stop without its own summary turn: the last text is an interim remark, not an answer.
+  if (finish && finish.runtime_stop && !finish.summarised && statement) return statement;
+  if (text) return text;
+  if (statement && finish && finish.outcome !== 'succeeded') return statement;
+  return TERMINAL_FALLBACK_TEXT;
+}
+
+function finishFacts(finish) {
+  return {
+    run_outcome: finish.outcome,
+    run_stop_reason: finish.reason || 'model_finished',
+    run_tasks_done: Array.isArray(finish.tasks_done) ? finish.tasks_done : [],
+    run_tasks_open: Array.isArray(finish.tasks_open) ? finish.tasks_open : [],
+    ...(finish.status_statement ? { run_status_statement: finish.status_statement } : {}),
+  };
 }
 
 async function finalize(ctx, args, outboxCtx) {
@@ -55,9 +75,8 @@ async function finalize(ctx, args, outboxCtx) {
     if (node && readAssistantContent(node.properties || {}) !== content) {
       await updateAssistantContent(ctx.workspace, node, content);
     }
-    await raisin.nodes.updateProperty(ctx.workspace, last.path, 'run_outcome', finish.outcome);
-    if (finish.status_statement) {
-      await raisin.nodes.updateProperty(ctx.workspace, last.path, 'run_status_statement', finish.status_statement);
+    for (const [k, v] of Object.entries(finishFacts(finish))) {
+      await raisin.nodes.updateProperty(ctx.workspace, last.path, k, v);
     }
     writes.push({ locator: locator(ctx.workspace, last.path), action: 'updated' });
   }
@@ -65,7 +84,7 @@ async function finalize(ctx, args, outboxCtx) {
     await sendAgentOutboxMessage(ctx.workspace, outboxCtx, content, 'chat', {
       finish_reason: finish.failed ? 'error' : 'stop',
       run_id: ctx.runId,
-      run_outcome: finish.outcome,
+      ...finishFacts(finish),
     }, { dedupe_key: `run_terminal:${ctx.runId}` });
   }
   await raisin.nodes.updateProperty(ctx.workspace, ctx.chatPath, 'last_agent_run_id', ctx.runId);
@@ -79,6 +98,9 @@ async function finalize(ctx, args, outboxCtx) {
     dispatchPhase: 'terminal',
     runId: ctx.runId,
     runOutcome: finish.outcome,
+    runStopReason: finish.reason || 'model_finished',
+    tasksDone: Array.isArray(finish.tasks_done) ? finish.tasks_done : [],
+    tasksOpen: Array.isArray(finish.tasks_open) ? finish.tasks_open : [],
     ...(finish.status_statement ? { serverStatus: finish.status_statement, verified: finish.outcome === 'succeeded' } : {}),
     timestamp: nowIso(),
   }, ctx.chatPath, ctx.streamChannel);
@@ -100,6 +122,11 @@ export async function handler(input = {}) {
     const writes = [];
     const refs = [];
     let planPath = null;
+    // Cards of plans that were replaced (or carried while pending): closed first.
+    for (const closed of Array.isArray(input.closed_plans) ? input.closed_plans : []) {
+      const closedPath = await upsertPlanCard(ctx, closed, rc.msg_path || null);
+      if (closedPath) await syncPlanCards(ctx, outboxCtx, closed, closedPath);
+    }
     if (input.plan) {
       planPath = await upsertPlanCard(ctx, input.plan, rc.msg_path || null);
       if (planPath) {

@@ -20,6 +20,8 @@ import { renderFacts } from '../content/functions/lib/raisin/ai/agent-run-model-
 import { inlineAttachments, attachmentsOfMessage } from '../content/functions/lib/raisin/ai/agent-shared/message-images.js';
 
 const CHAT = '/agents/a/inbox/chats/c';
+const EXPIRED = 'The page did not answer in time. The action may still be waiting for the person, or may already have run. Read the page again before retrying, and never repeat a create without checking.';
+const DECLINED = 'The person declined this action. Ask them what they want instead; do not retry it.';
 const OPS = new Set(['call_tool', 'request_model_turn', 'request_approval', 'ask_user']);
 
 /** A tiny core: feeds events, tracks rev/seq, unanswered calls and the open external request. */
@@ -72,6 +74,20 @@ function sim(input) {
   };
   s.start = () => s.send('run_started', { input });
   return s;
+}
+
+/** The page's refusal exactly as Studio sends it: the code is nested in payload.content. */
+async function refuse(s, code, shape = 'studio') {
+  const eff = s.park();
+  s.open = [];
+  const message = `The person ${code} it`;
+  const payload = shape === 'studio'
+    ? { ok: false, error: message, content: { ok: false, error: code, code, message } }
+    : { ok: false, error: code };
+  return s.send('tool_result', {
+    call_id: eff.for_call_id, tool: eff.tool,
+    envelope: { envelope: 'raisin.tool-result/1', operation_id: 'client:y', source: 'client', status: shape === 'studio' ? 'failed' : 'succeeded', payload },
+  }, { effect_id: eff.effect_id, operation_id: 'run-1/op/98' });
 }
 
 const POLICY = { kind: 'webmcp', allow: ['*'], deny: [], timeout_ms: 90000 };
@@ -159,7 +175,7 @@ test('a page tool that is not in the current set is answered with the stale-tool
   assert.equal(r.effects[0].kind, 'request_model_turn');
   assert.deepEqual(r.effects[0].tool_results, [{
     call_id: 'c1', synthetic: true,
-    content: { ok: false, error: 'tool no longer available on the page — re-read with page.get_location / page.get_document' },
+    content: { ok: false, error: 'tool no longer available on the page; re-read the page. Page tools now: page.get_document, page.insert_blocks, page.delete_page.' },
   }]);
 });
 
@@ -218,7 +234,7 @@ test('an oversized page answer is bounded without losing its framing', async () 
   assert.equal(c.content.truncated, true);
 });
 
-test('an unanswered call that expires reaches the model as client_unavailable', async () => {
+test('an unanswered call that expires reaches the model as expired, with what to do', async () => {
   const s = sim(base());
   await s.start();
   await s.modelDone([{ call_id: 'c1', name: 'page.insert_blocks', args: {} }]);
@@ -227,7 +243,9 @@ test('an unanswered call that expires reaches the model as client_unavailable', 
   const r = await s.send('request_closed', { request_id: 'run-1/req/1', reason: 'expired' });
   const eff = r.effects[0];
   assert.equal(eff.kind, 'request_model_turn');
-  assert.deepEqual(eff.tool_results, [{ call_id: 'c1', synthetic: true, content: { ok: false, error: 'client_unavailable' } }]);
+  assert.deepEqual(eff.tool_results, [{ call_id: 'c1', synthetic: true, content: { ok: false, error: 'expired', code: 'expired', message: EXPIRED } }]);
+  assert.equal(s.state.expiry_streak, 1);
+  assert.equal(s.state.progress.tool_failed, 0, 'an expiry is not a failure');
 });
 
 test('a new user message while the page has not answered withdraws the wait and answers the call', async () => {
@@ -486,13 +504,110 @@ test('a page tool that succeeds while a task is in progress is that task\'s evid
   assert.equal(s.state.plan.tasks[0].status, 'completed', 'page work counts as evidence');
   if (s.op().kind === 'call_tool' && s.op().args && s.op().args.reason) await s.send('tool_result', { envelope: { envelope: 'raisin.tool-result/1', operation_id: 'proj', status: 'succeeded', payload: {}, writes: [] } }, { effect_id: s.op().effect_id, operation_id: 'run-1/op/proj2' });
   await s.modelDone([{ call_id: 'c2', name: 'page.insert_blocks', args: { blocks: [1] } }]);
-  // The page ran the call but the tool refused (the person said no): status succeeded, payload.ok false.
-  const eff = s.park();
-  s.open = [];
-  await s.send('tool_result', {
-    call_id: eff.for_call_id, tool: eff.tool,
-    envelope: { envelope: 'raisin.tool-result/1', operation_id: 'client:y', source: 'client', status: 'succeeded', payload: { ok: false, error: 'declined' } },
-  }, { effect_id: eff.effect_id, operation_id: 'run-1/op/98' });
+  // The person said no: core sends status failed, the page's payload carries the code.
+  await refuse(s, 'declined');
   await s.modelDone([{ call_id: 'u4', name: 'update_task', args: { task_id: 't2', status: 'completed' } }]);
   assert.equal(s.state.plan.tasks[1].status, 'in_progress', 'a refused page call is no evidence');
+});
+
+test('a declined answer (studio shape) tells the model to ask the person, and is neutral', async () => {
+  const s = sim(base());
+  await s.start();
+  await s.modelDone([{ call_id: 'c1', name: 'page.insert_blocks', args: {} }]);
+  const r = await refuse(s, 'declined');
+  assert.deepEqual(r.effects[0].tool_results[0].content, { ok: false, error: 'declined', code: 'declined', message: DECLINED });
+  assert.equal(s.state.progress.tool_failed, 0);
+  assert.equal(s.state.progress.no_progress, 0);
+});
+
+test('the bare form (payload.error is exactly declined) is read the same way', async () => {
+  const s = sim(base());
+  await s.start();
+  await s.modelDone([{ call_id: 'c1', name: 'page.insert_blocks', args: {} }]);
+  const r = await refuse(s, 'declined', 'bare');
+  assert.equal(r.effects[0].tool_results[0].content.message, DECLINED);
+});
+
+test('a cancelled answer says nothing was done, and is neutral', async () => {
+  const s = sim(base());
+  await s.start();
+  await s.modelDone([{ call_id: 'c1', name: 'page.insert_blocks', args: {} }]);
+  const r = await refuse(s, 'cancelled');
+  assert.deepEqual(r.effects[0].tool_results[0].content, {
+    ok: false, error: 'cancelled', code: 'cancelled',
+    message: 'The run was stopped before this action was confirmed. Nothing was done.',
+  });
+  assert.equal(s.state.progress.no_progress, 0);
+});
+
+test('an expired answer from the page maps to the expired message', async () => {
+  const s = sim(base());
+  await s.start();
+  await s.modelDone([{ call_id: 'c1', name: 'page.insert_blocks', args: {} }]);
+  const r = await refuse(s, 'expired');
+  assert.equal(r.effects[0].tool_results[0].content.message, EXPIRED);
+});
+
+test('declines and expiries never feed the no-progress stop', async () => {
+  const s = sim(base({ config: { no_progress_limit: 2 } }));
+  await s.start();
+  for (let i = 0; i < 4; i++) {
+    await s.modelDone([{ call_id: `c${i}`, name: 'page.insert_blocks', args: { i } }]);
+    await refuse(s, 'declined');
+    assert.equal(s.op().kind, 'request_model_turn', 'the run goes on and asks the model');
+  }
+  assert.equal(s.state.finish, null);
+});
+
+test('two expiries in a row end the run after one tools-free summary, reason page_unanswered', async () => {
+  const s = sim(base());
+  await s.start();
+  for (const id of ['c1', 'c2']) {
+    await s.modelDone([{ call_id: id, name: 'page.insert_blocks', args: { id } }]);
+    s.park();
+    s.open = [];
+    await s.send('request_closed', { request_id: 'run-1/req/1', reason: 'expired' });
+    if (id === 'c1') assert.equal(s.op().kind, 'request_model_turn');
+  }
+  assert.equal(s.op().kind, 'request_model_turn');
+  assert.deepEqual(s.op().tools_offered, []);
+  assert.match(s.op().instructions, /did not answer twice/);
+  assert.equal(s.state.pending_stop.reason, 'page_unanswered');
+  await s.modelDone([], 'The page did not answer.');
+  assert.equal(s.op().args.reason, 'final');
+  assert.equal(s.state.finish.reason, 'page_unanswered');
+  assert.equal(s.state.finish.outcome, 'blocked');
+});
+
+test('a success resets the expiry count', async () => {
+  const s = sim(base());
+  await s.start();
+  await s.modelDone([{ call_id: 'c1', name: 'page.insert_blocks', args: { a: 1 } }]);
+  s.park();
+  s.open = [];
+  await s.send('request_closed', { request_id: 'run-1/req/1', reason: 'expired' });
+  assert.equal(s.state.expiry_streak, 1);
+  await s.modelDone([{ call_id: 'c2', name: 'page.get_document', args: {} }]);
+  await s.answer({ ok: true, content: {} });
+  assert.equal(s.state.expiry_streak, 0);
+});
+
+test('a closed request that is not the awaited one does not end the page wait', async () => {
+  const s = sim(base());
+  await s.start();
+  await s.modelDone([{ call_id: 'c1', name: 'page.insert_blocks', args: {} }]);
+  const eff = s.park();
+  s.open = [{ request_id: 'run-1/req/1', kind: 'external', effect_id: eff.effect_id }];
+  const r = await s.send('request_closed', { request_id: 'run-1/req/7', reason: 'expired' });
+  assert.deepEqual(r.effects, []);
+  assert.equal(s.state.awaiting.kind, 'tool');
+  assert.equal(s.state.expiry_streak, 0);
+});
+
+test('a page tool answer that failed (status failed, ok false) is a failure, not evidence', async () => {
+  const s = sim(base());
+  await s.start();
+  await s.modelDone([{ call_id: 'c1', name: 'page.insert_blocks', args: {} }]);
+  await s.answer({ ok: false, error: 'no such slot' });
+  assert.equal(s.state.progress.tool_failed, 1);
 });

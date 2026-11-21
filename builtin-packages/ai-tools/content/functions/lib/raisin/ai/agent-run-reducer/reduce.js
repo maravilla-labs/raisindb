@@ -20,9 +20,9 @@
 
 import { REDUCER_CONTRACT } from '../agent-shared/run-names.js';
 import { Effects, initState, runInput, note, setClient } from './state.js';
-import { adoptPlan, projection } from './plan.js';
+import { adoptPlan, closedCarried, projection } from './plan.js';
 import { onModelTurn, onToolResult, onOperationFailed } from './turn.js';
-import { askModel, dispatchNext, terminal } from './steps.js';
+import { askModel, dispatchNext, stopOrSummarise, terminal } from './steps.js';
 import { interruptWait } from './children.js';
 import { closeClientCall, interruptClientCall } from './client.js';
 
@@ -65,6 +65,8 @@ export function reduce(req) {
     state = initState(input, ev.seq);
     state.plan = adoptPlan(input.plan);
     if (state.plan) state.plan_seq = state.plan.no;
+    else state.closed_plans = closedCarried(input.plan);
+    if (state.closed_plans.length) state.plan_seq = state.closed_plans[0].no;
   }
   state.last_event_seq = ev.seq;
 
@@ -81,7 +83,9 @@ export function reduce(req) {
 
   switch (ev.kind) {
     case 'run_started':
-      askModel(state, fx);
+      // A carried plan's stale card is closed first (one operation per response).
+      if (state.closed_plans.length) dispatchNext(state, fx, run);
+      else askModel(state, fx);
       break;
     case 'model_turn_completed':
       onModelTurn(state, ev, run, fx);
@@ -104,9 +108,14 @@ export function reduce(req) {
     case 'request_closed':
       // A page tool's wait ended without an answer (the deadline passed): the
       // model is told the page was unavailable, never left waiting.
-      if (closeClientCall(state)) {
-        dispatchNext(state, fx, run);
-        break;
+      {
+        const closed = closeClientCall(state, ev, run);
+        if (closed === 'ignored') break;
+        if (closed) {
+          if (state.expiry_streak >= 2) stopOrSummarise(state, fx, { outcome: 'blocked', reason: 'page_unanswered' });
+          else dispatchNext(state, fx, run);
+          break;
+        }
       }
       onRequestResolved(state, { ...ev, data: { ...(ev.data || {}), decision: 'reject', reason: `request ${ev.data && ev.data.reason}` } }, run, fx);
       break;
@@ -148,6 +157,10 @@ function ingestTerminal(state, ev) {
 function onUserInput(state, ev, run, fx) {
   state.progress.steers += 1;
   state.steer_pending = true;
+  // A new message is new direction: the loop and expiry counts start over.
+  state.progress.loop_hits = 0;
+  state.expiry_streak = 0;
+  state.loop_notice = null;
   // Input that is not a transcript message (a steer sent straight to the
   // runtime) reaches the model through the next turn's instructions. A parent
   // run's message or redirect (core's `parent_message` / `parent_steer`)

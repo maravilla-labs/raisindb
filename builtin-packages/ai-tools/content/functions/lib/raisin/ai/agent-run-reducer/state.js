@@ -107,12 +107,20 @@ export function initState(input, seq) {
       model_turns: 0, tool_calls: 0, tool_ok: 0, tool_failed: 0, refused: 0,
       writes: 0, loop_hits: 0, no_progress: 0, steers: 0,
     },
-    turn_stats: { calls: 0, ok: 0 },
+    turn_stats: { calls: 0, ok: 0, neutral: 0 },
     fingerprints: {},
     writes: [],
     children: [],
     steer_pending: false,
     after_turn: null,
+    // A stop the runtime decided on, delivered after one tools-free summary turn.
+    pending_stop: null,
+    expiry_streak: 0,
+    refusals: {},
+    loop_notice: null,
+    restate_next: false,
+    // Plan cards to close (superseded or carried-and-pending) on the next projection.
+    closed_plans: [],
     finish: null,
     model_retries: 0,
     diagnostics: [],
@@ -220,6 +228,8 @@ export function contentOfClientEnvelope(env) {
   const p = env && env.payload && typeof env.payload === 'object' ? env.payload : {};
   const out = { ok: p.ok === true };
   if (p.error !== undefined && p.error !== null) out.error = p.error;
+  if (typeof p.code === 'string') out.code = p.code;
+  if (typeof p.message === 'string') out.message = p.message;
   if (env && env.untrusted === true) {
     out.untrusted = true;
     out.notice = UNTRUSTED_NOTICE;

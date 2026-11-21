@@ -8,6 +8,8 @@
 import { PROJECT_FUNCTION } from '../agent-shared/run-names.js';
 import { allowedClientTools, pageToolName } from '../agent-shared/client-tools.js';
 import { PLAN_SCHEMAS, planCardView, planStats, approvalSubject } from './plan.js';
+
+const OPEN = new Set(['pending', 'in_progress']);
 import { toolContext, countFingerprint, note } from './state.js';
 import { childFacts } from './children.js';
 
@@ -61,11 +63,20 @@ export function facts(state) {
   };
 }
 
+const STOP_INSTRUCTIONS = {
+  no_progress: 'The last steps did not work and I have to stop. Tell the person plainly what was done, what is still open, and why you could not continue. Do not start anything new; no tools are offered in this turn.',
+  loop_detected: 'You kept repeating the same step and I have to stop. Tell the person plainly what was done, what is still open, and what you would need to continue. Do not start anything new; no tools are offered in this turn.',
+  page_unanswered: 'The person\'s page did not answer twice in a row, so I have to stop. Tell the person plainly what was done, what may still be waiting on their page, and that they can ask you to continue. Do not start anything new; no tools are offered in this turn.',
+};
+
 function instructionsFor(state) {
   const parts = [];
+  let restate = false;
   if (state.cfg.instructions) parts.push(state.cfg.instructions);
   if (state.after_turn === 'summarise') {
-    parts.push('Stop here: summarise what was done and what remains for the user. Do not start another task; no tools are offered in this turn.');
+    const stop = state.pending_stop && STOP_INSTRUCTIONS[state.pending_stop.reason];
+    parts.push(stop || 'Stop here: summarise what was done and what remains for the user. Do not start another task; no tools are offered in this turn.');
+    if (stop) restate = true;
   }
   if (state.steer_pending) {
     parts.push('The user sent a new message while you were working. Read it and take it into account before anything else.');
@@ -74,12 +85,17 @@ function instructionsFor(state) {
     parts.push(`New input from the user:\n${state.steer_texts.map((t) => `- ${t}`).join('\n')}`);
     state.steer_texts = [];
   }
-  const loop = state.diagnostics.filter((d) => d.code === 'loop_detected').slice(-1)[0];
-  if (loop) parts.push(`Runtime notice: ${loop.message}`);
+  if (state.loop_notice) {
+    parts.push(`Runtime notice: ${state.loop_notice}`);
+    state.loop_notice = null;
+    restate = true;
+  }
   if (state.nudge_pending) {
     parts.push(`Runtime notice: ${state.nudge_pending}`);
     state.nudge_pending = null;
+    restate = true;
   }
+  state.restate_next = restate;
   return parts.length ? parts.join('\n\n') : undefined;
 }
 
@@ -95,11 +111,15 @@ function toolResults(state) {
 /** Ask the model for its next turn. */
 export function askModel(state, fx) {
   const ts = state.turn_stats;
-  if (ts.calls > 0) state.progress.no_progress = ts.ok > 0 ? 0 : state.progress.no_progress + 1;
-  state.turn_stats = { calls: 0, ok: 0 };
-  if (state.progress.no_progress >= state.cfg.no_progress_limit) {
+  // A declined or expired page answer is neutral: it neither resets nor feeds the stall count.
+  if (ts.calls > 0) {
+    if (ts.ok > 0) state.progress.no_progress = 0;
+    else if (ts.calls - (ts.neutral || 0) > 0) state.progress.no_progress += 1;
+  }
+  state.turn_stats = { calls: 0, ok: 0, neutral: 0 };
+  if (state.after_turn !== 'summarise' && state.progress.no_progress >= state.cfg.no_progress_limit) {
     note(state, 'no_progress', `${state.progress.no_progress} consecutive turns made no successful tool call`, 'warning');
-    return finishRun(state, fx, { outcome: 'blocked', reason: 'no_progress' });
+    return stopOrSummarise(state, fx, { outcome: 'blocked', reason: 'no_progress' });
   }
   const results = toolResults(state);
   const nextTurn = state.progress.model_turns + 1;
@@ -111,10 +131,11 @@ export function askModel(state, fx) {
     tools_offered: offers(state),
     ...(instructions ? { instructions } : {}),
     tool_results: results,
-    context: { checkpoint: true, facts: facts(state) },
+    context: { checkpoint: true, facts: facts(state), ...(state.restate_next && instructions ? { restate_instructions: true } : {}) },
     ...(state.cfg.output_schema ? { output_schema: state.cfg.output_schema } : {}),
   });
   state.steer_pending = false;
+  state.restate_next = false;
   state.awaiting = { kind: 'model', effect_id: effectId };
   return effectId;
 }
@@ -122,11 +143,14 @@ export function askModel(state, fx) {
 /** Issue the projection operation; `then` says what follows its result. */
 export function project(state, fx, run, reason, then) {
   state.plan_dirty = false;
+  const closed = state.closed_plans;
+  state.closed_plans = [];
   const effectId = fx.push('call_tool', {
     tool: PROJECT_FUNCTION,
     args: {
       reason,
       plan: planCardView(state),
+      ...(closed.length ? { closed_plans: closed } : {}),
       finish: state.finish,
       last_text: state.last_text,
       progress: state.progress,
@@ -171,6 +195,8 @@ export function dispatchNext(state, fx, run) {
     state.awaiting = {
       kind: 'tool', effect_id: effectId, call_id: next.call_id, name: next.name,
       function_path: next.function_path, args: next.args || {},
+      mutating: next.mutating !== false,
+      label: next.label || null,
       ...(next.client ? { client: true, resume_key: next.client.resume_key } : {}),
     };
     return;
@@ -179,7 +205,7 @@ export function dispatchNext(state, fx, run) {
     if (state.plan_dirty) return project(state, fx, run, 'approval', 'approval');
     return requestApproval(state, fx);
   }
-  if (state.plan_dirty) return project(state, fx, run, 'plan', 'continue');
+  if (state.plan_dirty || state.closed_plans.length) return project(state, fx, run, 'plan', 'continue');
   return askModel(state, fx);
 }
 
@@ -191,31 +217,70 @@ export function requestApproval(state, fx) {
   return effectId;
 }
 
+const RUNTIME_STOPS = new Set(['no_progress', 'loop_detected', 'page_unanswered', 'model_failed', 'write_scope_violation']);
+const STOP_REASON_TEXT = {
+  no_progress: 'my last steps did not work',
+  loop_detected: 'I kept repeating the same step',
+  page_unanswered: 'the page did not answer',
+  model_failed: 'the assistant could not continue',
+  write_scope_violation: 'this task tried to change something it was not allowed to',
+};
+
+function titles(tasks, max) {
+  const names = tasks.slice(0, max).map((t) => t.title);
+  return names.join(', ') + (tasks.length > max ? `, and ${tasks.length - max} more` : '');
+}
+
+/**
+ * Stop because the runtime decided to, not the model: one tools-free turn
+ * first, so the person reads the model's own words; the stop is delivered when
+ * that turn returns. A stop that was already announced, or a summary turn that
+ * is already the current one, finishes directly.
+ */
+export function stopOrSummarise(state, fx, stop) {
+  if (state.after_turn === 'summarise' || state.pending_stop) {
+    state.pending_stop = null;
+    return finishRun(state, fx, stop);
+  }
+  state.pending_stop = stop;
+  state.after_turn = 'summarise';
+  state.queue = [];
+  return askModel(state, fx);
+}
+
 /**
  * End the run honestly. The outcome comes from the plan, never from the
  * model's prose: a plan with open tasks is `partial`, a loop or a stall is
  * `blocked`. The projection runs first so the transcript shows the result.
+ * The status sentence is plain words for the person; the facts it states are
+ * also kept as data (`stop_reason`, `tasks_done`, `tasks_open`).
  */
-export function finishRun(state, fx, { outcome, reason, code, message } = {}) {
+export function finishRun(state, fx, { outcome, reason, code, message, summarised } = {}) {
   const s = planStats(state.plan);
   let out = outcome;
   if (!out) out = !s || s.open === 0 ? 'succeeded' : 'partial';
-  const lines = [];
-  if (s) {
-    lines.push(`Plan "${state.plan.title}": ${s.done}/${s.total} task(s) completed with evidence.`);
-    if (s.requested_without_evidence.length) {
-      lines.push(`Completion was requested without evidence for: ${s.requested_without_evidence.join(', ')}.`);
-    }
+  const plan = state.plan;
+  const done = plan ? plan.tasks.filter((t) => t.status === 'completed').map((t) => ({ key: t.key, title: t.title })) : [];
+  const open = plan ? plan.tasks.filter((t) => OPEN.has(t.status)).map((t) => ({ key: t.key, title: t.title })) : [];
+  const why = reason || 'model_finished';
+  const stopped = RUNTIME_STOPS.has(why);
+  if (why === 'model_failed' && message) note(state, 'model_failed', message, 'warning');
+  const parts = [];
+  if (stopped) parts.push('I stopped before finishing.');
+  if (plan) {
+    parts.push(`Done: ${done.length} of ${plan.tasks.length} steps${done.length ? ` (${titles(done, 5)})` : ''}.`);
+    if (open.length) parts.push(`Still open: ${titles(open, 5)}.`);
   }
-  if (reason === 'no_progress') lines.push('Stopped: several turns in a row made no successful tool call.');
-  if (reason === 'loop_detected') lines.push('Stopped: the same tool call kept being repeated.');
-  if (reason === 'model_failed') lines.push(`Stopped: the model could not produce a turn (${message || 'provider error'}).`);
-  if (reason === 'write_scope_violation') lines.push(`Stopped: this delegated run wrote outside what it was granted (${message || 'see diagnostics'}).`);
+  if (stopped) parts.push(`Reason: ${STOP_REASON_TEXT[why]}.`, 'You can ask me to continue.');
   state.finish = {
     outcome: out,
-    reason: reason || 'model_finished',
+    reason: why,
     failed: code ? { code, message: message || code } : null,
-    status_statement: lines.join(' ') || null,
+    status_statement: parts.join(' ') || null,
+    runtime_stop: stopped,
+    summarised: summarised === true,
+    tasks_done: done,
+    tasks_open: open,
   };
   state.queue = [];
   // Children still working are stopped by the runtime when this run ends.
@@ -229,6 +294,7 @@ export function projectFinal(state, fx) {
     args: {
       reason: 'final',
       plan: planCardView(state),
+      ...(state.closed_plans.length ? { closed_plans: state.closed_plans } : {}),
       finish: state.finish,
       last_text: state.last_text,
       progress: state.progress,

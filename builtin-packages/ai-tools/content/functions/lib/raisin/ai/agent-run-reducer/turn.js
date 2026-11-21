@@ -8,8 +8,8 @@
 import {
   findTool, fingerprint, recordWrites, boundedContent, contentOfEnvelope, note, toolContext,
 } from './state.js';
-import { applyPlanCall, attributeEvidence } from './plan.js';
-import { dispatchNext, askModel, finishRun, terminal, requestApproval } from './steps.js';
+import { applyPlanCall, attributeEvidence, actionLabel } from './plan.js';
+import { dispatchNext, askModel, finishRun, stopOrSummarise, terminal, requestApproval } from './steps.js';
 import { clientCall, clientQueueEntry, applyClientAnswer, clientSucceeded } from './client.js';
 import { pageToolName } from '../agent-shared/client-tools.js';
 import { trackChildren, scopeRefusal, scopeViolations, continueWait, handbackOf } from './children.js';
@@ -17,6 +17,14 @@ import { trackChildren, scopeRefusal, scopeViolations, continueWait, handbackOf 
 function refuse(state, callId, message, extra = {}) {
   state.progress.refused += 1;
   state.results.push({ call_id: callId, synthetic: true, content: { status: 'refused', error: message, ...extra } });
+}
+
+/** A loop-limit refusal: the notice the model reads, once, on its next turn. */
+function loopHit(state, id, msg) {
+  state.progress.loop_hits += 1;
+  note(state, 'loop_detected', msg, 'warning');
+  state.loop_notice = msg;
+  refuse(state, id, msg, { loop_detected: true });
 }
 
 /** A model turn completed: gate every call, answer domain calls, queue the rest. */
@@ -39,10 +47,18 @@ export function onModelTurn(state, ev, run, fx) {
   }
   if (calls.length === 0 || state.after_turn === 'summarise') {
     for (const c of calls) refuse(state, c.call_id, 'No tools are offered in this turn.');
+    if (state.pending_stop) {
+      // The tools-free summary the runtime asked for before it stopped the run.
+      const stop = state.pending_stop;
+      state.pending_stop = null;
+      state.after_turn = null;
+      return finishRun(state, fx, { ...stop, summarised: true });
+    }
     return finishRun(state, fx, { reason: state.after_turn === 'summarise' ? 'step_complete' : 'model_finished' });
   }
 
   let approval = false;
+  let stopReason = null;
   for (const call of calls) {
     const id = call.call_id;
     if (!id) continue;
@@ -58,16 +74,14 @@ export function onModelTurn(state, ev, run, fx) {
         const fp = fingerprint(pageToolName(page.bare), call.args);
         const seen = state.fingerprints[fp] || 0;
         const queuedTwin = state.queue.some((q) => q.fp === fp);
-        if (seen >= state.cfg.loop_limit || queuedTwin) {
-          state.progress.loop_hits += 1;
-          const msg = queuedTwin
+        const readOnly = page.tool.annotations && page.tool.annotations.readOnlyHint === true;
+        if ((seen >= state.cfg.loop_limit && !readOnly) || queuedTwin) {
+          loopHit(state, id, queuedTwin
             ? `\`${pageToolName(page.bare)}\` was called twice with identical arguments in one turn; it runs once.`
-            : `\`${pageToolName(page.bare)}\` has already run ${seen} time(s) with exactly these arguments; read the page again, change the approach, or finish.`;
-          note(state, 'loop_detected', msg, 'warning');
-          refuse(state, id, msg, { loop_detected: true });
+            : `\`${pageToolName(page.bare)}\` has already run ${seen} time(s) with exactly these arguments; read the page again, change the approach, or finish.`);
           continue;
         }
-        state.queue.push(clientQueueEntry(state, call, page, fp));
+        state.queue.push({ ...clientQueueEntry(state, call, page, fp), label: actionLabel(page.tool.title, page.bare) });
         continue;
       }
       if (page === true) continue;
@@ -82,19 +96,19 @@ export function onModelTurn(state, ev, run, fx) {
         continue;
       }
       state.results.push({ call_id: id, synthetic: true, content: r.content });
+      if (r.stop) stopReason = r.stop;
       if (r.completed && state.cfg.execution_mode === 'step_by_step') state.after_turn = 'summarise';
       continue;
     }
     const fp = fingerprint(tool.name, call.args);
     const seen = state.fingerprints[fp] || 0;
     const queuedTwin = state.queue.some((q) => q.fp === fp);
-    if (seen >= state.cfg.loop_limit || queuedTwin) {
-      state.progress.loop_hits += 1;
-      const msg = queuedTwin
+    // A read may be repeated (the page or the data changed); only a twin in ONE turn runs once.
+    const readOnly = tool.mutating === false || tool.replay_safe === true;
+    if ((seen >= state.cfg.loop_limit && !readOnly) || queuedTwin) {
+      loopHit(state, id, queuedTwin
         ? `\`${tool.name}\` was called twice with identical arguments in one turn; it runs once.`
-        : `\`${tool.name}\` has already run ${seen} time(s) with exactly these arguments; its result will not change. Use what it returned, change the approach, or finish.`;
-      note(state, 'loop_detected', msg, 'warning');
-      refuse(state, id, msg, { loop_detected: true });
+        : `\`${tool.name}\` has already run ${seen} time(s) with exactly these arguments; its result will not change. Use what it returned, change the approach, or finish.`);
       continue;
     }
     const outOfScope = scopeRefusal(state, tool, call.args);
@@ -105,12 +119,15 @@ export function onModelTurn(state, ev, run, fx) {
     }
     state.queue.push({
       call_id: id, name: tool.name, function_path: tool.function_path, args: call.args || {},
-      mutating: tool.mutating, replay_safe: tool.replay_safe, fp,
+      mutating: tool.mutating, replay_safe: tool.replay_safe, fp, label: actionLabel(null, tool.name),
     });
   }
 
+  if (stopReason && !approval) {
+    return stopOrSummarise(state, fx, { outcome: 'blocked', reason: stopReason });
+  }
   if (state.progress.loop_hits >= state.cfg.loop_hits_limit && state.queue.length === 0) {
-    return finishRun(state, fx, { outcome: 'blocked', reason: 'loop_detected' });
+    return stopOrSummarise(state, fx, { outcome: 'blocked', reason: 'loop_detected' });
   }
   if (approval) {
     state.queue = [];
@@ -130,8 +147,11 @@ export function onToolResult(state, ev, run, fx) {
     // A page tool is a tool like any other for the plan: what it did while a task was in progress is that task's
     // evidence (the page reports `ok: false` for a refusal or failure). Without this, an agent that works through
     // page tools could never complete a task.
-    applyClientAnswer(state, env, awaiting);
-    attributeEvidence(state, ev.operation_id, clientSucceeded(env), 0);
+    const res = applyClientAnswer(state, env, awaiting);
+    if (!res.neutral) attributeEvidence(state, ev.operation_id, res.ok, 0, awaiting.label);
+    // A change was made: what was read before it no longer counts as "already done".
+    if (res.ok && awaiting.mutating) state.fingerprints = {};
+    if (state.expiry_streak >= 2) return stopOrSummarise(state, fx, { outcome: 'blocked', reason: 'page_unanswered' });
     return dispatchNext(state, fx, run);
   }
   // A child's hand-back answered a wait: learn it, then wait for the rest.
@@ -147,10 +167,12 @@ export function onToolResult(state, ev, run, fx) {
   if (ok) {
     state.progress.tool_ok += 1;
     state.turn_stats.ok += 1;
+    state.expiry_streak = 0;
+    if (awaiting.mutating !== false) state.fingerprints = {};
   } else {
     state.progress.tool_failed += 1;
   }
-  attributeEvidence(state, ev.operation_id, ok, writes);
+  attributeEvidence(state, ev.operation_id, ok, writes, awaiting.label);
   state.results.push({
     call_id: awaiting.call_id || d.call_id,
     synthetic: false,
@@ -174,6 +196,13 @@ export function onOperationFailed(state, ev, run, fx) {
       state.model_retries += 1;
       note(state, 'model_retry', `model turn failed (${d.error_class}); retry ${state.model_retries}`, 'warning');
       return askModel(state, fx);
+    }
+    if (state.pending_stop) {
+      // The summary turn failed: the stop the runtime decided on still stands.
+      const stop = state.pending_stop;
+      state.pending_stop = null;
+      state.after_turn = null;
+      return finishRun(state, fx, stop);
     }
     return finishRun(state, fx, {
       outcome: 'blocked', reason: 'model_failed', code: 'model_turn_failed',
@@ -206,7 +235,10 @@ function afterProjection(state, fx, run, then) {
       // finishing because of the no-progress limit would hit that limit again in askModel, finish again, find the
       // steer still pending, and loop on the final projection until the budget ran out.
       state.progress.no_progress = 0;
-      state.turn_stats = { calls: 0, ok: 0 };
+      state.turn_stats = { calls: 0, ok: 0, neutral: 0 };
+      state.pending_stop = null;
+      state.after_turn = null;
+      state.expiry_streak = 0;
       return askModel(state, fx);
     }
     return terminal(state, fx);
@@ -219,6 +251,8 @@ function afterProjection(state, fx, run, then) {
 function shouldNudge(state) {
   const plan = state.plan;
   if (!plan || plan.status !== 'active' || (state.nudges || 0) >= 1) return false;
-  if (!['automatic', 'approve_then_auto'].includes(state.cfg.execution_mode)) return false;
+  if (!['automatic', 'approve_then_auto', 'agent_decides'].includes(state.cfg.execution_mode)) return false;
+  // A plan carried from an earlier request is the model's to pick up, not to be nagged about.
+  if (plan.carried && !plan.touched) return false;
   return plan.tasks.some((t) => t.status === 'pending' || t.status === 'in_progress');
 }

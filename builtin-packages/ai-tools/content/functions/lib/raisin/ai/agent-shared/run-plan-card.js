@@ -15,7 +15,7 @@ import { createOrGet } from './run-transcript.js';
 import { sendAgentOutboxMessage } from './outbox.js';
 import { shortRun, turnMessagePath } from './run-names.js';
 
-const CARD_STATUS = { pending_approval: 'pending_approval', active: 'in_progress', rejected: 'cancelled' };
+const CARD_STATUS = { pending_approval: 'pending_approval', active: 'in_progress', rejected: 'cancelled', cancelled: 'cancelled' };
 
 /** The card's status for the plan's current state. */
 export function cardStatus(plan) {
@@ -40,6 +40,8 @@ function taskProps(t) {
     run_task_key: t.key,
     completion_requested: t.completion_requested === true,
     evidence_ops: t.evidence_ops || [],
+    notes: t.notes || '',
+    last_action: t.last_action || '',
   };
 }
 
@@ -90,7 +92,15 @@ export function planCardData(plan, planPath, runId) {
     run_id: runId,
     title: plan.title,
     description: plan.description || '',
-    tasks: plan.tasks.map((t) => ({ task_id: t.key, title: t.title, status: t.status, completion_requested: t.completion_requested === true })),
+    tasks: plan.tasks.map((t) => ({
+      task_id: t.key,
+      title: t.title,
+      description: t.description || '',
+      status: t.status,
+      completion_requested: t.completion_requested === true,
+      notes: t.notes || '',
+      last_action: t.last_action || '',
+    })),
     status,
     requires_approval: status === 'pending_approval',
     approval_digest: plan.approval_digest || null,

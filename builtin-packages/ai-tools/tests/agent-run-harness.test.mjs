@@ -233,8 +233,40 @@ test('the final projection delivers the answer with the runtime status, and the 
   const t2 = await raisin.nodes.get('ai', `${card.path}/task-2`);
   assert.equal(t2.properties.status, 'pending');
   const done = f.events.find((e) => e.type === 'conversation:done');
-  assert.match(done.payload.content, /Status \(from the runtime\)/);
+  assert.equal(done.payload.content, 'Done!', 'the model\'s words, with no runtime status appended');
+  assert.doesNotMatch(done.payload.content, /Status \(from the runtime\)/);
   assert.equal(done.payload.runOutcome, 'partial');
+});
+
+test('a run the runtime stopped, with no words from the model, tells the person plainly what happened', async () => {
+  const f = fakeRaisin();
+  seedChat(f);
+  f.runs[RUN] = { status: 'running', run: { run_id: RUN, subject: { workspace: 'ai', path: CHAT } } };
+  const msg = `${CHAT}/${turnMessageName(RUN, `${RUN}/op/1`)}`;
+  f.put('ai', msg, { node_type: 'raisin:Message', properties: { role: 'assistant', content: 'Now creating the rooms', run_id: RUN } });
+  const statement = 'I stopped before finishing. Done: 1 of 2 steps (a). Still open: b. Reason: the page did not answer. You can ask me to continue.';
+  await project({
+    reason: 'final',
+    plan: { no: 1, title: 'P', status: 'active', anchor_op: `${RUN}/op/1`, tasks: [{ key: 't1', title: 'a', status: 'completed' }, { key: 't2', title: 'b', status: 'pending' }] },
+    finish: {
+      outcome: 'blocked', reason: 'page_unanswered', runtime_stop: true, summarised: false, status_statement: statement,
+      tasks_done: [{ key: 't1', title: 'a' }], tasks_open: [{ key: 't2', title: 'b' }],
+    },
+    last_text: 'Now creating the rooms',
+    __raisin_context: { workspace: 'ai', chat_path: CHAT, run_id: RUN, operation_id: `${RUN}/op/2` },
+  });
+  const done = f.events.find((e) => e.type === 'conversation:done');
+  assert.equal(done.payload.content, statement);
+  assert.doesNotMatch(done.payload.content, /Please try again|Status \(from the runtime\)/);
+  assert.equal(done.payload.runStopReason, 'page_unanswered');
+  assert.deepEqual(done.payload.tasksDone, [{ key: 't1', title: 'a' }]);
+  assert.deepEqual(done.payload.tasksOpen, [{ key: 't2', title: 'b' }]);
+  const node = await raisin.nodes.get('ai', msg);
+  assert.equal(node.properties.content, statement);
+  assert.equal(node.properties.run_outcome, 'blocked');
+  assert.equal(node.properties.run_stop_reason, 'page_unanswered');
+  assert.deepEqual(node.properties.run_tasks_open, [{ key: 't2', title: 'b' }]);
+  assert.equal(node.properties.run_status_statement, statement);
 });
 
 test('the projection refuses a run that is not about this conversation', async () => {

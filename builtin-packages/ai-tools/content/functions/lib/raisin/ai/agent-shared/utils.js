@@ -75,6 +75,7 @@ ${modeInstructions[mode] || modeInstructions.automatic}
 
 Guidelines:
 - Work through tasks one at a time
+- Before creating records, check what already exists.
 - Always mark a task as in_progress before starting and completed when done
 - NEVER call update_task more than once for the SAME task in a single response.
   Tool calls in one response run in parallel: first send update_task(in_progress),
