@@ -174,7 +174,7 @@ test('backfill: dry run counts, a real run mirrors with the call\'s own time, a 
   const sent = steps(h);
   assert.deepEqual(sent.map((b) => b.properties.created_at), ['2026-05-01T10:00:00.000Z', '2026-05-01T10:00:02.000Z', '2026-05-01T10:00:03.000Z']);
   assert.equal(sent[1].properties.data.status, 'failed');
-  assert.equal(sent[1].properties.data.result_summary, 'no index');
+  assert.equal('result_summary' in sent[1].properties.data, false, 'a turn that did not stream results stores none');
   assert.equal(sent[0].name, toolCallMirrorSlug(RUN, 'k1'));
   const again = await backfill({ chat_path: CHAT });
   assert.deepEqual([again.mirrored, again.already_mirrored], [0, 3]);

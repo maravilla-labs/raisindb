@@ -220,6 +220,7 @@ export async function handler(input = {}) {
     const node = await writeAssistantTurn(ctx, msgName, output, {
       senderId: outboxCtx ? outboxCtx.agentUserId : 'ai-assistant',
       senderName: outboxCtx ? outboxCtx.agentDisplayName : 'AI Assistant',
+      streamResults: agentProps.stream_tool_results === true,
     });
     if (node && node.path) {
       await createCostRecord(ctx.workspace, ctx.chatPath, node.path, {

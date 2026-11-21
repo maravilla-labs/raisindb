@@ -99,8 +99,13 @@ export function resultSummary(content) {
   try { return clip(JSON.stringify(boundValue(inner))); } catch (_) { return ''; }
 }
 
-/** The `data` of the person's `ai_tool_call` message. */
-export function toolCallData(call, tr, runId) {
+/**
+ * The `data` of the person's `ai_tool_call` message. The person already sees a
+ * call's name and arguments live; a RESULT reaches them live only when the agent
+ * streams results (`stream_tool_results`), so the stored copy carries a result
+ * summary only then (`includeResult`). Without it: name, arguments, status.
+ */
+export function toolCallData(call, tr, runId, { includeResult = false } = {}) {
   const content = tr.content;
   return {
     tool_call_id: tr.call_id,
@@ -108,7 +113,7 @@ export function toolCallData(call, tr, runId) {
     function_name: call.name,
     arguments: boundArguments(call.args),
     status: mirrorStatus(content),
-    result_summary: resultSummary(content),
+    ...(includeResult ? { result_summary: resultSummary(content) } : {}),
     run_id: runId,
   };
 }
@@ -128,10 +133,10 @@ export function finishedAtOf(tr) {
  * with now (+ `seq` ms, so one batch keeps its order). Never throws: a display
  * copy must not stop a run.
  */
-export async function mirrorToolCall(ctx, outboxCtx, call, tr, seq = 0) {
+export async function mirrorToolCall(ctx, outboxCtx, call, tr, seq = 0, { includeResult = false } = {}) {
   if (!outboxCtx || !isMirroredCall(call.name)) return false;
   try {
-    const data = toolCallData(call, tr, ctx.runId);
+    const data = toolCallData(call, tr, ctx.runId, { includeResult });
     await sendAgentOutboxMessage(ctx.workspace, outboxCtx, call.name, 'ai_tool_call', data, {
       slug: toolCallMirrorSlug(ctx.runId, tr.call_id),
       created_at: finishedAtOf(tr) || new Date(Date.now() + seq).toISOString(),

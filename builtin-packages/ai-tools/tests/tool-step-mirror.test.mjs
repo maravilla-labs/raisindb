@@ -42,11 +42,21 @@ test('each finished call is mirrored once, with the documented shape', async () 
   assert.equal(a.recipient_id, 'u1');
   assert.deepEqual(a.data, {
     tool_call_id: 'c1', tool_name: 'page.list_agenda', function_name: 'page.list_agenda',
-    arguments: { day: 'friday' }, status: 'completed', result_summary: '3 items', run_id: 'abcd1234-run',
+    arguments: { day: 'friday' }, status: 'completed', run_id: 'abcd1234-run',
   });
   assert.equal(b.data.status, 'failed');
-  assert.equal(b.data.result_summary, 'no index');
+  assert.equal('result_summary' in b.data, false, 'no result for an agent that does not stream results');
   assert.ok(a.created_at < b.created_at, 'calls of one batch keep their order');
+});
+
+test('a result summary is stored only for an agent that streams results (live or recorded on the turn)', async () => {
+  const live = setup([{ call_id: 'c1', name: 'search-documents', args: {} }]);
+  await writeToolResults(ctx, live.prev, [{ call_id: 'c1', content: { status: 'failed', error: 'no index' } }], { outbox, streamResults: true });
+  assert.equal(live.h.calls.outbox.find((b) => b.properties.message_type === 'ai_tool_call').properties.data.result_summary, 'no index');
+  const recorded = setup([{ call_id: 'c2', name: 'page.read', args: {} }]);
+  recorded.prev.properties.run_stream_results = true;
+  await writeToolResults(ctx, recorded.prev, [{ call_id: 'c2', content: { ok: true, content: [1, 2, 3] } }], { outbox });
+  assert.equal(recorded.h.calls.outbox.find((b) => b.properties.message_type === 'ai_tool_call').properties.data.result_summary, '3 items');
 });
 
 test('re-projection does not duplicate (replay writes nothing new)', async () => {

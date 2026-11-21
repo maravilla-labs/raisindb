@@ -48,10 +48,14 @@ const toIso = (v) => {
   return Number.isNaN(t) ? null : new Date(t).toISOString();
 };
 
-async function runIdOf(row, props) {
-  if (props.run_id) return String(props.run_id);
+async function turnOf(row) {
   const parent = await raisin.nodes.get(WORKSPACE, row.path.split('/').slice(0, -1).join('/'));
-  return parent && parent.properties && parent.properties.run_id ? String(parent.properties.run_id) : null;
+  return (parent && parent.properties) || {};
+}
+
+async function runIdOf(row, props, turn) {
+  if (props.run_id) return String(props.run_id);
+  return turn.run_id ? String(turn.run_id) : null;
 }
 
 async function resultContentOf(row, props) {
@@ -88,7 +92,8 @@ export async function handler(input = {}) {
       if (!isMirroredCall(props.function_name)) { counts.skipped_internal += 1; continue; }
       const chat = chatPathOfCall(row.path);
       if (!chat) { counts.skipped_no_outbox += 1; continue; }
-      const runId = await runIdOf(row, props);
+      const turn = await turnOf(row);
+      const runId = await runIdOf(row, props, turn);
       if (!runId) { counts.skipped_no_run += 1; continue; }
       if (!outboxByChat.has(chat)) {
         const chatNode = await raisin.nodes.get(WORKSPACE, chat);
@@ -101,7 +106,7 @@ export async function handler(input = {}) {
       if (dryRun) { counts.would_mirror += 1; continue; }
       const call = { call_id: props.tool_call_id, name: props.function_name, args: props.arguments || {} };
       const tr = { call_id: props.tool_call_id, content: await resultContentOf(row, props) };
-      await sendAgentOutboxMessage(WORKSPACE, outbox, call.name, 'ai_tool_call', toolCallData(call, tr, runId), {
+      await sendAgentOutboxMessage(WORKSPACE, outbox, call.name, 'ai_tool_call', toolCallData(call, tr, runId, { includeResult: turn.run_stream_results === true }), {
         slug,
         created_at: toIso(row.created_at) || new Date().toISOString(),
       });

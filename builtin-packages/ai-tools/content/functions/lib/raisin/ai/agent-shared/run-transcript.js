@@ -119,6 +119,8 @@ export async function writeToolResults(ctx, prevMsg, toolResults, options = {}) 
     ? prevMsg.properties.run_tool_calls : [];
   let written = 0;
   let mirrored = 0;
+  // Results go to the person only for an agent that streams them; the turn records that, so every writer agrees.
+  const includeResult = options.streamResults === true || (prevMsg.properties && prevMsg.properties.run_stream_results === true);
   for (const tr of toolResults) {
     if (!tr || !tr.call_id) continue;
     const call = calls.find((c) => c.call_id === tr.call_id) || { call_id: tr.call_id, name: 'tool', args: {} };
@@ -127,7 +129,7 @@ export async function writeToolResults(ctx, prevMsg, toolResults, options = {}) 
     // The person's copy of the step. Idempotent, and tried again for a call
     // already stored: a worker that died after the agent-side write but before
     // this one must not leave the person's copy missing.
-    await mirrorToolCall(ctx, options.outbox, call, tr, mirrored);
+    await mirrorToolCall(ctx, options.outbox, call, tr, mirrored, { includeResult });
     mirrored += 1;
     const existing = await raisin.nodes.get(ctx.workspace, `${prevMsg.path}/${name}`);
     if (existing) continue;
@@ -188,6 +190,7 @@ export async function writeAssistantTurn(ctx, name, output, meta = {}) {
       run_id: ctx.runId,
       operation_id: ctx.operationId,
       run_tool_calls: output.tool_calls,
+      ...(meta.streamResults ? { run_stream_results: true } : {}),
       run_turn_output: output,
       // A run's messages never look like a legacy in-flight turn.
       dispatch_phase: 'terminal',
