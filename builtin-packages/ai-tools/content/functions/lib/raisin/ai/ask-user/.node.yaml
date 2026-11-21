@@ -1,0 +1,33 @@
+node_type: raisin:Function
+properties:
+  title: "Ask User"
+  description: |
+    # Ask User
+    Ask the person one question and wait for the answer. Use it only when you cannot continue without the answer, or when
+    the answer changes what you would do or build. Offer `choices` when there are clear options (at most 6); the person
+    can always type something else. One question at a time. Never ask for something you can look up or reasonably decide.
+  execution_mode: "inline"
+  category: "interaction"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  input_schema:
+    type: "object"
+    properties:
+      question:
+        type: "string"
+        description: "The question, short and specific."
+      choices:
+        type: "array"
+        description: "Optional answers to offer as buttons (at most 6)."
+        items:
+          type: "string"
+    required:
+      - question
+  output_schema:
+    type: "object"
+    properties:
+      success:
+        type: "boolean"
+      answer:
+        type: "string"

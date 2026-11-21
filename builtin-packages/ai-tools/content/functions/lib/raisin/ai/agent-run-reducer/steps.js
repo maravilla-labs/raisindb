@@ -201,12 +201,26 @@ export function dispatchNext(state, fx, run) {
     };
     return;
   }
+  if (state.question && !state.question.request_open) {
+    // The plan card first, so the transcript shows where the work stands while the person is asked.
+    if (state.plan_dirty) return project(state, fx, run, 'plan', 'question');
+    return requestQuestion(state, fx);
+  }
   if (state.plan && state.plan.status === 'pending_approval' && state.plan.approval && !state.plan.approval.request_open) {
     if (state.plan_dirty) return project(state, fx, run, 'approval', 'approval');
     return requestApproval(state, fx);
   }
   if (state.plan_dirty || state.closed_plans.length) return project(state, fx, run, 'plan', 'continue');
   return askModel(state, fx);
+}
+
+/** Open the question the model asked: the run parks until the person answers (or sends another message). */
+export function requestQuestion(state, fx) {
+  const q = state.question;
+  const effectId = fx.push('ask_user', { question: q.text, ...(q.choices.length ? { choices: q.choices } : {}) });
+  q.request_open = true;
+  state.awaiting = { kind: 'input', effect_id: effectId };
+  return effectId;
 }
 
 /** Open the approval request for the pending plan. */

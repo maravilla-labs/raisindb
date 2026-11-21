@@ -9,7 +9,7 @@ import {
   findTool, fingerprint, recordWrites, boundedContent, contentOfEnvelope, note, toolContext,
 } from './state.js';
 import { applyPlanCall, attributeEvidence, actionLabel } from './plan.js';
-import { dispatchNext, askModel, finishRun, stopOrSummarise, terminal, requestApproval } from './steps.js';
+import { dispatchNext, askModel, finishRun, stopOrSummarise, terminal, requestApproval, requestQuestion } from './steps.js';
 import { clientCall, clientQueueEntry, applyClientAnswer, clientSucceeded } from './client.js';
 import { pageToolName } from '../agent-shared/client-tools.js';
 import { trackChildren, scopeRefusal, scopeViolations, continueWait, handbackOf } from './children.js';
@@ -58,12 +58,17 @@ export function onModelTurn(state, ev, run, fx) {
   }
 
   let approval = false;
+  let asking = false;
   let stopReason = null;
   for (const call of calls) {
     const id = call.call_id;
     if (!id) continue;
     if (approval) {
       refuse(state, id, 'Not run: the plan is waiting for the user\'s approval.');
+      continue;
+    }
+    if (asking) {
+      refuse(state, id, 'Not run: your question is waiting for the person\'s answer. Ask one question at a time and act after it is answered.');
       continue;
     }
     const tool = findTool(state, call.name);
@@ -91,6 +96,11 @@ export function onModelTurn(state, ev, run, fx) {
     }
     if (tool.kind === 'domain') {
       const r = applyPlanCall(state, tool.domain_op, call.args, id, ev.operation_id);
+      if (r.question) {
+        state.question = { ...r.question, request_open: false };
+        asking = true;
+        continue;
+      }
       if (r.approval) {
         approval = true;
         continue;
@@ -132,6 +142,10 @@ export function onModelTurn(state, ev, run, fx) {
   if (approval) {
     state.queue = [];
     state.plan_dirty = true;
+  }
+  if (asking) {
+    // Calls queued before the question ran in this turn's order only up to it: nothing after a question runs.
+    state.queue = [];
   }
   return dispatchNext(state, fx, run);
 }
@@ -244,6 +258,7 @@ function afterProjection(state, fx, run, then) {
     return terminal(state, fx);
   }
   if (then === 'approval' && state.plan && state.plan.approval) return requestApproval(state, fx);
+  if (then === 'question' && state.question && !state.question.request_open) return requestQuestion(state, fx);
   return dispatchNext(state, fx, run);
 }
 

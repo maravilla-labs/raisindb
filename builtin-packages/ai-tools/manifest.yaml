@@ -43,6 +43,7 @@ provides:
     - /functions/lib/raisin/ai/add-task
     - /functions/lib/raisin/ai/update-task
     - /functions/lib/raisin/ai/get-plan-status
+    - /functions/lib/raisin/ai/ask-user
     - /functions/lib/raisin/ai/delegate-task
     - /functions/lib/raisin/ai/get-delegation-status
     - /functions/lib/raisin/ai/remember
@@ -96,6 +97,7 @@ sync:
         - "add-task/**"
         - "update-task/**"
         - "get-plan-status/**"
+        - "ask-user/**"
         - "delegate-task/**"
         - "get-delegation-status/**"
         - "remember/**"

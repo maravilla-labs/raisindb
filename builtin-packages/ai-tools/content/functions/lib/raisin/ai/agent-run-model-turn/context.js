@@ -80,6 +80,9 @@ export async function buildSystemPrompt({ agentProps, request, memoryOwner, skil
     prompt += `\n${getPlanningSystemPromptAddition(agentProps.execution_mode)}`;
     prompt += '\nUnder this runtime a task is marked completed only when a tool operation succeeded while it was in progress; requesting completion without that is refused.';
   }
+  if (offeredNames.has('ask_user')) {
+    prompt += '\n\n## Asking the person\nYou can ask the person one question with ask_user; the run waits for the answer and then continues. Ask only when you cannot go on without it, or when the answer changes what you would do or build (which venue, how many rooms, which of two meanings). Never ask what you can look up or reasonably decide, and never ask permission for what they already asked you to do. One short question at a time; give `choices` when there are clear options (they can always type something else). After the answer, carry on and do not ask it again.';
+  }
   if (memoryOwner) {
     const memory = await loadUserMemory(memoryOwner.agentName, memoryOwner.userId);
     if (memory) prompt += formatMemoryForPrompt(memory);

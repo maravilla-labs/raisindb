@@ -53,7 +53,8 @@ export async function resolveRunTools(agentProps, { hasSkills = false } = {}) {
   const tools = [];
   for (const [name, ref] of Object.entries(toolNameToRef)) {
     const entry = runToolOf(name, ref);
-    if (entry.kind === 'domain' && !taskCreation) continue;
+    // Planning tools need `task_creation_enabled`; asking the person does not.
+    if (entry.kind === 'domain' && !taskCreation && String(entry.domain_op).startsWith('plan.')) continue;
     tools.push(entry);
   }
   if (hasSkills && !tools.some((t) => t.name === LOAD_SKILL_TOOL_NAME)) {
@@ -62,7 +63,7 @@ export async function resolveRunTools(agentProps, { hasSkills = false } = {}) {
     ]);
     for (const [name, ref] of Object.entries(extra.toolNameToRef)) tools.push(runToolOf(name, ref));
   }
-  return { tools, hasPlanningTools: tools.some((t) => t.kind === 'domain') };
+  return { tools, hasPlanningTools: tools.some((t) => t.kind === 'domain' && String(t.domain_op).startsWith('plan.')) };
 }
 
 function trivialSchema(schema) {

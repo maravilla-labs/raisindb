@@ -112,6 +112,8 @@ export function initState(input, seq) {
     writes: [],
     children: [],
     steer_pending: false,
+    // The question the model asked the person while a run waits for the answer: {call_id, text, choices, request_open}.
+    question: null,
     after_turn: null,
     // A stop the runtime decided on, delivered after one tools-free summary turn.
     pending_stop: null,

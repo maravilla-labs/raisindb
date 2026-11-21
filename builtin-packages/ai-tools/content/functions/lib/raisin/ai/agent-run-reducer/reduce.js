@@ -20,7 +20,7 @@
 
 import { REDUCER_CONTRACT } from '../agent-shared/run-names.js';
 import { Effects, initState, runInput, note, setClient } from './state.js';
-import { adoptPlan, closedCarried, projection } from './plan.js';
+import { adoptPlan, answerText, closedCarried, projection } from './plan.js';
 import { onModelTurn, onToolResult, onOperationFailed } from './turn.js';
 import { askModel, dispatchNext, stopOrSummarise, terminal } from './steps.js';
 import { interruptWait } from './children.js';
@@ -187,6 +187,14 @@ function onUserInput(state, ev, run, fx) {
     state.plan.approval = null;
     state.plan_dirty = true;
   }
+  if (state.question) {
+    state.results.push({
+      call_id: state.question.call_id,
+      synthetic: true,
+      content: { success: false, status: 'superseded', message: 'The person wrote in the chat instead of answering. Read their message and carry on from it.' },
+    });
+    state.question = null;
+  }
   // Waiting on a page tool or on child runs: the withdraw above releases the
   // wait; answer it.
   if (!interruptClientCall(state, run)) interruptWait(state, run);
@@ -227,6 +235,30 @@ function onRequestResolved(state, ev, run, fx) {
     plan.approval = null;
     if (approved && mode === 'manual') state.after_turn = 'summarise';
     state.plan_dirty = true;
+  } else if (state.question && (d.kind === 'input' || d.decision)) {
+    const q = state.question;
+    state.question = null;
+    if (d.kind === 'input') {
+      const answer = answerText(d.value);
+      state.results.push({
+        call_id: q.call_id,
+        synthetic: true,
+        content: {
+          success: true, status: 'answered', answer,
+          message: 'The person answered. Continue with their answer; do not ask the same thing again.',
+        },
+      });
+      note(state, 'input_received', 'the user answered a question');
+    } else {
+      state.results.push({
+        call_id: q.call_id,
+        synthetic: true,
+        content: {
+          success: false, status: 'unanswered',
+          message: 'The person did not answer. Do not ask again right away: continue with a sensible default and say which, or stop and say what you need.',
+        },
+      });
+    }
   } else if (d.kind === 'input') {
     note(state, 'input_received', 'the user answered a question');
   }

@@ -62,6 +62,14 @@ export const PLAN_SCHEMAS = Object.freeze({
     },
   },
   'plan.status': { type: 'object', properties: {} },
+  'ask.user': {
+    type: 'object',
+    required: ['question'],
+    properties: {
+      question: { type: 'string', description: 'The question, short and specific.' },
+      choices: { type: 'array', items: { type: 'string' }, description: 'Optional answers to offer as buttons (at most 6). The person can always type something else.' },
+    },
+  },
 });
 
 function task(i, t) {
@@ -207,9 +215,31 @@ export function actionLabel(title, name) {
  * Apply one domain plan call. Returns `{ content, approval? }` — the synthetic
  * answer the model reads, and whether the plan now awaits approval.
  */
+const MAX_CHOICES = 6;
+
+/** The question the model asks, cleaned: `{question: {call_id, text, choices}}`, or a refusal the model reads. */
+function askCall(state, a, callId) {
+  const text = typeof a.question === 'string' ? a.question.trim().slice(0, 600) : '';
+  if (!text) return { content: { success: false, error: 'ask_user needs a question' } };
+  if (state.question) return { content: { success: false, error: 'A question is already waiting for the person.' } };
+  const choices = (Array.isArray(a.choices) ? a.choices : [])
+    .map((c) => (typeof c === 'string' ? c : (c && typeof c === 'object' ? String(c.label ?? c.value ?? '') : '')).trim().slice(0, 120))
+    .filter(Boolean)
+    .slice(0, MAX_CHOICES);
+  return { question: { call_id: callId, text, choices } };
+}
+
+/** What the model reads for the person's answer: the text, whatever shape the answer arrived in. */
+export function answerText(value) {
+  if (typeof value === 'string') return value.trim();
+  if (value && typeof value === 'object') return String(value.value ?? value.label ?? value.text ?? JSON.stringify(value)).trim();
+  return value == null ? '' : String(value);
+}
+
 export function applyPlanCall(state, op, args, callId, opId) {
   const fnTools = state.tools.filter((t) => t.kind === 'function').length;
   const a = args && typeof args === 'object' ? args : {};
+  if (op === 'ask.user') return askCall(state, a, callId);
   if (op === 'plan.create') {
     if (!a.title || !Array.isArray(a.tasks) || a.tasks.length === 0) {
       return { content: { success: false, error: 'create_plan needs a title and at least one task' } };

@@ -107,5 +107,6 @@ export function planOpOf(pathOrName) {
     'add-task': 'plan.add_task',
     'update-task': 'plan.update_task',
     'get-plan-status': 'plan.status',
+    'ask-user': 'ask.user',
   }[tail] || null;
 }

@@ -59,6 +59,7 @@ function sim(input) {
     for (const e of resp.effects) {
       if (e.kind === 'request_model_turn') s.unanswered = [];
       if (e.kind === 'request_approval') s.open = [{ request_id: 'run-1/req/1', kind: 'approval', effect_id: e.effect_id, subject_digest: e.subject.digest }];
+      if (e.kind === 'ask_user') s.open = [{ request_id: 'run-1/req/1', kind: 'input', effect_id: e.effect_id }];
       if (e.kind === 'withdraw_request') s.open = s.open.filter((r) => r.request_id !== e.request_id);
       if (e.kind === 'complete' || e.kind === 'fail') s.status = e.kind === 'complete' ? 'completed' : 'failed';
     }
@@ -320,6 +321,81 @@ test('a message that arrives while a stalled run is finishing gets a real model 
   assert.equal(after.kind, 'request_model_turn', 'the steer is answered by the model');
   assert.equal(s.state.finish, null);
   assert.equal(s.state.steer_pending, false);
+});
+
+const ASK_TOOLS = [...TOOLS, { name: 'ask-user', kind: 'domain', domain_op: 'ask.user' }];
+
+test('ask_user parks the run on the question, and the answer is the tool result', async () => {
+  const s = sim({ text: 'build it', tools: ASK_TOOLS });
+  await s.start();
+  await s.modelDone('', [{ call_id: 'q', name: 'ask_user', args: { question: 'Two rooms or three?', choices: ['Two', 'Three', '', 'x'.repeat(200)] } }]);
+  const ask = s.op();
+  assert.equal(ask.kind, 'ask_user');
+  assert.equal(ask.question, 'Two rooms or three?');
+  assert.equal(ask.choices.length, 3, 'empty choices dropped, long ones cut');
+  assert.equal(ask.choices[2].length, 120);
+  assert.equal(s.state.awaiting.kind, 'input');
+  s.open = [];
+  await s.send('request_resolved', { request_id: 'run-1/req/1', kind: 'input', value: 'Three' }, { effect_id: ask.effect_id });
+  const turn = s.op();
+  assert.equal(turn.kind, 'request_model_turn');
+  const answer = turn.tool_results.find((r) => r.call_id === 'q').content;
+  assert.equal(answer.status, 'answered');
+  assert.equal(answer.answer, 'Three');
+  assert.equal(s.state.question, null);
+});
+
+test('an answer arriving as {value, label} is read as its value; nothing after a question runs; a second question in one turn is refused', async () => {
+  const s = sim({ text: 'x', tools: ASK_TOOLS });
+  await s.start();
+  await s.modelDone('', [
+    { call_id: 'q1', name: 'ask_user', args: { question: 'Which venue?' } },
+    { call_id: 's', name: 'search', args: { q: 'later' } },
+    { call_id: 'q2', name: 'ask_user', args: { question: 'And which date?' } },
+  ]);
+  const ask = s.op();
+  assert.equal(ask.kind, 'ask_user');
+  assert.equal(ask.choices, undefined);
+  s.open = [];
+  await s.send('request_resolved', { request_id: 'run-1/req/1', kind: 'input', value: { value: 'Lugano', label: 'Palazzo, Lugano' } }, { effect_id: ask.effect_id });
+  const results = s.op().tool_results;
+  assert.equal(results.find((r) => r.call_id === 'q1').content.answer, 'Lugano');
+  assert.equal(results.find((r) => r.call_id === 's').content.status, 'refused', 'the call after the question was not run');
+  assert.equal(results.find((r) => r.call_id === 'q2').content.status, 'refused');
+});
+
+test('a message instead of an answer withdraws the question and supersedes it', async () => {
+  const s = sim({ text: 'x', tools: ASK_TOOLS });
+  await s.start();
+  await s.modelDone('', [{ call_id: 'q', name: 'ask_user', args: { question: 'Which venue?' } }]);
+  assert.equal(s.op().kind, 'ask_user');
+  const r = await s.send('user_input', { steer_id: 'run-1/steer/1', input: { text: 'Lugano, obviously' } });
+  assert.equal(r.effects[0].kind, 'withdraw_request');
+  const turn = r.effects.find((e) => e.kind === 'request_model_turn');
+  assert.ok(turn, 'the model gets a turn');
+  assert.equal(turn.tool_results.find((x) => x.call_id === 'q').content.status, 'superseded');
+  assert.equal(s.state.question, null);
+});
+
+test('a question nobody answers (the request expires) tells the model so', async () => {
+  const s = sim({ text: 'x', tools: ASK_TOOLS });
+  await s.start();
+  await s.modelDone('', [{ call_id: 'q', name: 'ask_user', args: { question: 'Which venue?' } }]);
+  const ask = s.op();
+  s.open = [];
+  await s.send('request_closed', { request_id: 'run-1/req/1', reason: 'expired' }, { effect_id: ask.effect_id });
+  const content = s.op().tool_results.find((x) => x.call_id === 'q').content;
+  assert.equal(content.status, 'unanswered');
+});
+
+test('ask_user needs no planning: it is offered without task creation, and an empty question is refused', async () => {
+  const s = sim({ text: 'x', tools: [{ name: 'ask-user', kind: 'domain', domain_op: 'ask.user' }] });
+  const r0 = await s.start();
+  assert.deepEqual(r0.effects[0].tools_offered.map((t) => t.name), ['ask-user']);
+  assert.deepEqual(r0.effects[0].tools_offered[0].schema.required, ['question']);
+  await s.modelDone('', [{ call_id: 'q', name: 'ask_user', args: { question: '   ' } }]);
+  assert.equal(s.op().kind, 'request_model_turn', 'no question was asked');
+  assert.equal(s.op().tool_results.find((x) => x.call_id === 'q').content.success, false);
 });
 
 test('a retryable model failure retries, then fails the run through the projection', async () => {
