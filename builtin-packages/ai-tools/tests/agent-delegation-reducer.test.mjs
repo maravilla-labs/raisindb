@@ -122,6 +122,8 @@ test('a delegated run\'s write grant: out-of-scope calls are refused, reported s
   assert.equal(final.tool, PROJECT_FUNCTION);
   assert.equal(s.state.finish.outcome, 'blocked');
   assert.equal(s.state.finish.reason, 'write_scope_violation');
+  // No model turn follows, so the last turn's answer travels with the final projection.
+  assert.deepEqual(final.args.pending_tool_results.map((r) => r.call_id), ['c2']);
   assert.equal(final.args.__raisin_context.delegation.parent_run_id, 'run-p');
   // The hand-back is core's, from the terminal outcome: artifacts carry the
   // `kind` + `locator` core matches expected artifacts on.

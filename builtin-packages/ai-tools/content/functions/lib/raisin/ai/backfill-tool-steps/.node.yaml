@@ -1,0 +1,28 @@
+node_type: raisin:Function
+properties:
+  name: backfill-tool-steps
+  title: Backfill tool steps
+  description: >-
+    Admin only. Mirrors the tool calls of conversations that ended before the
+    tool-step history existed into the chatting person's own conversation, as
+    `ai_tool_call` messages (the same name and time the live mirror uses, so
+    running it twice, or next to a live run, never duplicates a step). Pages
+    through `raisin:AIToolCall` nodes with a path cursor; `dry_run` only counts.
+  execution_mode: Sync
+  # Writes into agent outboxes; refuses any caller that is not a system admin.
+  execution_context: system
+  category: admin
+  enabled: true
+  language: javascript
+  entry_file: index.js:handler
+  input_schema:
+    type: object
+    additionalProperties: false
+    properties:
+      chat_path: { type: string, description: "One conversation, /agents/<agent>/inbox/chats/<id>." }
+      agent_path: { type: string, description: "One agent, /agents/<agent>. Omit both paths for every agent." }
+      dry_run: { type: boolean, default: false }
+      limit: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      cursor: { type: string, description: "The next_cursor of the previous page." }
+  resource_limits:
+    timeout_ms: 60000

@@ -124,6 +124,9 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
   const excluded = options?.excludeMessagePaths instanceof Set ? options.excludeMessagePaths : null;
   let directMessages = (childrenByParent.get(chatPath) || [])
     .filter(n => n.node_type === 'raisin:Message')
+    // The person's display copy of a tool step; the call itself is already in
+    // the history through its AIToolCall node under the assistant message.
+    .filter(n => n.properties?.message_type !== 'ai_tool_call')
     .filter(n => !excluded || !excluded.has(n.path))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 

@@ -2,6 +2,8 @@ import { agentRunsAvailable, runIdOfChat, getRun, isTerminal, controlRun } from 
 import { emitAssistantTurnStopped, resolveStreamChannel } from '../agent-shared/streaming.js';
 import { resolveAgentOutboxContext } from '../agent-shared/outbox.js';
 import { shortRun } from '../agent-shared/run-names.js';
+import { findPreviousTurn, writeToolResults } from '../agent-shared/run-transcript.js';
+import { mirrorUnrecordedCalls } from '../agent-shared/run-tool-mirror.js';
 import { latestOpenPlan, upsertPlanCard, syncPlanCards } from '../agent-shared/run-plan-card.js';
 
 const USER_WORKSPACE = 'raisin:access_control';
@@ -83,7 +85,9 @@ async function stopAgentRun(agentChatRow, reason, sourcePath) {
       AGENT_WORKSPACE, agentChatRow.path, `run-${shortRun(runId)}-stopped`,
       { request_id: requestId, reason, source_conversation_path: sourcePath }, outbox, channel,
     );
-    await releasePlanCard({ workspace: AGENT_WORKSPACE, chatPath: agentChatRow.path, chat, runId }, outbox);
+    const runCtx = { workspace: AGENT_WORKSPACE, chatPath: agentChatRow.path, chat, runId, streamChannel: channel };
+    await releasePlanCard(runCtx, outbox);
+    await mirrorStoppedSteps(runCtx, outbox, view);
   }
   return {
     accepted,
@@ -113,5 +117,25 @@ async function releasePlanCard(ctx, outbox) {
     if (path) await syncPlanCards(ctx, outbox, released, path);
   } catch (err) {
     console.log('[request-conversation-stop] plan card release failed:', err && err.message);
+  }
+}
+
+/**
+ * The last turn's steps at the moment of the stop: calls the run already has
+ * an answer for are recorded with that answer (no model turn will write them
+ * now); only the calls that never got one are listed as stopped. Never throws.
+ */
+async function mirrorStoppedSteps(ctx, outbox, view) {
+  try {
+    const last = await findPreviousTurn(ctx.workspace, ctx.chatPath, ctx.runId, null);
+    if (!last) return;
+    const state = (view && view.run && view.run.state) || {};
+    const ids = new Set(Array.isArray(state.last_turn && state.last_turn.calls) ? state.last_turn.calls : []);
+    const answered = (Array.isArray(state.results) ? state.results : [])
+      .filter((r) => r && ids.has(r.call_id) && !(r.synthetic && r.content && r.content.error === 'No tools are offered in this turn.'));
+    if (answered.length) await writeToolResults(ctx, last, answered, { outbox });
+    await mirrorUnrecordedCalls(ctx, outbox, last);
+  } catch (err) {
+    console.log('[request-conversation-stop] stopped steps not mirrored:', err && err.message);
   }
 }

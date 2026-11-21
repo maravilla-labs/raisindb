@@ -90,6 +90,9 @@ async function resolveAgentOutboxContext(workspace, chatPath, chatNode) {
  * Create a message node in the agent's outbox folder.
  * The process-chat trigger will detect it and mirror it to the human's inbox.
  */
+/** A node name an outbox message may carry. */
+const SAFE_SLUG = /^[A-Za-z0-9][A-Za-z0-9_-]{0,191}$/;
+
 function hashDedupeKey(input) {
   const text = String(input || '');
   let hash = 2166136261;
@@ -124,9 +127,17 @@ async function sendAgentOutboxMessage(workspace, outboxCtx, content, messageType
   const dedupeKey = typeof options?.dedupe_key === 'string' && options.dedupe_key.trim()
     ? options.dedupe_key.trim()
     : null;
-  const slug = dedupeKey
-    ? `msg-${messageType}-${hashDedupeKey(dedupeKey)}`
-    : `msg-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  // An explicit slug is used verbatim (callers that can build a collision-free
+  // name, such as the tool-step mirror); otherwise the dedupe key is hashed.
+  const explicitSlug = options?.slug === undefined || options?.slug === null ? null : String(options.slug);
+  if (explicitSlug !== null && !SAFE_SLUG.test(explicitSlug)) {
+    throw new Error(`sendAgentOutboxMessage: unsafe slug '${explicitSlug}'`);
+  }
+  const slug = explicitSlug
+    || (dedupeKey
+      ? `msg-${messageType}-${hashDedupeKey(dedupeKey)}`
+      : `msg-${Date.now()}-${Math.floor(Math.random() * 100000)}`);
+  const idempotent = !!(explicitSlug || dedupeKey);
 
   // Determine role based on message type — agent outbox messages are always from the assistant
   const role = (messageType === 'chat' || messageType === 'ai_tool_call'
@@ -147,7 +158,7 @@ async function sendAgentOutboxMessage(workspace, outboxCtx, content, messageType
         sender_path: outboxCtx.agentHomePath,
         recipient_id: outboxCtx.senderId,
         recipient_path: outboxCtx.senderPath,
-        created_at: new Date().toISOString(),
+        created_at: typeof options?.created_at === 'string' ? options.created_at : new Date().toISOString(),
         body: {
           message_text: content,
           content,
@@ -159,10 +170,11 @@ async function sendAgentOutboxMessage(workspace, outboxCtx, content, messageType
       },
     });
   } catch (err) {
-    if (dedupeKey && String(err?.message || '').includes('already exists')) {
+    if (idempotent && String(err?.message || '').includes('already exists')) {
       log.debug('outbox', 'Skipping duplicate outbox message', {
         type: messageType,
         dedupe_key: dedupeKey,
+        slug,
       });
       return;
     }

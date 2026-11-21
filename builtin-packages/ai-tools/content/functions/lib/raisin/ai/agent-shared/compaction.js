@@ -109,6 +109,7 @@ async function maybeCompactConversation(workspace, chatPath, agentProps, modelId
     // The threshold and the cutoff are about MESSAGES, as they always were.
     const messages = all.filter(
       (n) => n.node_type === 'raisin:Message'
+        && n.properties?.message_type !== 'ai_tool_call'
         && n.path.split('/').slice(0, -1).join('/') === chatPath,
     );
 

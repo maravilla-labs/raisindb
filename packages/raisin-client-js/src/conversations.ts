@@ -893,7 +893,7 @@ export class ConversationManager {
 
     const [msgResponse, childResponse] = await Promise.all([
       this.sqlQuery(
-        `SELECT id, path, name, properties, created_at FROM '${ws}' WHERE CHILD_OF('${conversationPath}') AND node_type = 'raisin:Message' AND (properties->>'message_type'::String IS NULL OR properties->>'message_type'::String NOT IN ('ai_tool_call', 'ai_tool_result', 'ai_thought')) ORDER BY created_at ASC`,
+        `SELECT id, path, name, properties, created_at FROM '${ws}' WHERE CHILD_OF('${conversationPath}') AND node_type = 'raisin:Message' AND (properties->>'message_type'::String IS NULL OR properties->>'message_type'::String NOT IN ('ai_tool_result', 'ai_thought')) ORDER BY created_at ASC`,
       ),
       this.sqlQuery(
         `SELECT id, path, name, node_type, properties, created_at FROM '${ws}' WHERE DESCENDANT_OF('${conversationPath}') AND node_type IN ('raisin:AIPlan', 'raisin:AITask', 'raisin:AIThought', 'raisin:AICostRecord') ORDER BY created_at ASC`,
@@ -994,7 +994,19 @@ export class ConversationManager {
       return true;
     });
 
-    return filteredRows.map((row: any) => {
+    // A message's own `created_at` property (the time it happened) wins over
+    // the node's system column (the time it was stored), so a backfilled or
+    // late-delivered message sorts where it belongs. Stable for equal times.
+    const timeOf = (row: any): string | undefined => {
+      const own = row.properties?.created_at;
+      return typeof own === 'string' && !Number.isNaN(Date.parse(own)) ? own : row.created_at;
+    };
+    const ordered = filteredRows
+      .map((row: any, index: number) => ({ row, index, at: Date.parse(timeOf(row) ?? '') || 0 }))
+      .sort((a, b) => a.at - b.at || a.index - b.index)
+      .map((x) => x.row);
+
+    return ordered.map((row: any) => {
       const props = row.properties ?? {};
       const message: ChatMessage = {
         role: props.role ?? 'assistant',
@@ -1002,7 +1014,7 @@ export class ConversationManager {
           ?? (typeof props.body === 'string' ? props.body : props.body?.content)
           ?? props.data?.content
           ?? '',
-        timestamp: row.created_at ?? new Date().toISOString(),
+        timestamp: timeOf(row) ?? new Date().toISOString(),
         id: row.id,
         path: row.path,
         children: childrenByMsg.get(row.path),
@@ -1043,7 +1055,9 @@ export class ConversationManager {
         } satisfies ToolCallRecord));
       }
 
-      if (props.tool_call_id) message.toolCallId = props.tool_call_id;
+      const callId = props.tool_call_id
+        ?? (props.message_type === 'ai_tool_call' ? (props.data as Record<string, unknown> | undefined)?.tool_call_id : undefined);
+      if (callId) message.toolCallId = callId as string;
 
       if (Array.isArray(props.children) && props.children.length > 0) {
         const inlineChildren: MessageChild[] = props.children.map((c: any) => ({

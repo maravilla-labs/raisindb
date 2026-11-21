@@ -248,7 +248,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 0
    },
    "state_rev": 1,
    "effects": [
@@ -491,7 +492,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 0
    },
    "state_rev": 1,
    "event": {
@@ -674,7 +676,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 0
    },
    "state_rev": 2,
    "effects": [
@@ -890,7 +893,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 0
    },
    "state_rev": 2,
    "event": {
@@ -1069,7 +1073,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 1
    },
    "state_rev": 3,
    "effects": [
@@ -1297,7 +1302,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 1
    },
    "state_rev": 3,
    "event": {
@@ -1444,7 +1450,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 2
    },
    "state_rev": 4,
    "effects": [
@@ -1664,7 +1671,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 2
    },
    "state_rev": 4,
    "event": {
@@ -1812,7 +1820,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 2
    },
    "state_rev": 5,
    "effects": [
@@ -1993,7 +2002,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 2
    },
    "state_rev": 5,
    "event": {
@@ -2133,7 +2143,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 3
    },
    "state_rev": 6,
    "effects": [
@@ -2359,7 +2370,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 3
    },
    "state_rev": 6,
    "event": {
@@ -2510,7 +2522,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 4
    },
    "state_rev": 7,
    "effects": [
@@ -2737,7 +2750,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 4
    },
    "state_rev": 7,
    "event": {
@@ -2920,7 +2934,8 @@
     "closed_plans": [],
     "finish": null,
     "model_retries": 0,
-    "diagnostics": []
+    "diagnostics": [],
+    "results_sent_turn": 4
    },
    "state_rev": 8,
    "effects": [

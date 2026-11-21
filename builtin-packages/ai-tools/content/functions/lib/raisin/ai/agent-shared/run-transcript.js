@@ -21,6 +21,7 @@ import { log } from './logger.js';
 import { resolveStreamChannel, emitConversationEvent } from './streaming.js';
 import { safeName, turnMessageName, shortRun } from './run-names.js';
 import { plainReferences } from './utils.js';
+import { mirrorToolCall } from './run-tool-mirror.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -117,11 +118,17 @@ export async function writeToolResults(ctx, prevMsg, toolResults, options = {}) 
   const calls = Array.isArray(prevMsg.properties && prevMsg.properties.run_tool_calls)
     ? prevMsg.properties.run_tool_calls : [];
   let written = 0;
+  let mirrored = 0;
   for (const tr of toolResults) {
     if (!tr || !tr.call_id) continue;
     const call = calls.find((c) => c.call_id === tr.call_id) || { call_id: tr.call_id, name: 'tool', args: {} };
     const { failed, error } = resultProps(tr.content);
     const name = `tool-call-${safeName(tr.call_id)}`;
+    // The person's copy of the step. Idempotent, and tried again for a call
+    // already stored: a worker that died after the agent-side write but before
+    // this one must not leave the person's copy missing.
+    await mirrorToolCall(ctx, options.outbox, call, tr, mirrored);
+    mirrored += 1;
     const existing = await raisin.nodes.get(ctx.workspace, `${prevMsg.path}/${name}`);
     if (existing) continue;
     const callNode = await createOrGet(ctx.workspace, prevMsg.path, {

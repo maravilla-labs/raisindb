@@ -135,6 +135,7 @@ export async function handler(input = {}) {
     const prev = await findPreviousTurn(ctx.workspace, ctx.chatPath, ctx.runId, facts && facts.last_turn_op);
     await writeToolResults(ctx, prev, request.tool_results, {
       streamResults: agentProps.stream_tool_results === true,
+      outbox: outboxCtx,
     });
     await syncSteers(ctx);
     const excluded = await queuedSteerPaths(ctx);

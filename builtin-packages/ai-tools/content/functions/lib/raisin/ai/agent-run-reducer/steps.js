@@ -108,6 +108,20 @@ function toolResults(state) {
   });
 }
 
+/** The refusal a call gets in a tools-free turn; the person never saw it as a step. */
+const NO_TOOLS_MESSAGE = 'No tools are offered in this turn.';
+
+/**
+ * Answers of the last model turn that no model turn has been sent yet: what a
+ * run that ends WITHOUT another turn (a stop, a stall, a failure) would
+ * otherwise never write to the transcript. Empty when they were sent.
+ */
+export function pendingToolResults(state) {
+  const turn = state.last_turn;
+  if (!turn || !turn.calls.length || state.results_sent_turn === state.progress.model_turns) return [];
+  return toolResults(state).filter((r) => !(r.synthetic && r.content && r.content.error === NO_TOOLS_MESSAGE));
+}
+
 /** Ask the model for its next turn. */
 export function askModel(state, fx) {
   const ts = state.turn_stats;
@@ -122,6 +136,7 @@ export function askModel(state, fx) {
     return stopOrSummarise(state, fx, { outcome: 'blocked', reason: 'no_progress' });
   }
   const results = toolResults(state);
+  state.results_sent_turn = state.progress.model_turns;
   const nextTurn = state.progress.model_turns + 1;
   if (state.cfg.checkpoint_every > 0 && nextTurn > 1 && (nextTurn - 1) % state.cfg.checkpoint_every === 0) {
     fx.push('checkpoint', { reason: 'periodic', summary: `after ${nextTurn - 1} model turns` });
@@ -303,10 +318,12 @@ export function finishRun(state, fx, { outcome, reason, code, message, summarise
 
 /** The final projection: the answer in the transcript, with the runtime's status. */
 export function projectFinal(state, fx) {
+  const pending = pendingToolResults(state);
   const effectId = fx.push('call_tool', {
     tool: PROJECT_FUNCTION,
     args: {
       reason: 'final',
+      ...(pending.length ? { pending_tool_results: pending } : {}),
       plan: planCardView(state),
       ...(state.closed_plans.length ? { closed_plans: state.closed_plans } : {}),
       finish: state.finish,

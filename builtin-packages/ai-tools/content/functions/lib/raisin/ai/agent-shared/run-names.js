@@ -46,6 +46,21 @@ export function safeName(value) {
   return String(value || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 96) || 'x';
 }
 
+/**
+ * The outbox name of the person's copy of one finished tool call. A function of
+ * the FULL run id and the call id, never of a short hash: the outbox is shared
+ * by every conversation of the agent, so a collision would silently drop a step.
+ * A call id that safeName had to alter (or cut) gets its digest appended, so two
+ * different ids never share a name. Pure; the backfill uses the same function.
+ */
+export function toolCallMirrorSlug(runId, callId) {
+  const run = String(runId || 'run').replace(/[^A-Za-z0-9]/g, '') || 'run';
+  const raw = String(callId || '');
+  const safe = safeName(raw).slice(0, 64);
+  const exact = safe === raw;
+  return `msg-ai_tool_call-${run.slice(0, 64)}-${safe}${exact ? '' : `-${hash53(raw)}`}`;
+}
+
 /** JSON with object keys sorted at every depth — the only form ever digested. */
 export function canonicalJson(value) {
   if (value === null || typeof value !== 'object') {

@@ -77,7 +77,10 @@ export function fakeRaisin({ completions = [], runs = {} } = {}) {
       const at = params[params.length - 1];
       rows = rows.filter((n) => n.created_at > at);
     }
-    rows.sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+    const after = /\bpath\s*>\s*(\$\d)/.exec(sql);
+    if (after) rows = rows.filter((n) => n.path > val(after[1]));
+    if (/ORDER BY path/i.test(sql)) rows.sort((a, b) => (a.path < b.path ? -1 : 1));
+    else rows.sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
     if (/ORDER BY created_at DESC/i.test(sql)) rows.reverse();
     const lim = /LIMIT\s+(\d+)/i.exec(sql);
     if (lim) rows = rows.slice(0, Number(lim[1]));

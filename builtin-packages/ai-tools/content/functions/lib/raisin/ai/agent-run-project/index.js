@@ -20,7 +20,7 @@ import { emitConversationEvent } from '../agent-shared/streaming.js';
 import { resolveAgentOutboxContext, sendAgentOutboxMessage } from '../agent-shared/outbox.js';
 import { readAssistantContent, updateAssistantContent, TERMINAL_FALLBACK_TEXT } from '../agent-shared/utils.js';
 import { stripInlineBytes } from '../agent-shared/inline-strip.js';
-import { loadRunChat, findPreviousTurn } from '../agent-shared/run-transcript.js';
+import { loadRunChat, findPreviousTurn, writeToolResults } from '../agent-shared/run-transcript.js';
 import { upsertPlanCard, syncPlanCards } from '../agent-shared/run-plan-card.js';
 import { buildEnvelope, errorEnvelope, locator, runContextOf } from '../agent-shared/tool-envelope.js';
 
@@ -68,6 +68,12 @@ async function finalize(ctx, args, outboxCtx) {
   const last = await findPreviousTurn(ctx.workspace, ctx.chatPath, ctx.runId, null);
   const content = finalContent(args.last_text, finish);
   const writes = [];
+  // A run that ends without another model turn never sends the last turn's
+  // answers to a model, so nothing else would write them: do it here, before the
+  // final message, so the agent's transcript and the person's copy are complete.
+  // Idempotent (an existing call node is kept, the mirror's name is fixed).
+  const pending = Array.isArray(args.pending_tool_results) ? args.pending_tool_results : [];
+  if (last && pending.length) await writeToolResults(ctx, last, pending, { outbox: outboxCtx });
   // The run is over: the image bytes its message carried are not kept.
   await stripInlineBytes(ctx.workspace, ctx.chatPath, last && last.created_at);
   if (last) {

@@ -61,6 +61,7 @@ provides:
     - /functions/lib/raisin/ai/agent-run-model-turn
     - /functions/lib/raisin/ai/agent-run-project
     - /functions/lib/raisin/ai/agent-run-control
+    - /functions/lib/raisin/ai/backfill-tool-steps
     - /functions/lib/raisin/ai/spawn-agent
     - /functions/lib/raisin/ai/inspect-agent
     - /functions/lib/raisin/ai/message-agent
@@ -115,6 +116,7 @@ sync:
         - "agent-run-model-turn/**"
         - "agent-run-project/**"
         - "agent-run-control/**"
+        - "backfill-tool-steps/**"
         - "spawn-agent/**"
         - "inspect-agent/**"
         - "message-agent/**"
