@@ -193,6 +193,14 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
     }
 
     const entry = { role: props.role, content };
+    // Opt-in (options.tagRuns): name the run that wrote this message, so a
+    // caller can tell earlier runs' tool results from the current run's. A
+    // run's message carries `run_id`; its name `run-<short>-op-<n>` is the
+    // fallback. The caller removes the marker (context-prior.js).
+    const runTag = options?.tagRuns === true && props.role === 'assistant'
+      ? (props.run_id || (/^run-([A-Za-z0-9]+)-op-/.exec(msg.name || '') || [])[1] || '')
+      : null;
+    if (runTag !== null) entry.__run_id = String(runTag);
     // Files the person attached: the model turn turns them into content parts
     // on the latest such message (message-images.js) and removes this marker.
     if (props.role === 'user' && options?.withAttachments === true) {
@@ -237,6 +245,7 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
             content: JSON.stringify(agg.result || agg.error || ''),
             tool_call_id: callId,
             name: funcName,
+            ...(runTag !== null ? { __run_id: String(runTag) } : {}),
           });
         }
       } else if (toolCallNodes.length > 0) {
@@ -275,6 +284,7 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
             content: JSON.stringify(resProps.result || resProps.error || ''),
             tool_call_id: callId,
             name: funcName,
+            ...(runTag !== null ? { __run_id: String(runTag) } : {}),
           });
         }
       }

@@ -40,6 +40,7 @@ import { inlineAttachments } from '../agent-shared/message-images.js';
 import { hasImageParts, withoutImageParts } from '../agent-shared/inline-images.js';
 import { buildSystemPrompt, applyBudget, contextBudget, estimateTokens, restateInstructions } from './context.js';
 import { runModelTurn } from './provider.js';
+import { shortenPriorRunResults, stripRunTags } from './context-prior.js';
 
 async function loadAgent(agentRef) {
   const { workspace, path } = splitAgentRef(agentRef);
@@ -85,7 +86,8 @@ function checkpointOf(input, facts) {
 }
 
 async function buildContext(ctx, agentProps, modelId, request, systemPrompt, excluded) {
-  const opts = { maxHistoryMessages: agentProps.max_history_messages, excludeMessagePaths: excluded, withAttachments: true };
+  const priorChars = Number(agentProps.prior_run_tool_result_chars) > 0 ? Math.floor(Number(agentProps.prior_run_tool_result_chars)) : 0;
+  const opts = { maxHistoryMessages: agentProps.max_history_messages, excludeMessagePaths: excluded, withAttachments: true, ...(priorChars ? { tagRuns: true } : {}) };
   let history = await buildHistoryFromChat(ctx.workspace, ctx.chatPath, systemPrompt, null, null, opts);
   const budget = contextBudget(agentProps);
   if (estimateTokens(history) > budget * 0.8) {
@@ -100,10 +102,22 @@ async function buildContext(ctx, agentProps, modelId, request, systemPrompt, exc
       history = await buildHistoryFromChat(ctx.workspace, ctx.chatPath, systemPrompt, null, null, opts);
     }
   }
-  return applyBudget(history, {
+  // Opt-in: shorten earlier runs' tool results before the budget math.
+  let shortened = 0;
+  if (priorChars) {
+    const r = shortenPriorRunResults(history, ctx.runId, priorChars);
+    history = r.history;
+    shortened = r.shortened;
+  }
+  const out = applyBudget(history, {
     budgetTokens: budget,
     maxToolChars: Number(agentProps.max_tool_result_chars) > 0 ? Number(agentProps.max_tool_result_chars) : undefined,
   });
+  if (priorChars) {
+    out.messages = stripRunTags(out.messages);
+    out.prior_shortened = shortened;
+  }
+  return out;
 }
 
 export async function handler(input = {}) {
@@ -211,6 +225,7 @@ export async function handler(input = {}) {
       context: {
         tokens: context.tokens,
         dropped: context.dropped,
+        ...(context.prior_shortened !== undefined ? { prior_results_shortened: context.prior_shortened } : {}),
         ...(imageReport.sent || imageReport.dropped ? { images: { sent: imageReport.refused ? 0 : (imageReport.sent || 0), dropped: imageReport.dropped || [], refused: !!imageReport.refused } } : {}),
       },
       ...(turn.retries.length ? { retries: turn.retries } : {}),
