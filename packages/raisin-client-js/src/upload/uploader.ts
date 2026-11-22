@@ -34,6 +34,7 @@ import type { FileSource } from './file-source';
 import { getContentType, getChunkRange, calculateChunkCount } from './file-source';
 import { withRetry } from './retry';
 import { BatchUploader } from './batch';
+import { callableFetch } from '../utils/fetch';
 
 // ============================================================================
 // Speed Tracker
@@ -305,7 +306,7 @@ export class Uploader implements Upload {
   ) {
     this.baseUrl = config.baseUrl.replace(/\/$/, '');
     this.authManager = config.authManager;
-    this.fetchImpl = config.fetchImpl ?? fetch;
+    this.fetchImpl = callableFetch(config.fetchImpl);
     this.requestTimeout = config.requestTimeout ?? 30000;
 
     this.fileSource = fileSource;

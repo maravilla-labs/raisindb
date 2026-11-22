@@ -45,6 +45,7 @@ import { normalizeHomePath } from './utils/home-path';
 import { AgentRunsApi } from './agent-runs';
 import { buildMessageMetadata, type ClientMessageOptions } from './types/client-tools';
 import type { AnonymousConversation, StartAnonymousOptions, VisitorChat } from './visitor-chat';
+import { callableFetch } from './utils/fetch';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -217,7 +218,7 @@ export class ConversationManager {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.repository = repository;
     this.authManager = authManager;
-    this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.fetchImpl = callableFetch(options.fetch);
     this.requestTimeout = options.requestTimeout ?? 60000;
     this.executeSql = executeSql;
   }

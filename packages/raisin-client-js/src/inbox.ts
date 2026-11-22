@@ -30,6 +30,7 @@ import {
   RaisinAbortError,
   RaisinTimeoutError,
 } from './errors';
+import { callableFetch } from './utils/fetch';
 
 /** Options for creating an InboxApi */
 export interface InboxApiOptions {
@@ -78,7 +79,7 @@ export class InboxApi {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.repository = repository;
     this.authManager = authManager;
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = callableFetch(options.fetch);
     this.requestTimeout = options.requestTimeout ?? 30000;
   }
 

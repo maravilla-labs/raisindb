@@ -8,6 +8,7 @@
 import { logger } from '../logger';
 import { ReconnectManager, type ReconnectOptions } from '../utils/reconnect';
 import { RaisinConnectionError, RaisinAuthError, RaisinAbortError, RaisinTimeoutError } from '../errors';
+import { callableFetch } from '../utils/fetch';
 
 /**
  * Parsed SSE event from the wire format
@@ -143,7 +144,7 @@ export class SSEClient<T = unknown> implements AsyncIterable<SSEEvent<T>> {
   constructor(url: string, options: SSEClientOptions = {}) {
     this.url = url;
     this.options = options;
-    this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.fetchImpl = callableFetch(options.fetch);
     this._lastEventId = options.lastEventId;
     this.autoReconnect = options.reconnect?.enabled ?? true;
     this.externalSignal = options.signal;

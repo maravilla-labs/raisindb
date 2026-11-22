@@ -43,6 +43,7 @@ import {
   RaisinAbortError,
   RaisinTimeoutError,
 } from './errors';
+import { callableFetch } from './utils/fetch';
 
 /** Options for creating a FlowClient */
 export interface FlowClientOptions {
@@ -113,7 +114,7 @@ export class FlowClient {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.repository = repository;
     this.authManager = authManager;
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = callableFetch(options.fetch);
     this.requestTimeout = options.requestTimeout ?? 60000;
     this.flowsApi = flowsApi;
   }

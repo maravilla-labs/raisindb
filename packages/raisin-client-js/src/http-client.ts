@@ -36,6 +36,7 @@ import { SSEClient } from './streaming/sse-client';
 import { IdentityAuthApi, type IdentityAuthResult } from './identity-auth';
 import { AgentRunsApi } from './agent-runs';
 import { NodeDevApi } from './node-dev';
+import { callableFetch } from './utils/fetch';
 
 /**
  * Current user info
@@ -173,7 +174,7 @@ export class RaisinHttpClient extends EventEmitter {
     this.authManager = new AuthManager(options.tokenStorage);
 
     // Use custom fetch or global fetch
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = callableFetch(options.fetch);
   }
 
   /**

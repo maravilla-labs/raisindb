@@ -41,6 +41,7 @@ import { normalizeHomePath } from './utils/home-path';
 import type { Upload, UploadOptions, BatchUpload, BatchUploadOptions } from './upload/types';
 import { createFileSource } from './upload/file-source';
 import { UploadManager } from './upload/uploader';
+import { callableFetch } from './utils/fetch';
 
 /**
  * Client mode
@@ -2191,7 +2192,7 @@ export class RaisinClient extends EventEmitter {
       this._uploadManager = new UploadManager({
         baseUrl: this._httpBaseUrl,
         authManager: this.authManager,
-        fetchImpl: fetch,
+        fetchImpl: callableFetch(),
         requestTimeout: this.options.requestTimeout,
       });
     }
