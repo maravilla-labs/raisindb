@@ -55,7 +55,7 @@ import {
 } from '../shared/parties.js';
 import {
   AI_INTERMEDIATE_TYPES, checkPermission, getMessagingConfig, lengthViolation, rateViolation,
-  checkAttachments,
+  checkAttachments, conversationBetween,
 } from '../shared/rules.js';
 import { circleReference, resolveCircle, rosterFor, mayAct, conversationIdOf } from '../shared/circles.js';
 
@@ -145,8 +145,12 @@ export async function handle_chat(input) {
   if (!perm.allowed) throw new Error(perm.reason ?? 'Not allowed to message this user');
 
   // 7. Build conversation context
-  const conversationId = body.thread_id || props.conversation_id || ('conv-' + await raisin.crypto.uuid());
-  const attachments = checkAttachments(body.attachments, conversationId);
+  // The thread is the sender's choice: only one already between these two (never a group's), and files only
+  // from a conversation the sender already has.
+  const thread = await conversationBetween(sender, recipient, body.thread_id || props.conversation_id);
+  if (thread.error) return refuse(triggerWorkspace, node.path, thread.error, TAG);
+  const conversationId = thread.id ?? ('conv-' + await raisin.crypto.uuid());
+  const attachments = checkAttachments(body.attachments, thread.own ? conversationId : null);
   if (attachments.error) return refuse(triggerWorkspace, node.path, attachments.error, TAG);
 
   const streamChannel = `chat:${conversationId}`;

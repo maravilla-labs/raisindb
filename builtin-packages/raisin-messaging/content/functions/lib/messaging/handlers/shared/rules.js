@@ -215,6 +215,35 @@ export async function rateViolation(config, senderHome) {
 
 // ─── Attachments ────────────────────────────────────────────────────────────
 
+/**
+ * The one-to-one conversation a message or task may name. The sender chooses `requested`, so it is taken only
+ * when every existing copy of it (the sender's, the recipient's) is between exactly these two; a group
+ * conversation (`grp-…`) never is. Without this, naming another conversation's id would plant it in the
+ * recipient's inbox, and with it a claim on that conversation's files.
+ *
+ * `{ id, own }`: `id` null when nothing was requested (the caller mints one); `own` when the sender already
+ * has the conversation, the only case in which its files may be attached (an upload is granted only for a
+ * conversation in the uploader's own inbox). Or `{ error: 'not_this_conversation' }`.
+ */
+export async function conversationBetween(sender, recipient, requested) {
+  if (requested === undefined || requested === null || requested === '') return { id: null, own: false };
+  if (typeof requested !== 'string' || !CONVERSATION_ID.test(requested) || requested.startsWith('grp-')) {
+    return { error: 'not_this_conversation' };
+  }
+  const copies = await Promise.all([sender, recipient].map((party) =>
+    raisin.nodes.get(party.workspace, `${party.path}/inbox/chats/${requested}`)));
+  for (const copy of copies) {
+    if (!copy) continue;
+    const parties = copy.properties?.participants;
+    if (!Array.isArray(parties) || parties.length !== 2 || !parties.includes(sender.id) || !parties.includes(recipient.id)) {
+      return { error: 'not_this_conversation' };
+    }
+  }
+  return { id: requested, own: Boolean(copies[0]) };
+}
+
+const CONVERSATION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
 export const MAX_ATTACHMENTS = 10;
 export const ATTACHMENT_WORKSPACE = 'assets';
 export const ATTACHMENT_ROOT = '/messages';

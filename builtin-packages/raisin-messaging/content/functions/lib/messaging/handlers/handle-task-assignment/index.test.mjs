@@ -189,7 +189,7 @@ test('malformed tasks and unknown assignees are refused', async () => {
     [{ assignee: KEYS.ana, task_type: 'action', title: '' }, 'bad_task'],
     [{ assignee: 'u_ZZZZZZZZZZZZZZZZZZZZZZ', task_type: 'action', title: 'x' }, 'unknown_assignee'],
     [{ assignee: 'circle:nope', task_type: 'action', title: 'x' }, 'unknown_circle'],
-    [{ assignee: KEYS.ana, task_type: 'action', title: 'x', conversation_id: 'conv-1', attachments: [{ 'raisin:ref': '/messages/conv-2/x.pdf', 'raisin:workspace': 'assets' }] }, 'foreign_attachment'],
+    [{ assignee: KEYS.ana, task_type: 'action', title: 'x', conversation_id: 'conv-1', attachments: [{ 'raisin:ref': '/messages/conv-2/x.pdf', 'raisin:workspace': 'assets' }] }, 'not_this_conversation'],
   ]) {
     const node = outbox(f, 'teacher', body);
     await handle_task_assignment({ node });
@@ -212,4 +212,33 @@ test('circle-sync gives new members the conversation and marks those who left', 
   assert.equal(conv('ben').properties.membership, 'left');
   assert.equal(conv('ana').properties.member_count, 1);
   await assert.rejects(circle_sync({ circle: '/circles/none' }), /unknown_circle/);
+});
+
+test('a task names only a conversation the sender has with the assignee, and is held to the chat limits', async () => {
+  const { f, created } = world({ config: { max_message_length: 40, rate_limit_messages_per_minute: 50 } });
+  const foreign = outbox(f, 'mallory', { assignee: KEYS.ana, task_type: 'bring_item', title: 'x', conversation_id: 'grp-circle-piano',
+    attachments: [{ 'raisin:ref': '/messages/grp-circle-piano/a.jpg', 'raisin:workspace': 'assets' }] });
+  await handle_task_assignment({ node: foreign });
+  assert.equal(foreign.properties.failure_reason, 'not_this_conversation');
+  // Files from another conversation than the named one.
+  f.put(AC, `${home('mallory')}/inbox/chats/conv-ma`, { node_type: 'raisin:Conversation', properties: { participants: ['node-ana', 'node-mallory'] } });
+  const elsewhere = outbox(f, 'mallory', { assignee: KEYS.ana, task_type: 'bring_item', title: 'x', conversation_id: 'conv-ma',
+    attachments: [{ 'raisin:ref': '/messages/conv-ab/a.jpg', 'raisin:workspace': 'assets' }] });
+  await handle_task_assignment({ node: elsewhere });
+  assert.equal(elsewhere.properties.failure_reason, 'foreign_attachment');
+  const unknown = outbox(f, 'mallory', { assignee: KEYS.ana, task_type: 'bring_item', title: 'x', conversation_id: 'conv-none' });
+  await handle_task_assignment({ node: unknown });
+  assert.equal(unknown.properties.failure_reason, 'not_this_conversation');
+
+  f.put(AC, `${home('ben')}/inbox/chats/conv-ab`, { node_type: 'raisin:Conversation', properties: { participants: ['node-ana', 'node-ben'] } });
+  f.put(AC, `${home('ana')}/inbox/chats/conv-ab`, { node_type: 'raisin:Conversation', properties: { participants: ['node-ana', 'node-ben'] } });
+  const ok = outbox(f, 'ben', { assignee: KEYS.ana, task_type: 'bring_item', title: 'Cake', conversation_id: 'conv-ab',
+    attachments: [{ 'raisin:ref': '/messages/conv-ab/recipe.pdf', 'raisin:workspace': 'assets' }] });
+  await handle_task_assignment({ node: ok });
+  assert.equal(ok.properties.status, 'delivered', ok.properties.failure_reason);
+  assert.equal(created.at(-1).conversation_id, 'conv-ab');
+
+  const long = outbox(f, 'ben', { assignee: KEYS.ana, task_type: 'bring_item', title: 'Cake', description: 'x'.repeat(41) });
+  await handle_task_assignment({ node: long });
+  assert.equal(long.properties.failure_reason, 'too_long');
 });

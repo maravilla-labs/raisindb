@@ -89,11 +89,23 @@ fn task_content(request: &Value) -> Value {
     if let Some(priority) = request.get("priority").and_then(|v| v.as_i64()) {
         task["priority"] = json!(priority);
     }
-    if let Some(due_in_seconds) = request.get("due_in_seconds").and_then(|v| v.as_i64()) {
-        task["due_at"] =
-            json!((Utc::now() + chrono::Duration::seconds(due_in_seconds)).to_rfc3339());
+    if let Some(due_at) = due_at(request) {
+        task["due_at"] = json!(due_at.to_rfc3339());
     }
     task
+}
+
+/// Longest `due_in_seconds` a task takes (about ten years); anything else is ignored.
+const MAX_DUE_IN_SECONDS: i64 = 10 * 366 * 24 * 60 * 60;
+
+/// `due_in_seconds` from now, when it is a positive number within ten years. The value comes from a
+/// function, so it is bounded before any date arithmetic (which would panic on overflow).
+fn due_at(request: &serde_json::Value) -> Option<chrono::DateTime<Utc>> {
+    let seconds = request.get("due_in_seconds").and_then(|v| v.as_i64())?;
+    if !(1..=MAX_DUE_IN_SECONDS).contains(&seconds) {
+        return None;
+    }
+    Utc::now().checked_add_signed(chrono::Duration::try_seconds(seconds)?)
 }
 
 /// Create task_create callback: `raisin.tasks.create(request)`
@@ -331,8 +343,7 @@ where
                     .insert("priority".to_string(), PropertyValue::Integer(priority));
             }
 
-            if let Some(due_in_seconds) = request.get("due_in_seconds").and_then(|v| v.as_i64()) {
-                let due_at = Utc::now() + chrono::Duration::seconds(due_in_seconds);
+            if let Some(due_at) = due_at(&request) {
                 node.properties
                     .insert("due_at".to_string(), PropertyValue::Date(due_at.into()));
             }
@@ -760,5 +771,22 @@ mod tests {
         assert_eq!(c.id, "system");
         assert!(c.home.is_none());
         assert!(c.is_admin, "the system context (None) completes as admin");
+    }
+
+    #[test]
+    fn due_in_seconds_is_bounded_and_never_panics() {
+        let at = |v: serde_json::Value| due_at(&serde_json::json!({ "due_in_seconds": v }));
+        assert!(at(serde_json::json!(3600)).is_some());
+        assert!(at(serde_json::json!(MAX_DUE_IN_SECONDS)).is_some());
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(-5),
+            serde_json::json!(MAX_DUE_IN_SECONDS + 1),
+            serde_json::json!(i64::MAX),
+            serde_json::json!(i64::MIN),
+            serde_json::json!("3600"),
+        ] {
+            assert!(at(bad.clone()).is_none(), "{bad}");
+        }
     }
 }

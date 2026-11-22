@@ -121,7 +121,10 @@ test('another visitor reusing a conversation id is refused', async () => {
   await send(f, visitorMessage(KEY_A, 'vchat-1'));
   const other = visitorMessage(KEY_B, 'vchat-1');
   other.path = `/visitors/${KEY_B}/outbox/msg-2`;
-  await assert.rejects(send(f, other), /belongs to another participant/);
+  // The agent's copy of vchat-1 is between the agent and A: B naming it is refused before anything is written.
+  await send(f, other);
+  const outboxCopy = [...f.nodes.values()].find((n) => n.path === other.path);
+  assert.equal(outboxCopy.properties.failure_reason, 'not_this_conversation');
   const agentConv = f.nodes.get(`ai\u0000/agents/site/inbox/chats/vchat-1`);
   assert.equal(agentConv.properties.human_sender_id, `visitor:${KEY_A}`, 'still A\'s');
 });

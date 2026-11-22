@@ -212,13 +212,24 @@ test('attachments: only references below the conversation folder are delivered',
 
 test('one-to-one attachments are held to their conversation too', async () => {
   const { f } = world();
+  // Files only from a conversation the sender already has: the first message of a new one carries none.
+  const early = outbox(f, 'ana', {
+    recipient_id: KEYS.ben, conversation_id: 'conv-ab',
+    body: { message_text: 'doc', thread_id: 'conv-ab', attachments: [{ 'raisin:ref': '/messages/conv-ab/d.pdf', 'raisin:workspace': 'assets' }] },
+  });
+  await handle_chat({ node: early });
+  assert.equal(early.properties.failure_reason, 'bad_attachments');
+  const hello = outbox(f, 'ana', { recipient_id: KEYS.ben, conversation_id: 'conv-ab', body: { message_text: 'hi', thread_id: 'conv-ab' } });
+  await handle_chat({ node: hello });
+  assert.equal(hello.properties.status, 'delivered');
+
   const ok = outbox(f, 'ana', {
     recipient_id: KEYS.ben, conversation_id: 'conv-ab',
     body: { message_text: 'doc', thread_id: 'conv-ab', attachments: [{ 'raisin:ref': '/messages/conv-ab/d.pdf', 'raisin:workspace': 'assets' }] },
   });
   await handle_chat({ node: ok });
   assert.equal(ok.properties.status, 'delivered');
-  const copy = [...f.nodes.values()].find((n) => n.path.startsWith(`${home('ben')}/inbox/chats/conv-ab/msg-`));
+  const copy = [...f.nodes.values()].find((n) => n.path.startsWith(`${home('ben')}/inbox/chats/conv-ab/msg-`) && n.properties.attachments?.length);
   assert.equal(copy.properties.attachments[0].ref['raisin:ref'], '/messages/conv-ab/d.pdf');
 
   const bad = outbox(f, 'ana', {
@@ -227,4 +238,32 @@ test('one-to-one attachments are held to their conversation too', async () => {
   });
   await handle_chat({ node: bad });
   assert.equal(bad.properties.failure_reason, 'foreign_attachment');
+});
+
+test("a one-to-one message cannot name another conversation's id", async () => {
+  const { f } = world();
+  // A group's conversation: mallory (outside) tries to plant it in cara's inbox, and with it a claim on its files.
+  const group = outbox(f, 'mallory', { recipient_id: KEYS.cara, body: { message_text: 'x', thread_id: 'grp-circle-piano' } });
+  await handle_chat({ node: group });
+  // A grp- thread is taken as the circle itself, where an outsider is refused.
+  assert.equal(group.properties.status, 'failed');
+  assert.ok(![...f.nodes.values()].some((n) => n.path.startsWith(`${home('cara')}/inbox/chats/grp-`)));
+
+  // Someone else's one-to-one: ana and ben talk in conv-ab; mallory can join neither copy.
+  const ab = outbox(f, 'ana', { recipient_id: KEYS.ben, body: { message_text: 'hi', thread_id: 'conv-ab' } });
+  await handle_chat({ node: ab });
+  assert.equal(ab.properties.status, 'delivered');
+  const toBen = outbox(f, 'mallory', { recipient_id: KEYS.ben, body: { message_text: 'x', thread_id: 'conv-ab' } });
+  await handle_chat({ node: toBen });
+  assert.equal(toBen.properties.failure_reason, 'not_this_conversation');
+  const mine = outbox(f, 'ana', { recipient_id: KEYS.cara, body: { message_text: 'x', thread_id: 'conv-ab' } });
+  await handle_chat({ node: mine });
+  assert.equal(mine.properties.failure_reason, 'not_this_conversation', 'ana cannot pull cara into her conversation with ben');
+  const benCopy = [...f.nodes.values()].find((n) => n.path === `${home('ben')}/inbox/chats/conv-ab`);
+  assert.equal(benCopy.properties.participants.length, 2);
+
+  // No thread named: a fresh conversation.
+  const fresh = outbox(f, 'mallory', { recipient_id: KEYS.cara, body: { message_text: 'hello' } });
+  await handle_chat({ node: fresh });
+  assert.equal(fresh.properties.status, 'delivered');
 });

@@ -22,7 +22,8 @@
  * Outcome on the outbox node: `status: delivered` with `task_path` or `assignment_id`, or `status: failed`
  * with `failure_reason` (bad_outbox_path, sender_mismatch, bad_task, unknown_assignee, not_allowed,
  * unknown_circle, not_a_member, tasks_closed, group_too_large, bad_attachments, too_many_attachments,
- * foreign_attachment, assignment_failed).
+ * foreign_attachment, not_this_conversation, too_long, rate_limited, assignment_failed). The title and
+ * description are held to `max_message_length`, the sender to `rate_limit_messages_per_minute`.
  *
  * Replaces the Starlark handler, which took the sender from `sender_path` in the message, checked no
  * permission and knew only `/users/<slug>` homes.
@@ -32,7 +33,9 @@ import {
   entityPathFromOutboxPath, resolveSenderHome, claimsMatch, refuse, resolveUser, ensureFolderExists,
   createIdempotent, sqlRows,
 } from '../shared/parties.js';
-import { checkPermission, checkAttachments } from '../shared/rules.js';
+import {
+  checkPermission, checkAttachments, conversationBetween, getMessagingConfig, lengthViolation, rateViolation,
+} from '../shared/rules.js';
 import { circleReference, resolveCircle, rosterFor, mayAct, conversationIdOf, membersOf } from '../shared/circles.js';
 
 const AC = 'raisin:access_control';
@@ -87,6 +90,13 @@ export async function handle_task_assignment(input) {
   const due = Number(body.due_in_seconds);
   if (Number.isFinite(due) && due > 0) task.due_in_seconds = Math.floor(due);
 
+  // The limits a chat message is held to: length of what the assignee reads, and the sender's rate.
+  const config = await getMessagingConfig();
+  const tooLong = lengthViolation(config, task.title) ?? lengthViolation(config, task.description);
+  if (tooLong) return refuse(workspace, nodePath, tooLong, TAG);
+  const tooFast = await rateViolation(config, outboxHome);
+  if (tooFast) return refuse(workspace, nodePath, tooFast, TAG);
+
   // 3. A whole circle.
   const circleRef = circleReference({}, { assignee: body.assignee, circle: body.circle });
   if (circleRef) return assignToCircle({ workspace, node, body, sender, circleRef, task });
@@ -97,11 +107,14 @@ export async function handle_task_assignment(input) {
   const perm = await checkPermission(sender.id, recipient.id, 'task_assignment');
   if (!perm.allowed) return refuse(workspace, nodePath, 'not_allowed', TAG);
 
+  // A thread only when the sender already has it with this assignee (never a group's); files only from it.
   if (body.conversation_id !== undefined) {
     if (typeof body.conversation_id !== 'string' || !CONVERSATION.test(body.conversation_id)) {
       return refuse(workspace, nodePath, 'bad_task', TAG);
     }
-    task.conversation_id = body.conversation_id;
+    const thread = await conversationBetween(sender, recipient, body.conversation_id);
+    if (thread.error || !thread.own) return refuse(workspace, nodePath, 'not_this_conversation', TAG);
+    task.conversation_id = thread.id;
   }
   const attachments = checkAttachments(body.attachments, task.conversation_id);
   if (attachments.error) return refuse(workspace, nodePath, attachments.error, TAG);
