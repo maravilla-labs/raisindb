@@ -1,0 +1,12 @@
+node_type: raisin:Function
+properties:
+  title: Messaging Shared Modules
+  description: >
+    Modules the messaging handlers import (not a callable function): parties.js
+    (who sent a message, decided by its outbox), rules.js (who may send what:
+    /config/messaging, limits, attachments) and circles.js (groups: members,
+    moderators, the circle's messaging policy).
+  language: JavaScript
+  entry_file: parties.js
+  execution_mode: Sync
+  enabled: false

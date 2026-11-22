@@ -7600,6 +7600,7 @@ dependencies = [
  "hex",
  "nanoid",
  "raisin-ai",
+ "raisin-error",
  "raisin-hlc",
  "raisin-models",
  "raisin-rel",

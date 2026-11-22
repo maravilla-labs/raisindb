@@ -1,9 +1,10 @@
 name: raisin-messaging
-version: 1.0.6
+version: 1.1.0
 title: RaisinDB Messaging Package
 description: >
-  Provides the core inbox/outbox messaging pipeline, chat delivery,
-  task assignments, and system notifications for RaisinDB.
+  Provides the core inbox/outbox messaging pipeline, chat delivery (one to one
+  and to the members of a circle), task assignments (to a person or a whole
+  circle), and system notifications for RaisinDB.
 author: RaisinDB Team
 license: BSL-1.1
 icon: mail
@@ -39,6 +40,8 @@ provides:
     - /functions/lib/messaging/handlers/send-push-notification
     - /functions/lib/messaging/handlers/send-email-notification
     - /functions/lib/messaging/permissions
+    - /functions/lib/messaging/handlers/shared
+    - /functions/lib/messaging/circle-sync
     - /functions/lib/messaging/visitor/purge-expired
 
 # Sync configuration for package updates
@@ -54,6 +57,7 @@ sync:
       include:
         - "handle-chat/**"
         - "handle-task-assignment/**"
+        - "shared/**"
         - "handle-system-notification/**"
         - "send-push-notification/**"
         - "send-email-notification/**"
@@ -67,6 +71,13 @@ sync:
 
     # Messaging permissions
     - root: /functions/lib/messaging/permissions
+      include:
+        - "**"
+      mode: merge
+
+    # The circle roster sync (the shared modules sit in handlers/shared: the
+    # function loader resolves `../` into SIBLING folders of a function only)
+    - root: /functions/lib/messaging/circle-sync
       include:
         - "**"
       mode: merge
@@ -98,6 +109,8 @@ workspace_patches:
         - raisin:InboxTask
         - raisin:Notification
         - raisin:VisitorSession
+        - raisin:TaskAssignment
+        - raisin:TaskAssignmentResponse
   default:
     allowed_node_types:
       add:

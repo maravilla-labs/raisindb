@@ -143,8 +143,23 @@ export interface ChatMessage {
   readAt?: string;
 }
 
-/** Conversation type discriminator */
-export type ConversationType = 'ai_chat' | 'direct_message' | 'flow_chat';
+/**
+ * Conversation type discriminator. `group`: the conversation of a circle (every member holds a copy,
+ * `participants` is `['circle:<id>']`, messages to it reach everyone in the circle).
+ */
+export type ConversationType = 'ai_chat' | 'direct_message' | 'flow_chat' | 'group';
+
+/**
+ * A file that comes with a person's message or task: an asset below `assets:/messages/<conversation id>/`,
+ * uploaded with an upload token the application's server minted for that conversation. The reference sits
+ * in its own object so the engine keeps the name and type beside it.
+ */
+export interface MessageFile {
+  ref: { 'raisin:ref': string; 'raisin:workspace': string };
+  name?: string;
+  mime_type?: string;
+  size?: number;
+}
 
 /**
  * Chat conversation handle.
@@ -191,9 +206,25 @@ export interface ConversationListItem {
   /** Number of unread messages */
   unreadCount?: number;
   /** Last message preview */
-  lastMessage?: { content: string; sender_id: string; created_at: string };
+  lastMessage?: {
+    content: string;
+    sender_id: string;
+    created_at: string;
+    sender_key?: string | null;
+    sender_display_name?: string;
+  };
   /** Last updated timestamp */
   updatedAt?: string;
+  /** Subject (a group: the circle's name) */
+  subject?: string;
+  /** Group conversations: the circle's node id */
+  circleId?: string;
+  /** Group conversations: the circle's type (`course`, `team`, …) */
+  circleType?: string | null;
+  /** Group conversations: how many members the circle has */
+  memberCount?: number;
+  /** Group conversations: `left` once the person is no longer in the circle (kept as history) */
+  membership?: 'member' | 'left';
 }
 
 /**

@@ -1,0 +1,65 @@
+name: raisin:TaskAssignmentResponse
+description: >-
+  One member's answer to a raisin:TaskAssignment (kind `response`), or the
+  marker that closed it (kind `close`, named `closed`). Created once by the
+  engine's task completion: a second create of the same name fails, which makes
+  an answer idempotent and lets exactly one completion close the assignment.
+icon: check
+version: 1
+strict: true
+indexable: false
+properties:
+  # response | close
+  - name: kind
+    type: String
+    required: true
+    title: Kind
+    enum: [response, close]
+
+  - name: task_path
+    type: String
+    required: false
+    title: Task
+
+  - name: assignee
+    type: String
+    required: false
+    title: Assignee
+
+  - name: completed_by
+    type: String
+    required: false
+    title: Completed by
+
+  # The answering person's display name, shown to the other members
+  # ("Anna B. brings it").
+  - name: completed_by_name
+    type: String
+    required: false
+    title: Completed by (name)
+
+  - name: response
+    type: Object
+    required: false
+    title: Response
+
+  - name: qualifies
+    type: Boolean
+    required: false
+    title: Qualifies
+
+  - name: responded_at
+    type: Date
+    required: false
+    title: Responded
+
+  # On the close marker: satisfied | unsatisfied
+  - name: outcome
+    type: String
+    required: false
+    title: Outcome
+
+allowed_children: []
+versionable: false
+publishable: false
+auditable: false

@@ -501,6 +501,34 @@ export interface InboxTask {
   escalated_from?: string;
   /** Why the task was escalated */
   escalation_reason?: string;
+  /** Structured payload for the task UI */
+  data?: Record<string, unknown>;
+  /** The person who assigned it (absent for the system and workflows) */
+  assigned_by?: { key: string | null; display_name?: string };
+  /** The conversation a chat shows the task in */
+  conversation_id?: string;
+  /** Files that come with the task */
+  attachments?: Array<{ ref: { 'raisin:ref': string; 'raisin:workspace': string }; name?: string; mime_type?: string; size?: number }>;
+  /** Why a pending task was cancelled (`group_completed`: somebody else answered the group task) */
+  cancellation_reason?: string;
+  /** Group task: id of its system-only record (every member's task shares it) */
+  assignment_id?: string;
+  /** Group task: the circle or group it went to */
+  assignment_group?: string;
+  /** Group task: `any`, `all` or `quorum` */
+  assignment_completion?: 'any' | 'all' | 'quorum';
+  /** Group task: answers that satisfy it */
+  assignment_required?: number;
+  /** Group task: how many members it went to */
+  assignment_total?: number;
+  /** Group task: `open`, `satisfied` or `unsatisfied` (display copy) */
+  assignment_status?: 'open' | 'satisfied' | 'unsatisfied';
+  /** Group task: members who have answered so far */
+  assignment_responded?: number;
+  /** Group task: answers that count so far */
+  assignment_qualifying?: number;
+  /** Group task: names of the members whose answers closed it ("Anna B. brings it") */
+  resolved_by_names?: string[];
 }
 
 /** Result of completing an inbox task */

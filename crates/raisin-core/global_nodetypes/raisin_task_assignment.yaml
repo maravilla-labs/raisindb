@@ -1,0 +1,96 @@
+name: raisin:TaskAssignment
+description: >-
+  The authority of ONE group task: the members it was delivered to and the
+  completion policy. Lives at raisin:access_control:/task-assignments/<id>,
+  written only by the engine. Each member holds an ordinary raisin:InboxTask in
+  their own inbox, which they may edit, so nothing about the group is ever read
+  back from those copies: answers are raisin:TaskAssignmentResponse children of
+  this record, and the record is closed by its `closed` child, which only one
+  completion can create.
+icon: list-checks
+version: 1
+strict: true
+indexable: true
+index_types: [Property]
+properties:
+  # Path of the circle (raisin:EntityCircle) or group (raisin:Group) the task
+  # was expanded from.
+  - name: group
+    type: String
+    required: true
+    title: Group
+    index: [Property]
+
+  # any | all | quorum
+  - name: completion
+    type: String
+    required: true
+    title: Completion
+    enum: [any, all, quorum]
+
+  # Qualifying answers that satisfy the assignment.
+  - name: required
+    type: Number
+    required: true
+    title: Required
+
+  - name: total
+    type: Number
+    required: true
+    title: Members
+
+  # Optional REL over `response` and `responses` deciding whether an answer
+  # counts towards `required` (e.g. only an accept qualifies).
+  - name: response_condition
+    type: String
+    required: false
+    title: Response condition
+
+  # Every member task, as created.
+  - name: task_paths
+    type: Array
+    required: true
+    title: Member tasks
+
+  # Set when a workflow waits on the assignment.
+  - name: flow_instance_id
+    type: String
+    required: false
+    title: Flow instance
+    index: [Property]
+
+  - name: step_id
+    type: String
+    required: false
+    title: Step
+
+  # open | satisfied | unsatisfied
+  - name: status
+    type: String
+    required: true
+    title: Status
+    enum: [open, satisfied, unsatisfied]
+    default: open
+    index: [Property]
+
+  # Who assigned it: { key, display_name } of a person, or absent for the system.
+  - name: assigned_by
+    type: Object
+    required: false
+    title: Assigned by
+
+  - name: created_at
+    type: Date
+    required: false
+    title: Created
+
+  - name: closed_at
+    type: Date
+    required: false
+    title: Closed
+
+allowed_children:
+  - raisin:TaskAssignmentResponse
+versionable: false
+publishable: false
+auditable: true

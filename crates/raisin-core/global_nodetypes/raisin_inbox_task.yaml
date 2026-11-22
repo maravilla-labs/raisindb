@@ -36,7 +36,15 @@ icon: inbox
 # default/clamp, the inbox sort order and the SDK) and declared the ESCALATION
 # slots the agent-assignee path writes (escalated_from, escalation_reason,
 # escalated_at). Bump forces resync.
-version: 8
+# v9: group tasks outside workflows and tasks inside conversations
+# (docs/plans/group-messaging-and-tasks.md). The authority of a group task moved
+# to a system-only raisin:TaskAssignment record: the assignment_* slots below are
+# now DISPLAY copies for the task UI (a person may edit their own inbox, so they
+# are never read back as authority). Declared what the writers now set:
+# assigned_by, conversation_id, attachments, source_message_id and the display
+# slots assignment_status / assignment_responded / assignment_qualifying /
+# resolved_by_names. Bump forces resync.
+version: 9
 strict: true
 indexable: true
 index_types: [Property, Fulltext]
@@ -191,23 +199,85 @@ properties:
     title: Created At
     description: When the task was created
 
-  # --- Group assignment (human_task addressed to a raisin:Group) ---------
-  # Written by the human_task step for every member's task, read back by
-  # complete_task to decide whether the authored completion policy is met.
+  # --- Origin -------------------------------------------------------------
+
+  # Who assigned the task: { key, display_name } of the person (never a home
+  # path), absent for the system and workflows.
+  - name: assigned_by
+    type: Object
+    required: false
+    title: Assigned By
+    description: The person who assigned the task (key and display name)
+
+  # The conversation the task was created in (`conv-…`, `grp-<circle id>`): a
+  # chat UI shows the task as a card in that thread.
+  - name: conversation_id
+    type: String
+    required: false
+    title: Conversation
+    description: Conversation the task belongs to, for showing it in the thread
+    index: [Property]
+
+  # Files that come with the task, as asset references
+  # ([{ "raisin:ref", "raisin:workspace", name, mime_type, size }]).
+  - name: attachments
+    type: Array
+    required: false
+    title: Attachments
+    description: Files that come with the task (asset references)
+
+  # The outbox message a person assigned the task with.
+  - name: source_message_id
+    type: String
+    required: false
+    title: Source Message
+    description: Id of the outbox message the task was assigned with
+
+  # --- Group assignment ----------------------------------------------------
+  # One task per member, correlated by assignment_id. The AUTHORITY is the
+  # raisin:TaskAssignment record at /task-assignments/<assignment_id>; every
+  # slot below is a display copy for the task UI and is never read back.
 
   - name: assignment_id
     type: String
     required: false
     title: Assignment ID
-    description: Correlates the tasks created for one group wait of one flow step
+    description: Id of the raisin:TaskAssignment this task belongs to
     index: [Property]
 
   - name: assignment_group
     type: String
     required: false
     title: Assignment Group
-    description: Path of the raisin:Group this task was expanded from
+    description: Path of the circle or group this task was expanded from
     index: [Property]
+
+  # open | satisfied | unsatisfied (display copy of the record's status)
+  - name: assignment_status
+    type: String
+    required: false
+    title: Assignment Status
+    description: Whether the group task is still open (display copy)
+
+  - name: assignment_responded
+    type: Number
+    required: false
+    title: Assignment Responded
+    description: Members who have answered so far (display copy)
+
+  - name: assignment_qualifying
+    type: Number
+    required: false
+    title: Assignment Qualifying
+    description: Answers that count towards the policy so far (display copy)
+
+  # Display names of the members whose answers closed the assignment
+  # ("Anna B." brings it).
+  - name: resolved_by_names
+    type: Array
+    required: false
+    title: Resolved By
+    description: Names of the members whose answers closed the group task
 
   - name: assignment_completion
     type: String
@@ -227,19 +297,22 @@ properties:
     title: Assignment Total
     description: Number of members the wait was delivered to
 
+  # Kept declared so tasks written before v9 still validate; no longer written
+  # (the member list is on the record, and a person's copy should not name
+  # other people's inbox paths).
   - name: assignment_task_paths
     type: Array
     required: false
     title: Assignment Task Paths
-    description: Every correlated task path in this group wait, including this one
+    description: Legacy (before v9); the member tasks are on the raisin:TaskAssignment record
 
   - name: response_condition
     type: String
     required: false
     title: Response Condition
     description: >-
-      Optional REL over `response` and `responses` deciding whether a response
-      COUNTS towards the group policy (e.g. only an accept qualifies).
+      Display copy of the record's REL deciding whether a response COUNTS
+      towards the group policy (e.g. only an accept qualifies).
 
   - name: qualifies
     type: Boolean

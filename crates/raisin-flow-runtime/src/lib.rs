@@ -67,6 +67,7 @@
 //
 // Flow parsing lives in `FlowDefinition::from_workflow_data` (both formats) and
 // structural checking in `FlowDefinition::validate`.
+pub mod assignment;
 pub mod handlers;
 pub mod integration;
 pub mod runtime;

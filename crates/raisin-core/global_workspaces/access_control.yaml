@@ -23,6 +23,9 @@ allowed_node_types:
   - raisin:Notification
   # Anonymous chat sessions under /visitors (raisin-messaging)
   - raisin:VisitorSession
+  # Group task authority under /task-assignments (engine-written only)
+  - raisin:TaskAssignment
+  - raisin:TaskAssignmentResponse
 allowed_root_node_types:
   - raisin:User
   - raisin:Role
@@ -187,6 +190,13 @@ initial_structure:
       properties:
         icon: "users"
         color: "#06b6d4"
+    # Group task records (raisin:TaskAssignment). Engine-written only; no role
+    # grants anything here, so members never read other members' answers.
+    - node_type: raisin:AclFolder
+      name: task-assignments
+      properties:
+        icon: "list-checks"
+        color: "#f59e0b"
     # Graph algorithm precomputation configs
     - node_type: raisin:AclFolder
       name: graph-config

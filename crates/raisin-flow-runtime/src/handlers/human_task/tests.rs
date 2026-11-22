@@ -558,3 +558,160 @@ async fn test_human_task_unresolved_due_is_dropped() {
     assert!(props.get("due_at").is_none());
     assert_eq!(props["priority"], 3);
 }
+
+/// Callbacks with a `raisin:Group` and two members, recording every write.
+struct GroupCallbacks {
+    created: Arc<Mutex<Vec<(String, String, Value)>>>,
+}
+
+#[async_trait]
+impl FlowCallbacks for GroupCallbacks {
+    async fn load_instance(&self, _path: &str) -> FlowResult<FlowInstance> {
+        unimplemented!()
+    }
+    async fn save_instance(&self, _instance: &FlowInstance) -> FlowResult<()> {
+        Ok(())
+    }
+    async fn save_instance_with_version(&self, _i: &FlowInstance, _v: i32) -> FlowResult<()> {
+        Ok(())
+    }
+    async fn create_node(
+        &self,
+        node_type: &str,
+        path: &str,
+        properties: Value,
+    ) -> FlowResult<Value> {
+        self.created.lock().await.push((
+            node_type.to_string(),
+            path.to_string(),
+            properties.clone(),
+        ));
+        Ok(properties)
+    }
+    async fn update_node(&self, _path: &str, _properties: Value) -> FlowResult<Value> {
+        Ok(Value::Null)
+    }
+    async fn get_node(&self, path: &str) -> FlowResult<Option<Value>> {
+        if path == "/groups/dispatchers" {
+            return Ok(Some(serde_json::json!({
+                "path": "/groups/dispatchers",
+                "node_type": "raisin:Group",
+                "properties": { "group_id": "dispatchers" },
+            })));
+        }
+        let created = self.created.lock().await;
+        Ok(created.iter().find(|(_, p, _)| p == path).map(
+            |(t, p, props)| serde_json::json!({ "path": p, "node_type": t, "properties": props }),
+        ))
+    }
+    async fn list_children(&self, path: &str) -> FlowResult<Vec<Value>> {
+        Ok(if path == "/users" {
+            vec![
+                serde_json::json!({ "path": "/users/ana", "node_type": "raisin:User", "properties": { "groups": ["dispatchers"] } }),
+                serde_json::json!({ "path": "/users/ben", "node_type": "raisin:User", "properties": { "groups": ["dispatchers"] } }),
+                serde_json::json!({ "path": "/users/cara", "node_type": "raisin:User", "properties": { "groups": ["finance"] } }),
+            ]
+        } else {
+            vec![]
+        })
+    }
+    async fn queue_job(&self, _job_type: &str, _payload: Value) -> FlowResult<String> {
+        Ok("job-1".to_string())
+    }
+    async fn call_ai(
+        &self,
+        _w: &str,
+        _a: &str,
+        _m: Vec<Value>,
+        _r: Option<Value>,
+    ) -> FlowResult<Value> {
+        Ok(Value::Null)
+    }
+    async fn execute_function(&self, _f: &str, _i: Value) -> FlowResult<Value> {
+        Ok(Value::Null)
+    }
+}
+
+/// A group wait writes its system-only record BEFORE any member task, and the
+/// members' tasks only name it: no copy lists the other members' inbox paths
+/// (a person may edit their own inbox, so the copy must carry no authority).
+#[tokio::test]
+async fn test_group_wait_writes_its_record_before_the_member_tasks() {
+    let handler = HumanTaskHandler::new();
+    let mut context = create_test_context();
+    let mut properties = HashMap::new();
+    properties.insert(
+        "task_type".to_string(),
+        Value::String("approval".to_string()),
+    );
+    properties.insert(
+        "title".to_string(),
+        Value::String("Who covers the night shift?".to_string()),
+    );
+    properties.insert(
+        "assignee".to_string(),
+        Value::String("/groups/dispatchers".to_string()),
+    );
+    properties.insert(
+        "group_completion".to_string(),
+        Value::String("any".to_string()),
+    );
+    let node = FlowNode {
+        id: "ask".to_string(),
+        step_type: StepType::HumanTask,
+        properties,
+        children: vec![],
+        next_node: Some("next".to_string()),
+    };
+    let created = Arc::new(Mutex::new(Vec::new()));
+    let callbacks = GroupCallbacks {
+        created: created.clone(),
+    };
+
+    let result = handler
+        .execute(&node, &mut context, &callbacks)
+        .await
+        .expect("group wait");
+    assert!(matches!(result, StepResult::Wait { .. }));
+
+    let writes = created.lock().await;
+    let records: Vec<_> = writes
+        .iter()
+        .filter(|(t, _, _)| t == "raisin:TaskAssignment")
+        .collect();
+    assert_eq!(records.len(), 1, "one record per wait");
+    let (_, record_path, record) = records[0];
+    assert!(record_path.starts_with("/task-assignments/"));
+    assert_eq!(record["group"], "/groups/dispatchers");
+    assert_eq!(record["completion"], "any");
+    assert_eq!(record["required"], 1);
+    assert_eq!(record["flow_instance_id"], "test-instance");
+    assert_eq!(record["step_id"], "ask");
+    assert_eq!(record["task_paths"].as_array().unwrap().len(), 2);
+
+    let record_index = writes
+        .iter()
+        .position(|(t, _, _)| t == "raisin:TaskAssignment")
+        .unwrap();
+    let tasks: Vec<_> = writes
+        .iter()
+        .enumerate()
+        .filter(|(_, (t, _, _))| t == "raisin:InboxTask")
+        .collect();
+    assert_eq!(tasks.len(), 2, "one task per member");
+    for (index, (_, path, props)) in tasks {
+        assert!(
+            index > record_index,
+            "the record exists before any task names it"
+        );
+        assert!(path.starts_with("/users/ana/") || path.starts_with("/users/ben/"));
+        assert_eq!(
+            props["assignment_id"],
+            record_path.trim_start_matches("/task-assignments/")
+        );
+        assert!(
+            props.get("assignment_task_paths").is_none(),
+            "a copy names nobody else's inbox"
+        );
+    }
+}

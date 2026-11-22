@@ -41,19 +41,83 @@ async fn create_group_tasks(
         .map(|member| handler.generate_task_path(member, &step.id, context))
         .collect();
 
+    // The AUTHORITY of the wait is a system-only record (see crate::assignment):
+    // a member may edit their own inbox task, so completion never reads the
+    // policy, the members or the flow linkage from it. Written before any task,
+    // so no task ever names a record that does not exist. A redelivered wait
+    // finds its own record and reuses it.
+    let policy = crate::assignment::Policy {
+        completion: assignment.completion.clone(),
+        required: assignment.required,
+        response_condition: assignment.response_condition.clone(),
+    };
+    let record_path = crate::assignment::record_path(&assignment_id);
+    match callbacks
+        .get_node_in_workspace(super::INBOX_WORKSPACE, &record_path)
+        .await?
+    {
+        Some(existing) => {
+            let props = existing.get("properties").cloned().unwrap_or_default();
+            if props.get("flow_instance_id").and_then(|v| v.as_str())
+                != Some(context.instance_id.as_str())
+            {
+                return Err(FlowError::InvalidNodeConfiguration(format!(
+                    "Assignment '{}' belongs to another flow instance",
+                    assignment_id
+                )));
+            }
+        }
+        None => {
+            if callbacks
+                .get_node_in_workspace(super::INBOX_WORKSPACE, crate::assignment::ASSIGNMENTS_ROOT)
+                .await?
+                .is_none()
+            {
+                // Repositories created before /task-assignments was part of
+                // the workspace's initial structure. A concurrent create is fine.
+                let _ = callbacks
+                    .create_node_in_workspace(
+                        super::INBOX_WORKSPACE,
+                        "raisin:AclFolder",
+                        crate::assignment::ASSIGNMENTS_ROOT,
+                        serde_json::json!({}),
+                    )
+                    .await;
+            }
+            callbacks
+                .create_node_in_workspace(
+                    super::INBOX_WORKSPACE,
+                    crate::assignment::RECORD_TYPE,
+                    &record_path,
+                    crate::assignment::record_properties(
+                        &assignment.group_path,
+                        &policy,
+                        &task_paths,
+                        Some(context.instance_id.as_str()),
+                        Some(step.id.as_str()),
+                        None,
+                    ),
+                )
+                .await
+                .map_err(|cause| {
+                    FlowError::FunctionExecution(format!(
+                        "Failed to record group task '{}': {}",
+                        assignment_id, cause
+                    ))
+                })?;
+        }
+    }
+
     let mut written: Vec<(String, serde_json::Value)> = Vec::new();
     for (member, task_path) in assignment.members.iter().zip(task_paths.iter()) {
-        let mut properties = base_properties.clone();
-        properties["assignee"] = serde_json::json!(member);
-        properties["assignment_id"] = serde_json::json!(assignment_id);
-        properties["assignment_group"] = serde_json::json!(assignment.group_path);
-        properties["assignment_completion"] = serde_json::json!(assignment.completion);
-        properties["assignment_required"] = serde_json::json!(assignment.required);
-        properties["assignment_total"] = serde_json::json!(assignment.members.len());
-        properties["assignment_task_paths"] = serde_json::json!(task_paths);
-        if let Some(ref condition) = assignment.response_condition {
-            properties["response_condition"] = serde_json::json!(condition);
-        }
+        let properties = crate::assignment::member_task_properties(
+            base_properties,
+            member,
+            &assignment_id,
+            &assignment.group_path,
+            &policy,
+            assignment.members.len(),
+        );
 
         let existing = callbacks
             .get_node_in_workspace(super::INBOX_WORKSPACE, task_path)

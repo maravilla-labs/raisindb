@@ -1,0 +1,35 @@
+node_type: raisin:Function
+properties:
+  title: Sync a circle's group conversation
+  description: >
+    Brings a circle's group conversation in line with its roster after
+    MEMBER_OF / MODERATES edges changed: every member and moderator gets their
+    copy (created empty when missing), copies of people who left are marked
+    membership left. Input { circle: 'circle:<id>' | '/circles/<name>' }. Runs as
+    the system: call it from trusted code, never expose it to members.
+  language: javascript
+  entry_file: index.js:circle_sync
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 60000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    required:
+      - circle
+    properties:
+      circle:
+        type: string
+        description: "circle:<node id> or a /circles/<name> path"
+  output_schema:
+    type: object
+    properties:
+      conversation_id:
+        type: string
+      members:
+        type: number
+      created:
+        type: number
+      left:
+        type: number

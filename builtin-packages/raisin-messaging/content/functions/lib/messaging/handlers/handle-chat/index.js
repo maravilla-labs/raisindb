@@ -4,15 +4,27 @@
  * Delivers outbox messages to recipient inboxes with cross-workspace support.
  * Users live in raisin:access_control, agents live in ai workspace.
  *
- * Flow:
+ * Flow (one-to-one):
  *   1. Validate message type
- *   2. Copy to sender's sent folder
- *   3. Resolve sender and recipient (cross-workspace: users vs agents)
- *   4. Check permissions (auto-allow for agents, configurable for users)
- *   5. Upsert conversation in both sender and recipient inboxes
- *   6. Create delivered message copy in recipient's conversation
- *   7. Create notification for human recipients (skip for agents + AI intermediates)
- *   8. Mark original outbox message as delivered
+ *   2. Take the sender from the outbox path; refuse sender claims naming anybody else
+ *   3. Copy to sender's sent folder
+ *   4. Resolve the recipient (user, agent, visitor)
+ *   5. Check permissions, length, rate and attachments
+ *   6. Upsert conversation in both sender and recipient inboxes
+ *   7. Create message copies in both conversations
+ *   8. Create notification for human recipients (skip for agents + AI intermediates)
+ *   9. Mark original outbox message as delivered
+ *
+ * GROUPS: a message addressed to a circle (`recipient_id: circle:<id>`, or a group conversation id
+ * `grp-<id>`) is delivered to EVERY member and moderator of the circle, each into their own
+ * `<home>/inbox/chats/grp-<id>` (deliverToCircle). The roster is the graph's (MEMBER_OF / MODERATES
+ * edges only admins and the system may write), never anything the sender wrote. See
+ * docs/plans/group-messaging-and-tasks.md.
+ *
+ * A refused message is marked `status: failed` with a `failure_reason` on the outbox node, so the
+ * sender's screen can say why (bad_outbox_path, sender_mismatch, not_allowed, too_long, rate_limited,
+ * bad_attachments, too_many_attachments, foreign_attachment, not_a_member, read_only, group_closed,
+ * group_too_large, unknown_circle).
  *
  * Trigger: process-chat fires on raisin:Message creation in outbox paths
  *          with status "pending" and supported message_type values.
@@ -36,14 +48,25 @@
  * that allows anonymous chat. Agents answer them like anyone else.
  */
 
-const AI_INTERMEDIATE_TYPES = new Set([
-  'ai_thought', 'ai_tool_call', 'ai_tool_result', 'ai_plan', 'ai_task_update'
-]);
+import {
+  entityPathFromOutboxPath, resolveSenderHome, claimsMatch, refuse, resolveRecipient,
+  readableBy, isUserKey, userKeyFromHome, extractAgentName, ensureFolderExists, ensureChatsFolder,
+  createIdempotent,
+} from '../shared/parties.js';
+import {
+  AI_INTERMEDIATE_TYPES, checkPermission, getMessagingConfig, lengthViolation, rateViolation,
+  checkAttachments,
+} from '../shared/rules.js';
+import { circleReference, resolveCircle, rosterFor, mayAct, conversationIdOf } from '../shared/circles.js';
+
+export { entityPathFromOutboxPath, isUserKey, userKeyFromHome, readableBy };
 
 const ALLOWED_MESSAGE_TYPES = new Set([
   'chat', 'direct_message',
   'ai_thought', 'ai_tool_call', 'ai_tool_result', 'ai_plan', 'ai_task_update'
 ]);
+
+const TAG = 'handle-chat';
 
 // ─── Entry Point ────────────────────────────────────────────────────────────
 
@@ -70,7 +93,7 @@ export async function handle_chat(input) {
   // but the node's content is theirs to write, so nothing in it may choose
   // the sender. Anything that is not an exact outbox shape is refused.
   const outboxHome = entityPathFromOutboxPath(nodePath);
-  if (!outboxHome) return refuse(triggerWorkspace, nodePath, 'bad_outbox_path');
+  if (!outboxHome) return refuse(triggerWorkspace, nodePath, 'bad_outbox_path', TAG);
   const sender = await resolveSenderHome(triggerWorkspace, outboxHome);
   if (!sender) throw new Error('Sender not found');
   // Sender fields written into the message must name that same party.
@@ -80,35 +103,54 @@ export async function handle_chat(input) {
     emails: [props.sender_email, body.sender_email],
     keys: [props.sender_key, body.sender_key],
   })) {
-    return refuse(triggerWorkspace, nodePath, 'sender_mismatch');
+    return refuse(triggerWorkspace, nodePath, 'sender_mismatch', TAG);
   }
 
-  // 2. Copy to sender's sent folder
+  const isIntermediate = AI_INTERMEDIATE_TYPES.has(messageType);
+  const messageText = body.message_text || body.content || '';
+
+  // 2. Limits a person's message is held to (agents and AI steps are not).
+  let config = null;
+  if (!sender.isAgent && !sender.isVisitor && !isIntermediate) {
+    config = await getMessagingConfig();
+    const tooLong = lengthViolation(config, messageText);
+    if (tooLong) return refuse(triggerWorkspace, nodePath, tooLong, TAG);
+    const tooFast = await rateViolation(config, outboxHome);
+    if (tooFast) return refuse(triggerWorkspace, nodePath, tooFast, TAG);
+  }
+
+  // 3. A message to a circle goes to everyone in it.
+  const circleRef = circleReference(props, body);
+  if (circleRef) {
+    return deliverToCircle({ triggerWorkspace, node, props, body, sender, circleRef, messageText, messageType });
+  }
+
+  // 4. Copy to sender's sent folder
   await copyToSentFolder(triggerWorkspace, node);
 
-  // 3. The recipient is the sender's choice, and must exist.
+  // 5. The recipient is the sender's choice, and must exist.
   const recipientHint = {
     path: body.recipient_path || props.recipient_path,
     id: props.recipient_id || body.recipient_id,
     email: body.recipient_email,
     key: props.recipient_key || body.recipient_key,
   };
-
-  // 4. Resolve recipient: user first, then agent
   const recipient = await resolveRecipient(recipientHint);
   if (!recipient) throw new Error('Recipient not found');
 
-  // 5. Check permissions
+  // 6. Check permissions
   const perm = sender.isVisitor || recipient.isVisitor
     ? checkVisitorPermission(sender, recipient)
-    : await checkPermission(sender.id, recipient.id, messageType);
+    : await checkPermission(sender.id, recipient.id, messageType, config);
   if (!perm.allowed) throw new Error(perm.reason ?? 'Not allowed to message this user');
 
-  // 6. Build conversation context
+  // 7. Build conversation context
   const conversationId = body.thread_id || props.conversation_id || ('conv-' + await raisin.crypto.uuid());
+  const attachments = checkAttachments(body.attachments, conversationId);
+  if (attachments.error) return refuse(triggerWorkspace, node.path, attachments.error, TAG);
+
   const streamChannel = `chat:${conversationId}`;
   const subject = props.subject || body.subject || 'Chat';
-  const isIntermediate = AI_INTERMEDIATE_TYPES.has(messageType);
   const participants = [sender.id, recipient.id].sort();
   const participantKeys = participants.map((id) => (id === sender.id ? sender.key : recipient.key) ?? null);
   const participantDetails = {
@@ -117,14 +159,14 @@ export async function handle_chat(input) {
   };
   const agentMeta = buildAgentMetadata(sender, recipient);
 
-  // 7. Ensure inbox structures exist
+  // 8. Ensure inbox structures exist
   const senderChats = await ensureChatsFolder(sender.workspace, sender.path);
   const recipientChats = await ensureChatsFolder(recipient.workspace, recipient.path);
 
   const senderConvPath = `${senderChats}/${conversationId}`;
   const recipientConvPath = `${recipientChats}/${conversationId}`;
 
-  // 8. Upsert conversations
+  // 9. Upsert conversations
   const convBase = {
     conversationId, subject, participants, participantDetails, participantKeys, streamChannel, agentMeta,
     keys: { [sender.id]: sender.key ?? null, [recipient.id]: recipient.key ?? null },
@@ -144,15 +186,14 @@ export async function handle_chat(input) {
   await upsertConversation(recipient.workspace, recipientConvPath, forReader(convBase, recipient), body, sender.id, recipient.id,
     /* incrementUnread */ !isIntermediate, /* updateLastMessage */ !isIntermediate);
 
-  // 9. Create message copies in both conversations
+  // 10. Create message copies in both conversations
   const messageSlug = `msg-${messageId}`;
   const createdAt = props.created_at || new Date().toISOString();
-  const messageText = body.message_text || body.content || '';
 
   const baseMessageProps = buildMessageProps(props, body, {
     messageType, senderId: sender.id, senderPath: sender.path, senderKey: sender.key ?? null,
     recipientId: recipient.id, recipientPath: recipient.path, recipientKey: recipient.key ?? null,
-    conversationId, createdAt, messageText,
+    conversationId, createdAt, messageText, attachments: attachments.list,
   });
 
   const senderMessagePath = `${senderConvPath}/${messageSlug}`;
@@ -163,350 +204,149 @@ export async function handle_chat(input) {
     delivered_at: new Date().toISOString(),
     sender_message_path: senderMessagePath,
   };
-  await createMessageCopyIdempotent(recipient.workspace, recipientConvPath, {
+  await createIdempotent(recipient.workspace, recipientConvPath, {
     slug: messageSlug,
     name: messageSlug,
     node_type: 'raisin:Message',
     properties: readableBy(recipient, deliveredProps),
   });
 
-  await createMessageCopyIdempotent(sender.workspace, senderConvPath, {
+  await createIdempotent(sender.workspace, senderConvPath, {
     slug: messageSlug,
     name: messageSlug,
     node_type: 'raisin:Message',
     properties: readableBy(sender, { ...baseMessageProps, status: 'sent' }),
   });
 
-  // 10. Create notification for human recipients (not agents, not AI
+  // 11. Create notification for human recipients (not agents, not AI
   //     intermediates, not visitors: a visitor's page streams the reply)
   if (!recipient.isAgent && !recipient.isVisitor && !isIntermediate) {
     await createNotification(recipient, conversationId, sender.displayName, messageText, messageId);
   }
 
-  // 11. Mark original outbox message as delivered
+  // 12. Mark original outbox message as delivered
   await raisin.nodes.updateProperty(triggerWorkspace, nodePath, 'status', 'delivered');
   await raisin.nodes.updateProperty(triggerWorkspace, nodePath, 'delivered_at', new Date().toISOString());
 
   return { success: true, conversation_path: recipientConvPath };
 }
 
-// ─── Entity Resolution ──────────────────────────────────────────────────────
-
-function isAgentId(id) {
-  return typeof id === 'string' && id.startsWith('agent:');
-}
-
-function extractAgentName(id, path) {
-  if (id && isAgentId(id)) return id.slice('agent:'.length);
-  if (path) {
-    const parts = path.split('/');
-    if (parts.length >= 3 && parts[1] === 'agents') return parts[2];
-  }
-  return null;
-}
-
-
-/** A user key: `u_` + 22 base62 (raisin_models::auth::user_key). */
-const USER_KEY = /^u_[0-9A-Za-z]{22}$/;
-const USER_HOMES_ROOT = '/users/internal';
-
-export function isUserKey(value) {
-  return typeof value === 'string' && USER_KEY.test(value);
-}
-
-/** The key of a keyed home (`/users/internal/u_…`), else null. */
-export function userKeyFromHome(path) {
-  if (typeof path !== 'string') return null;
-  const last = path.replace(/\/+$/, '').split('/').pop();
-  return isUserKey(last) ? last : null;
-}
-
-/** Fields that name a home path: never in a copy a person reads. */
-const PATH_FIELDS = ['sender_path', 'recipient_path', 'sender_message_path', 'participant_paths'];
+// ─── Group delivery ─────────────────────────────────────────────────────────
 
 /**
- * The message properties as `reader` may see them: a person's copy (a user
- * or visitor home) carries ids and keys, no home path; an agent's copy keeps
- * the paths the agent runtime works with.
- */
-export function readableBy(reader, props) {
-  if (reader.isAgent) return props;
-  const out = { ...props };
-  for (const field of PATH_FIELDS) delete out[field];
-  if (out.data && typeof out.data === 'object') {
-    out.data = { ...out.data };
-    for (const field of PATH_FIELDS) delete out.data[field];
-  }
-  return out;
-}
-
-/** The conversation context as `reader`'s copy holds it (no human home path in a person's copy). */
-function forReader(convBase, reader) {
-  if (reader.isAgent || !convBase.agentMeta?.human_sender_path) return convBase;
-  const { human_sender_path: _dropped, ...agentMeta } = convBase.agentMeta;
-  return { ...convBase, agentMeta };
-}
-
-/**
- * The home whose outbox directly holds the message at `nodePath`, or null.
- * Only these exact shapes are outboxes (every segment non-empty, the message
- * a direct child of `outbox`):
+ * Deliver one message to every member and moderator of a circle, each into their own home.
  *
- *   /users/<slug>/outbox/<name>               -> /users/<slug>
- *   /users/internal/<key|slug>/outbox/<name>  -> /users/internal/<key|slug>
- *   /agents/<name>/outbox/<name>              -> /agents/<name>
- *   /visitors/<key>/outbox/<name>             -> /visitors/<key>
- *
- * The position decides, not a search for the word: a home literally named
- * `outbox` (`/users/outbox/outbox/m`) is that home, and a node nested deeper
- * under an outbox is no message.
+ * Each copy of the conversation (`<home>/inbox/chats/grp-<circle id>`) is `conversation_type: group`,
+ * names the circle as its one participant (`circle:<id>`, so a client answering "the other party" posts
+ * back to the circle), and carries the member count, unread count and last message. Message copies are
+ * `sent` for the sender and `delivered` for everyone else, with a notification for everyone else.
  */
-export function entityPathFromOutboxPath(nodePath) {
-  if (typeof nodePath !== 'string' || !nodePath.startsWith('/')) return null;
-  const parts = nodePath.split('/').slice(1);
-  if (parts.some((p) => p === '' || p === '.' || p === '..')) return null;
-  const [root] = parts;
-  if (root === 'users' && parts.length === 5 && parts[1] === 'internal' && parts[3] === 'outbox') {
-    return `/users/internal/${parts[2]}`;
+async function deliverToCircle({ triggerWorkspace, node, props, body, sender, circleRef, messageText, messageType }) {
+  const nodePath = node.path;
+  if (sender.isAgent || sender.isVisitor) return refuse(triggerWorkspace, nodePath, 'not_a_member', TAG);
+
+  const circle = await resolveCircle(circleRef);
+  if (!circle) return refuse(triggerWorkspace, nodePath, 'unknown_circle', TAG);
+  if (circle.policy.chat === 'off') return refuse(triggerWorkspace, nodePath, 'group_closed', TAG);
+
+  const roster = await rosterFor(circle, sender.id);
+  if (!roster.role) return refuse(triggerWorkspace, nodePath, 'not_a_member', TAG);
+  if (!mayAct(circle.policy, roster.role, 'chat')) return refuse(triggerWorkspace, nodePath, 'read_only', TAG);
+  if (roster.everyone.length > circle.policy.max_members) {
+    return refuse(triggerWorkspace, nodePath, 'group_too_large', TAG);
   }
-  if (parts.length === 4 && parts[2] === 'outbox' && ['users', 'agents', 'visitors'].includes(root)) {
-    // /users/internal is the folder of homes, not a home.
-    if (root === 'users' && parts[1] === 'internal') return null;
-    return `/${root}/${parts[1]}`;
-  }
-  return null;
-}
 
-/** Resolve the party living at `home` (a path from entityPathFromOutboxPath). */
-async function resolveSenderHome(triggerWorkspace, home) {
-  const root = home.split('/')[1];
-  if (root === 'visitors') {
-    if (triggerWorkspace !== 'raisin:access_control') return null;
-    return resolveVisitor(home, null);
-  }
-  if (root === 'agents') {
-    if (triggerWorkspace !== 'ai') return null;
-    return resolveAgent(home, null);
-  }
-  if (triggerWorkspace !== 'raisin:access_control') return null;
-  const node = await raisin.nodes.get('raisin:access_control', home);
-  if (!node || node.node_type !== 'raisin:User') return null;
-  return userNodeToEntity(node, 'raisin:access_control');
-}
+  const conversationId = conversationIdOf(circle);
+  const attachments = checkAttachments(body.attachments, conversationId);
+  if (attachments.error) return refuse(triggerWorkspace, nodePath, attachments.error, TAG);
 
-/** Does every sender field the message carries name `sender` (at `home`)? */
-function claimsMatch(sender, home, { ids, paths, emails, keys }) {
-  const present = (list) => list.filter((v) => v !== undefined && v !== null && v !== '');
-  const p = sender.properties ?? {};
-  const idOk = new Set([sender.id, p.user_id, home].filter(Boolean));
-  for (const v of present(ids)) if (typeof v !== 'string' || !idOk.has(v)) return false;
-  for (const v of present(paths)) if (v !== home) return false;
-  const email = typeof p.email === 'string' ? p.email.toLowerCase() : null;
-  for (const v of present(emails)) if (typeof v !== 'string' || v.toLowerCase() !== email) return false;
-  for (const v of present(keys)) if (v !== sender.key) return false;
-  return true;
-}
+  await copyToSentFolder(triggerWorkspace, node);
 
-/** Mark the outbox message failed (not delivered, not retried) and stop. */
-async function refuse(workspace, nodePath, reason) {
-  console.warn(`[handle-chat] refused ${nodePath}: ${reason}`);
-  if (nodePath) {
-    await raisin.nodes.updateProperty(workspace, nodePath, 'status', 'failed');
-    await raisin.nodes.updateProperty(workspace, nodePath, 'failure_reason', reason);
-  }
-  return { success: false, reason };
-}
+  const now = new Date().toISOString();
+  const createdAt = props.created_at || now;
+  const messageSlug = `msg-${node.id}`;
+  const circleParty = `circle:${circle.id}`;
+  const lastMessage = {
+    content: messageText,
+    sender_id: sender.id,
+    sender_key: sender.key ?? null,
+    sender_display_name: sender.displayName,
+    created_at: now,
+  };
+  const messageProps = {
+    title: 'Chat message',
+    message_type: messageType,
+    role: 'user',
+    body: { content: messageText, message_text: messageText },
+    sender_id: sender.id,
+    sender_key: sender.key ?? null,
+    sender_display_name: sender.displayName,
+    recipient_id: circleParty,
+    conversation_id: conversationId,
+    client_id: typeof props.client_id === 'string' ? props.client_id : undefined,
+    created_at: createdAt,
+    data: attachments.list.length ? { attachments: attachments.list } : {},
+  };
+  if (attachments.list.length) messageProps.attachments = attachments.list;
+  if (messageProps.client_id === undefined) delete messageProps.client_id;
 
-async function resolveRecipient(hint) {
-  if (isVisitorId(hint.id) || isVisitorPath(hint.path)) {
-    return resolveVisitor(hint.path, hint.id);
-  }
-  // Try user first
-  const user = await resolveUser('raisin:access_control', hint.path, hint.id, hint.email, hint.key);
-  if (user) return user;
-  // Fall back to agent
-  return resolveAgent(hint.path, hint.id);
-}
-
-async function resolveAgent(agentPath, agentId) {
-  const name = extractAgentName(agentId, agentPath);
-  if (!name) return null;
-
-  // Verify agent definition exists in functions workspace
-  const defPath = `/agents/${name}`;
-  const agentDef = await raisin.nodes.get('functions', defPath);
-  if (!agentDef) return null;
-
-  const defProps = agentDef.properties ?? {};
-
-  // Auto-provision agent home in ai workspace
-  const homePath = `/agents/${name}`;
-  let home = await raisin.nodes.get('ai', homePath);
-
-  if (!home) {
-    await ensureFolderExists('ai', '/', 'agents', 'Agents');
-    const prettyName = defProps.title || name.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-    try {
-      await raisin.nodes.create('ai', '/agents', {
-        slug: name, name, node_type: 'raisin:Folder',
-        properties: {
-          title: prettyName,
-          user_id: `agent:${name}`,
-          display_name: prettyName,
-          agent_ref: { 'raisin:ref': '', 'raisin:workspace': 'functions', 'raisin:path': defPath },
-          max_turns: 10,
-        },
-      });
-    } catch (e) {
-      // Race condition: another worker created it
-      if (!String(e?.message || '').includes('already exists')) throw e;
+  let delivered = 0;
+  for (const person of roster.everyone) {
+    const own = person.id === sender.id;
+    const chats = await ensureChatsFolder(person.workspace, person.path);
+    const convPath = `${chats}/${conversationId}`;
+    await upsertGroupConversation(person.workspace, convPath, {
+      conversationId, circle, circleParty, memberCount: roster.memberCount, lastMessage, now, incrementUnread: !own,
+    });
+    await createIdempotent(person.workspace, convPath, {
+      slug: messageSlug,
+      name: messageSlug,
+      node_type: 'raisin:Message',
+      properties: own
+        ? { ...messageProps, status: 'sent' }
+        : { ...messageProps, status: 'delivered', delivered_at: now },
+    });
+    if (!own) {
+      await createNotification(person, conversationId, sender.displayName, messageText, node.id, circle.name);
+      delivered += 1;
     }
-    home = await raisin.nodes.get('ai', homePath);
   }
 
-  if (!home) return null;
-  const homeProps = home.properties ?? {};
-  return {
-    id: homeProps.user_id || `agent:${name}`,
-    path: homePath,
-    displayName: homeProps.display_name || name,
-    workspace: 'ai',
-    isAgent: true,
-    properties: homeProps,
-    definition: agentDef,
+  await raisin.nodes.updateProperty(triggerWorkspace, nodePath, 'status', 'delivered');
+  await raisin.nodes.updateProperty(triggerWorkspace, nodePath, 'delivered_at', now);
+  return { success: true, conversation_id: conversationId, delivered };
+}
+
+/** Create or refresh one member's copy of a group conversation (one read and one write). */
+async function upsertGroupConversation(workspace, convPath, { conversationId, circle, circleParty, memberCount, lastMessage, now, incrementUnread }) {
+  const shape = {
+    conversation_type: 'group',
+    conversation_id: conversationId,
+    subject: circle.name,
+    circle_id: circle.id,
+    circle_type: circle.type,
+    participants: [circleParty],
+    member_count: memberCount,
+    stream_channel: `chat:${conversationId}`,
+    last_message: lastMessage,
+    updated_at: now,
+    membership: 'member',
   };
+  const existing = await raisin.nodes.get(workspace, convPath);
+  if (!existing) {
+    const parentPath = convPath.split('/').slice(0, -1).join('/');
+    const created = await createIdempotent(workspace, parentPath, {
+      slug: conversationId, name: conversationId, node_type: 'raisin:Conversation',
+      properties: { ...shape, unread_count: incrementUnread ? 1 : 0 },
+    });
+    if (created) return;
+  }
+  const current = (existing ?? await raisin.nodes.get(workspace, convPath))?.properties ?? {};
+  const unread = (Number(current.unread_count) || 0) + (incrementUnread ? 1 : 0);
+  await raisin.nodes.update(workspace, convPath, { properties: { ...current, ...shape, unread_count: unread } });
 }
 
-async function resolveUser(workspace, userPath, userId, email, userKey) {
-  if (isAgentId(userId)) return null;
-  if (!isUserKey(userKey)) userKey = null;
-  // A key given as the id names the keyed home.
-  if (!userKey && isUserKey(userId)) {
-    userKey = userId;
-    userId = null;
-  }
-  if (typeof userId !== 'string' || !userId) userId = null;
-  if (typeof userPath !== 'string' || !userPath) userPath = null;
-  if (typeof email !== 'string' || !email) email = null;
-
-  // Handle user_id that's actually a path (flat or nested home)
-  if (userId && userId.startsWith('/users/')) {
-    userPath = userId;
-    userId = null;
-  }
-  // A path into a user's outbox names the home.
-  if (userPath) userPath = entityPathFromOutboxPath(userPath) || userPath;
-
-  // By key: the home is /users/internal/<key>.
-  if (userKey) {
-    const node = await raisin.nodes.get(workspace, `${USER_HOMES_ROOT}/${userKey}`);
-    if (node && (!node.node_type || node.node_type === 'raisin:User')) return userNodeToEntity(node, workspace);
-    return null;
-  }
-
-  // By user_id property
-  if (userId) {
-    const rows = await sqlRows(`
-      SELECT id, path, name, node_type, properties
-      FROM '${workspace}'
-      WHERE node_type = 'raisin:User' AND properties->>'user_id'::String = $1
-      LIMIT 2
-    `, [userId]);
-    // Two homes for one identity is ambiguous: no recipient rather than a guess
-    // (the engine's resolver refuses it the same way).
-    if (rows.length > 1) return null;
-    if (rows.length === 1) return userNodeToEntity(rows[0], workspace);
-  }
-
-  // By path (only a raisin:User node is a user)
-  if (userPath) {
-    const node = await raisin.nodes.get(workspace, userPath);
-    if (node && (!node.node_type || node.node_type === 'raisin:User')) return userNodeToEntity(node, workspace);
-  }
-
-  // By node ID (the runtime may throw on an id that is not a node id)
-  if (userId && typeof raisin.nodes.getById === 'function') {
-    let node = null;
-    try {
-      node = await raisin.nodes.getById(workspace, userId);
-    } catch (_) {
-      node = null;
-    }
-    if (node && (!node.node_type || node.node_type === 'raisin:User')) return userNodeToEntity(node, workspace);
-  }
-
-  // By email
-  if (email) {
-    const rows = await sqlRows(`
-      SELECT id, path, name, node_type, properties
-      FROM '${workspace}'
-      WHERE node_type = 'raisin:User' AND properties->>'email'::String = $1
-      LIMIT 2
-    `, [email]);
-    if (rows.length > 1) return null;
-    if (rows.length === 1) return userNodeToEntity(rows[0], workspace);
-  }
-
-  return null;
-}
-
-function userNodeToEntity(node, workspace) {
-  const p = node.properties ?? {};
-  return {
-    id: node.id,
-    path: node.path,
-    displayName: p.display_name || node.name || node.id,
-    workspace,
-    key: userKeyFromHome(node.path),
-    isAgent: false,
-    properties: p,
-  };
-}
-
-// ─── Visitors (anonymous chat sessions) ─────────────────────────────────────
-
-const VISITOR_ROOT = '/visitors';
-const VISITOR_ID_PREFIX = 'visitor:';
-const VISITOR_KEY = /^[0-9a-f]{16,128}$/;
-
-function isVisitorId(id) {
-  return typeof id === 'string' && id.startsWith(VISITOR_ID_PREFIX);
-}
-
-function isVisitorPath(path) {
-  return typeof path === 'string' && path.startsWith(VISITOR_ROOT + '/');
-}
-
-/**
- * The visitor session named by a path and/or id. Both, when given, must name
- * the SAME session: a message that claims one visitor's id from another's
- * home is refused rather than delivered to either.
- */
-async function resolveVisitor(path, id) {
-  const fromId = isVisitorId(id) ? id.slice(VISITOR_ID_PREFIX.length) : null;
-  // A visitor is named by its HOME, exactly `/visitors/<key>`: any longer or
-  // stranger path is refused rather than trimmed to a prefix.
-  const fromPath = isVisitorPath(path)
-    ? (/^\/visitors\/([0-9a-f]{16,128})$/.exec(path) || [])[1] || ''
-    : null;
-  if (fromPath === '') return null;
-  if (fromId && fromPath && fromId !== fromPath) return null;
-  const key = fromId || fromPath;
-  if (!key || !VISITOR_KEY.test(key)) return null;
-  const homePath = `${VISITOR_ROOT}/${key}`;
-  const home = await raisin.nodes.get('raisin:access_control', homePath);
-  if (!home || home.node_type !== 'raisin:VisitorSession') return null;
-  const props = home.properties ?? {};
-  return {
-    id: `${VISITOR_ID_PREFIX}${key}`,
-    path: homePath,
-    displayName: props.display_name || 'Visitor',
-    workspace: 'raisin:access_control',
-    isAgent: false,
-    isVisitor: true,
-    properties: props,
-  };
-}
+// ─── Visitors and agents ────────────────────────────────────────────────────
 
 /**
  * A visitor talks to agents that allow it, and agents answer visitors. Nothing
@@ -553,35 +393,11 @@ async function assertSameHuman(sender, recipient, agentConvPath) {
   }
 }
 
-// ─── Folder / Inbox Provisioning ────────────────────────────────────────────
-
-async function ensureFolderExists(workspace, parentPath, slug, title) {
-  const fullPath = `${parentPath === '/' ? '' : parentPath}/${slug}`;
-  const existing = await raisin.nodes.get(workspace, fullPath);
-  if (existing) return fullPath;
-  try {
-    await raisin.nodes.create(workspace, parentPath, {
-      slug, name: slug, node_type: 'raisin:Folder', properties: { title },
-    });
-  } catch (e) {
-    if (!String(e?.message || '').includes('already exists')) throw e;
-  }
-  return fullPath;
-}
-
-async function ensureChatsFolder(workspace, entityPath) {
-  const inboxPath = await ensureFolderExists(workspace, entityPath, 'inbox', 'Inbox');
-  return ensureFolderExists(workspace, inboxPath, 'chats', 'Chats');
-}
-
-async function createMessageCopyIdempotent(workspace, parentPath, nodeData) {
-  try {
-    await raisin.nodes.create(workspace, parentPath, nodeData);
-  } catch (e) {
-    if (!String(e?.message || '').includes('already exists')) {
-      throw e;
-    }
-  }
+/** The conversation context as `reader`'s copy holds it (no human home path in a person's copy). */
+function forReader(convBase, reader) {
+  if (reader.isAgent || !convBase.agentMeta?.human_sender_path) return convBase;
+  const { human_sender_path: _dropped, ...agentMeta } = convBase.agentMeta;
+  return { ...convBase, agentMeta };
 }
 
 // ─── Conversation Upsert ────────────────────────────────────────────────────
@@ -667,7 +483,7 @@ function buildMessageProps(originalProps, body, ctx) {
   // Strip fields that shouldn't propagate to inbox copies
   // Keys are never taken from the outbox node: only from the resolved homes.
   for (const key of ['sender_email', 'recipient_email', 'sender_display_name', 'recipient_display_name', 'participant_paths',
-    'sender_key', 'recipient_key', 'participant_keys']) {
+    'sender_key', 'recipient_key', 'participant_keys', 'attachments']) {
     delete base[key];
   }
 
@@ -683,7 +499,8 @@ function buildMessageProps(originalProps, body, ctx) {
   base.conversation_id = ctx.conversationId;
   base.created_at = ctx.createdAt;
 
-  // Merge body + original data for the data property
+  // Merge body + original data for the data property. Attachments are only the
+  // checked list, never what the sender wrote.
   const originalData = originalProps.data ?? {};
   const merged = { ...body };
   delete merged.sender_email;
@@ -691,8 +508,14 @@ function buildMessageProps(originalProps, body, ctx) {
   delete merged.sender_key;
   delete merged.recipient_key;
   delete merged.participant_keys;
+  delete merged.attachments;
   if (typeof originalData === 'object' && originalData !== null) {
     Object.assign(merged, originalData);
+    delete merged.attachments;
+  }
+  if (ctx.attachments?.length) {
+    merged.attachments = ctx.attachments;
+    base.attachments = ctx.attachments;
   }
   base.data = merged;
 
@@ -760,15 +583,11 @@ async function copyToSentFolder(workspace, node) {
   sentProps.status = 'sent';
   sentProps.sent_at = new Date().toISOString();
 
-  try {
-    await raisin.nodes.create(workspace, sentPath, {
-      slug: messageSlug, name: messageSlug,
-      node_type: node?.node_type ?? 'raisin:Message',
-      properties: sentProps,
-    });
-  } catch (e) {
-    if (!String(e?.message || '').includes('already exists')) throw e;
-  }
+  await createIdempotent(workspace, sentPath, {
+    slug: messageSlug, name: messageSlug,
+    node_type: node?.node_type ?? 'raisin:Message',
+    properties: sentProps,
+  });
 
   await raisin.nodes.updateProperty(workspace, nodePath, 'status', 'sent');
   await raisin.nodes.updateProperty(workspace, nodePath, 'sent_at', new Date().toISOString());
@@ -776,7 +595,7 @@ async function copyToSentFolder(workspace, node) {
 
 // ─── Notifications ──────────────────────────────────────────────────────────
 
-async function createNotification(recipient, conversationId, senderName, messageText, messageId) {
+async function createNotification(recipient, conversationId, senderName, messageText, messageId, groupName = null) {
   const notificationsPath = await ensureFolderExists(
     recipient.workspace, `${recipient.path}/inbox`, 'notifications', 'Notifications'
   );
@@ -788,8 +607,8 @@ async function createNotification(recipient, conversationId, senderName, message
       slug, name: slug, node_type: 'raisin:Notification',
       properties: {
         type: 'message',
-        title: `New message from ${senderName}`,
-        body: messageText.substring(0, 80),
+        title: groupName ? `${senderName} in ${groupName}` : `New message from ${senderName}`,
+        body: String(messageText).substring(0, 80),
         link: `/inbox/chats/${conversationId}`,
         read: false,
         data: { conversation_id: conversationId, sender_id: senderName, created_at: now },
@@ -799,165 +618,4 @@ async function createNotification(recipient, conversationId, senderName, message
     // Notification creation is best-effort
     console.warn('[handle-chat] Notification creation failed:', e.message);
   }
-}
-
-// ─── Permissions ────────────────────────────────────────────────────────────
-
-async function checkPermission(senderId, recipientId, messageType) {
-  if (!senderId || !recipientId) {
-    return { allowed: false, reason: 'Missing sender_id or recipient_id' };
-  }
-
-  // Auto-allow agent messaging
-  if (isAgentId(senderId) || isAgentId(recipientId)) {
-    return { allowed: true };
-  }
-
-  // Auto-allow AI intermediate types
-  if (AI_INTERMEDIATE_TYPES.has(messageType)) {
-    return { allowed: true };
-  }
-
-  const config = await getMessagingConfig();
-
-  if (!(config.enabled ?? true)) {
-    return { allowed: false, reason: 'Messaging is disabled' };
-  }
-
-  if (config.blocked_users_prevent_messaging ?? true) {
-    if (await isBlocked(recipientId, senderId)) {
-      return { allowed: false, reason: 'You have been blocked by this user' };
-    }
-  }
-
-  let permissions;
-  if (messageType === 'chat' || messageType === 'direct_message') {
-    permissions = config.chat_permissions ?? { mode: 'any_of', rules: [{ type: 'always' }] };
-  } else if (messageType === 'task_assignment') {
-    permissions = config.task_permissions ?? { mode: 'any_of', rules: [{ type: 'always' }] };
-  } else {
-    permissions = config.chat_permissions ?? { mode: 'any_of', rules: [{ type: 'always' }] };
-  }
-
-  return evaluatePermissions(senderId, recipientId, permissions);
-}
-
-async function getMessagingConfig() {
-  const node = await raisin.nodes.get('raisin:access_control', '/config/messaging');
-  if (node?.properties) return node.properties;
-  return {
-    enabled: true,
-    chat_permissions: { mode: 'any_of', rules: [{ type: 'always' }] },
-    task_permissions: { mode: 'any_of', rules: [{ type: 'always' }] },
-    blocked_users_prevent_messaging: true,
-  };
-}
-
-async function isBlocked(userId, blockedUserId) {
-  const blocker = idCondition('blocker', userId);
-  const blockee = idCondition('blockee', blockedUserId);
-  const sql = `SELECT * FROM GRAPH_TABLE(MATCH (blocker)-[:BLOCKS]->(blockee) WHERE ${blocker} AND ${blockee} COLUMNS (blockee.id AS id)) AS g LIMIT 1`;
-  const rows = await sqlRows(sql, []);
-  return rows.length > 0;
-}
-
-async function evaluatePermissions(senderId, recipientId, permissions) {
-  const mode = permissions.mode ?? 'any_of';
-  const rules = permissions.rules ?? [];
-  if (!rules.length) return { allowed: true };
-
-  for (const rule of rules) {
-    const matched = await evaluateRule(senderId, recipientId, rule);
-    if (mode === 'any_of' && matched) return { allowed: true };
-    if (mode === 'all_of' && !matched) return { allowed: false, reason: `Permission rule not satisfied: ${rule.type}` };
-  }
-
-  return mode === 'any_of'
-    ? { allowed: false, reason: 'No permission rule satisfied' }
-    : { allowed: true };
-}
-
-async function evaluateRule(senderId, recipientId, rule) {
-  switch (rule.type) {
-    case 'always': return true;
-    case 'never': return false;
-    case 'relationship': return rule.relation ? hasRelationship(senderId, recipientId, rule.relation) : false;
-    case 'same_group': return inSameGroup(senderId, recipientId, rule.group_type);
-    case 'same_role': return hasSameRole(senderId, recipientId, rule.role);
-    case 'sender_has_role': return userHasRole(senderId, rule.role);
-    case 'recipient_has_role': return userHasRole(recipientId, rule.role);
-    default: return false;
-  }
-}
-
-async function hasRelationship(userA, userB, relationType) {
-  const label = relationType.toUpperCase().replace(/-/g, '_');
-  const aCond = idCondition('a', userA);
-  const bCond = idCondition('b', userB);
-
-  // Check A→B
-  let rows = await sqlRows(`SELECT * FROM GRAPH_TABLE(MATCH (a)-[:${label}]->(b) WHERE ${aCond} AND ${bCond} COLUMNS (b.id AS id)) AS g LIMIT 1`, []);
-  if (rows.length > 0) return true;
-
-  // Check B→A (bidirectional)
-  const aCondRev = idCondition('a', userB);
-  const bCondRev = idCondition('b', userA);
-  rows = await sqlRows(`SELECT * FROM GRAPH_TABLE(MATCH (a)-[:${label}]->(b) WHERE ${aCondRev} AND ${bCondRev} COLUMNS (b.id AS id)) AS g LIMIT 1`, []);
-  return rows.length > 0;
-}
-
-async function inSameGroup(userAId, userBId, groupType) {
-  const userA = await getUserNode(userAId);
-  const userB = await getUserNode(userBId);
-  if (!userA || !userB) return false;
-
-  let groupsA = Array.isArray(userA.properties?.groups) ? userA.properties.groups : [];
-  let groupsB = Array.isArray(userB.properties?.groups) ? userB.properties.groups : [];
-  if (!groupsA.length || !groupsB.length) return false;
-
-  if (groupType) {
-    const filter = groupType.toLowerCase();
-    groupsA = groupsA.filter(g => g.toLowerCase().includes(filter));
-    groupsB = groupsB.filter(g => g.toLowerCase().includes(filter));
-  }
-
-  return groupsA.some(g => groupsB.includes(g));
-}
-
-async function hasSameRole(userAId, userBId, role) {
-  if (role) return (await userHasRole(userAId, role)) && (await userHasRole(userBId, role));
-  const a = await getUserNode(userAId);
-  const b = await getUserNode(userBId);
-  if (!a || !b) return false;
-  const rolesA = Array.isArray(a.properties?.roles) ? a.properties.roles : [];
-  const rolesB = Array.isArray(b.properties?.roles) ? b.properties.roles : [];
-  return rolesA.some(r => rolesB.includes(r));
-}
-
-async function userHasRole(userId, role) {
-  if (!role) return false;
-  const user = await getUserNode(userId);
-  if (!user) return false;
-  const roles = Array.isArray(user.properties?.roles) ? user.properties.roles : [];
-  return roles.includes(role);
-}
-
-async function getUserNode(userId) {
-  if (!userId) return null;
-  if (typeof userId === 'string' && userId.startsWith('/')) {
-    return raisin.nodes.get('raisin:access_control', userId);
-  }
-  return raisin.nodes.getById('raisin:access_control', userId);
-}
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-function idCondition(alias, entityId) {
-  const isPath = typeof entityId === 'string' && entityId.startsWith('/');
-  return isPath ? `${alias}.path = '${entityId}'` : `${alias}.id = '${entityId}'`;
-}
-
-async function sqlRows(sql, params) {
-  const result = await raisin.sql.query(sql, params);
-  return Array.isArray(result) ? result : (result?.rows ?? []);
 }

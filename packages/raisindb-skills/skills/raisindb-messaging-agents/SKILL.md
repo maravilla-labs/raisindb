@@ -1,6 +1,6 @@
 ---
 name: raisindb-messaging-agents
-description: "Build AI chat and messaging on RaisinDB: AI agents with tools, the inbox/outbox chat pipeline, agents that proactively message users and coordinate between them, human-in-the-loop task UIs, chatbox frontends with the JS SDK, and token safeguards (budgets, auto-compaction). Use this whenever the user wants a chatbot, AI assistant, agent with tools, notifications, an inbox, agent-to-user messaging, multi-user coordination ('agent asks staff one by one'), an assistant that answers from the user's own documents (pair it with raisindb-retrieval for the search side), a public website's chat for anonymous visitors without login (db.conversations.startAnonymous, agent `anonymous` settings — never a shared service identity), or anything involving raisin:AIAgent, conversations, or message nodes — even if they just say 'add AI to my app'."
+description: "Build chat, messaging and tasks on RaisinDB: person-to-person and GROUP chat (a circle's conversation delivered into every member's own inbox), tasks for a person or a whole group (any / all / quorum: 'someone bring toilet paper', 'everyone confirm', 'we need three helpers'), who-may-message-whom rules (friends, blocks, circles, roles in /config/messaging), file attachments, AI agents with tools, the inbox/outbox pipeline, agents that proactively message users and coordinate between them, human-in-the-loop task UIs, chatbox frontends with the JS SDK, and token safeguards (budgets, auto-compaction). Use this whenever the user wants a chat, group chat, community, course/club/team chat, an inbox, tasks or to-dos for people, a chatbot, AI assistant, agent with tools, notifications, agent-to-user messaging, multi-user coordination ('agent asks staff one by one'), an assistant that answers from the user's own documents (pair it with raisindb-retrieval for the search side), a public website's chat for anonymous visitors without login (db.conversations.startAnonymous, agent `anonymous` settings — never a shared service identity), or anything involving raisin:AIAgent, raisin:EntityCircle, raisin:InboxTask, conversations, or message nodes — even if they just say 'add chat to my app'."
 ---
 
 # Messaging & AI Agents
@@ -180,6 +180,78 @@ for await (const ev of db.conversations.sendMessage(convo.conversationPath, text
   synthetic `waiting`), `ConversationStore` `streamingTimeoutMs` +
   watchdog, request queueing during reconnects. Skip `networkidle`-style
   waits in tests — persistent SSE keeps the network busy by design.
+
+## People, groups and tasks
+
+Chat between people needs no app server and no store of its own: the browser
+holds the person's engine token, reads its own `{home}/inbox/**` (row-level
+security limits it to that home), writes into its own `{home}/outbox/`, and
+subscribes to node events on `{home}/inbox/**`. The engine delivers. Never
+build a single-copy thread in a content workspace read with a server key;
+that is the store the inbox exists to replace.
+
+**One to one**: `db.conversations.create({ participant: 'u_…' })`, then
+`createUserMessage(path, text, { files })`. The sender is the outbox's home,
+never a field in the message.
+
+**Groups are circles.** A `raisin:EntityCircle` under
+`raisin:access_control:/circles/<name>`; members are users with a `MEMBER_OF`
+edge, moderators a `MODERATES` edge. Users cannot `relate`, so only an admin,
+the system or your server-side code decides who belongs:
+
+```sql
+RELATE FROM path='/users/internal/u_…' IN WORKSPACE 'raisin:access_control'
+  TO path='/circles/piano-a' IN WORKSPACE 'raisin:access_control' TYPE 'MEMBER_OF';
+```
+
+A message with `recipient_id: 'circle:<circle node id>'` (or in conversation
+`grp-<circle id>`) is delivered into EVERY member's and moderator's
+`{home}/inbox/chats/grp-<circle id>` (`conversation_type: 'group'`,
+`participants: ['circle:<id>']`, `member_count`, `unread_count`). The SDK's
+`createUserMessage` on a group conversation does that by itself. After
+changing edges, call `/lib/messaging/circle-sync` with
+`{ circle: '/circles/piano-a' }` from trusted code: new members get the
+conversation now, those who left are marked `membership: 'left'`. The circle's
+`messaging` property: `{ chat: members|moderators|off, tasks:
+moderators|members|off, max_members: 500 }` (announcement channel =
+`chat: moderators`).
+
+**Who may message whom**: `raisin:access_control:/config/messaging`
+(`raisin:MessagingConfig`), applied to every person-to-person message and
+task: `chat_permissions` / `task_permissions` = `{ mode: any_of|all_of,
+rules }` with `relationship` (`{ relation: 'FRIENDS_WITH' }` from
+raisin-social; friend requests are themselves outbox messages, raisin-relationships),
+`same_circle` (`{ circle_type? }`), `same_group`, `same_role`,
+`sender_has_role`, `recipient_has_role`, `always`, `never`;
+`blocked_users_prevent_messaging` (a `BLOCKS` edge); `max_message_length`;
+`rate_limit_messages_per_minute`. A refused message ends `status: failed`
+with `failure_reason` on the outbox node: show it.
+
+**Tasks** (`raisin:InboxTask`) live in the same inbox. `task_type` is any slug
+(`sign_contract`, `bring_item`, `confirm_attendance`); render `options` as
+buttons, `input_schema` as a form, `data` for your own card. Assign one from
+the browser with `db.conversations.assignTask({ assignee, task_type, title,
+… })`, from a function with `raisin.tasks.create({ … })`. Assigned to a circle
+(`circle:<id>` / `/circles/<name>`) or a group, every member gets a task and
+an engine-only `raisin:TaskAssignment` record holds the policy: `completion:
+'any'` (first answer closes it; the others' tasks are cancelled with
+`cancellation_reason: group_completed` and `resolved_by_names`), `'all'`,
+`'quorum'` + `required`, optional `response_condition` (REL). Members see
+progress on their own copy (`assignment_responded`, `assignment_status`).
+Complete with `db.inbox.completeTask(id, response)`. A task with
+`conversation_id` belongs in that thread as a card. Never read a group's
+state from a member's copy: people may edit their own inbox; the record is
+the authority.
+
+**Files**: `{ ref: { 'raisin:ref', 'raisin:workspace': 'assets' }, name,
+mime_type, size }` below `assets:/messages/<conversation id>/` (the
+reference in its own object, or the engine drops name and type). Your server
+mints the upload token (`POST /api/uploads/tokens`, folder
+`/messages/<conversation id>`) after checking the person has that
+conversation, and a scoped read grant (`…/messages/<conv>/raisin:grant`) for
+display. The handler refuses references outside the conversation's folder.
+
+Design and limits: `docs/plans/group-messaging-and-tasks.md`.
 
 ## Anonymous visitors (a public website's chat, no login)
 

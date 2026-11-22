@@ -1,6 +1,6 @@
 # Messaging System Implementation Status
 
-Last Updated: 2025-01-18
+Last Updated: 2026-11-22
 
 ## Overview
 
@@ -20,6 +20,8 @@ Refer to other docs in this folder for architecture and usage guides.
 | raisin:InboxTask | ✅ Implemented | `crates/raisin-core/global_nodetypes/raisin_inbox_task.yaml` |
 | raisin:Notification | ✅ Implemented | `crates/raisin-core/global_nodetypes/raisin_notification.yaml` |
 | raisin:Conversation | ✅ Implemented | `builtin-packages/raisin-messaging/nodetypes/conversation.yaml` |
+| raisin:TaskAssignment | ✅ Implemented | `crates/raisin-core/global_nodetypes/raisin_task_assignment.yaml` (group task authority) |
+| raisin:TaskAssignmentResponse | ✅ Implemented | `crates/raisin-core/global_nodetypes/raisin_task_assignment_response.yaml` |
 
 ### Message Type Handlers
 
@@ -28,10 +30,10 @@ Refer to other docs in this folder for architecture and usage guides.
 | relationship_request | ✅ | ✅ | Complete |
 | relationship_response | ✅ | ✅ | Complete |
 | ward_invitation | ✅ | ✅ | Complete |
-| task_assignment | ✅ | ✅ | Complete |
+| task_assignment | ✅ | ✅ | Complete (to a person, or to a circle with any / all / quorum) |
 | system_notification | ✅ | ✅ | Complete |
 | stewardship_request | ✅ | ✅ | Complete |
-| chat | ✅ | ✅ | Complete |
+| chat | ✅ | ✅ | Complete (one to one, and to every member of a circle) |
 
 ### Function Bindings (raisin.tasks.*)
 
@@ -51,6 +53,14 @@ Refer to other docs in this folder for architecture and usage guides.
 | Email | ⚠️ Placeholder | Logs only - needs service integration |
 
 ---
+
+## Groups
+
+Group chat and group tasks address a `raisin:EntityCircle` (members: `MEMBER_OF`, moderators: `MODERATES`).
+Design, rules and limits: [docs/plans/group-messaging-and-tasks.md](../../plans/group-messaging-and-tasks.md).
+Shared handler modules: `builtin-packages/raisin-messaging/content/functions/lib/messaging/handlers/shared/`
+(parties, rules, circles); roster sync: `lib/messaging/circle-sync`. Group task completion:
+`raisin-flow-runtime` `assignment` + `service::complete_task`.
 
 ## Not Yet Implemented
 
@@ -83,7 +93,7 @@ Refer to other docs in this folder for architecture and usage guides.
 | handle-relationship-request | `builtin-packages/raisin-stewardship/content/functions/lib/stewardship/handlers/handle-relationship-request/` |
 | handle-relationship-response | `builtin-packages/raisin-stewardship/content/functions/lib/stewardship/handlers/handle-relationship-response/` |
 | handle-ward-invitation | `builtin-packages/raisin-stewardship/content/functions/lib/stewardship/handlers/handle-ward-invitation/` |
-| handle-task-assignment | `builtin-packages/raisin-messaging/content/functions/lib/messaging/handlers/handle-task-assignment/` |
+| handle-task-assignment | `builtin-packages/raisin-messaging/content/functions/lib/messaging/handlers/handle-task-assignment/` (JavaScript) |
 | handle-system-notification | `builtin-packages/raisin-messaging/content/functions/lib/messaging/handlers/handle-system-notification/` |
 | handle-stewardship-request | `builtin-packages/raisin-stewardship/content/functions/lib/stewardship/handlers/handle-stewardship-request/` |
 | send-push-notification | `builtin-packages/raisin-messaging/content/functions/lib/messaging/handlers/send-push-notification/` (placeholder) |

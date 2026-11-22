@@ -15,6 +15,7 @@ use raisin_storage::{NodeRepository, Storage, StorageScope, UpdateNodeOptions};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::assignment;
 use crate::integration::triggers::{FlowInstanceBuilder, FlowTriggerEvent};
 use crate::types::{FlowError, FlowInstance, FlowStatus};
 
@@ -861,11 +862,53 @@ pub async fn complete_task<S: Storage>(
         )));
     }
 
-    // 3. If the task belongs to a flow, validate the flow is waiting on it
-    let flow_instance_id = task_prop_str(&task_node, "flow_instance_id");
-    let step_id = task_prop_str(&task_node, "step_id");
-    let assignment_group = task_prop_str(&task_node, "assignment_group");
-    let assignment_paths = task_prop_paths(&task_node, "assignment_task_paths");
+    // 3. A GROUP task answers to its record. The person may edit their own
+    //    inbox, so the copy only names the record; who belongs, the policy and
+    //    the flow it resumes are the record's. A copy naming a record it is
+    //    not part of is refused; a copy naming no (or no real) record is an
+    //    ordinary single task.
+    let record = match task_prop_str(&task_node, "assignment_id") {
+        Some(id) if assignment::valid_assignment_id(&id) => {
+            match assignment::load(storage, tenant_id, repo, &assignment::record_path(&id)).await? {
+                Some(record) if record.node_type == assignment::RECORD_TYPE => {
+                    if !assignment::prop_strings(&record, "task_paths")
+                        .iter()
+                        .any(|p| p == &task_path)
+                    {
+                        return Err(FlowError::PermissionDenied(format!(
+                            "Task '{}' is not part of assignment '{}'",
+                            task_id, id
+                        )));
+                    }
+                    let state = assignment::prop_str(&record, "status")
+                        .unwrap_or_else(|| "open".to_string());
+                    if state != "open" {
+                        return Err(FlowError::AlreadyTerminated {
+                            status: "cancelled".to_string(),
+                        });
+                    }
+                    Some((id, record))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    // 4. The flow this completion resumes. For a group task it is the
+    //    record's. For a single task the copy names it, so the instance must be
+    //    waiting on exactly THIS task: otherwise anybody could point their own
+    //    task at another flow's human step and answer it.
+    let (flow_instance_id, step_id) = match &record {
+        Some((_, record)) => (
+            assignment::prop_str(record, "flow_instance_id"),
+            assignment::prop_str(record, "step_id"),
+        ),
+        None => (
+            task_prop_str(&task_node, "flow_instance_id"),
+            task_prop_str(&task_node, "step_id"),
+        ),
+    };
 
     if let Some(instance_id) = &flow_instance_id {
         let (_node, instance) = load_instance(storage, tenant_id, repo, instance_id).await?;
@@ -884,31 +927,71 @@ pub async fn complete_task<S: Storage>(
                 });
             }
         }
-    }
-
-    // A group response can be counted conditionally (for example only an
-    // `accept` response qualifies). Evaluate before mutating the task so an
-    // invalid authored condition cannot consume a person's response.
-    if assignment_group.is_some() {
-        let mut previous_responses = Vec::new();
-        for path in assignment_paths.iter().filter(|path| *path != &task_path) {
-            if let Ok(sibling) = load_task_node(storage, tenant_id, repo, path).await {
-                if task_prop_str(&sibling, "status").as_deref() == Some("completed") {
-                    previous_responses.push(task_response(&sibling));
+        if record.is_none() {
+            let target = instance
+                .wait_info
+                .as_ref()
+                .and_then(|wait| wait.target_path.as_deref());
+            if let Some(target) = target {
+                if target != task_path {
+                    return Err(FlowError::PermissionDenied(format!(
+                        "Flow '{}' is not waiting on task '{}'",
+                        instance_id, task_id
+                    )));
                 }
             }
         }
+    }
+
+    // 5. A group answer is recorded on the record BEFORE the copy changes: it
+    //    counts once, whatever the copy says afterwards. Whether it qualifies
+    //    (for example only an `accept`) is decided first, so an invalid
+    //    authored condition cannot consume a person's answer.
+    if let Some((assignment_id, record)) = &record {
+        let previous: Vec<Value> = assignment::responses(
+            storage,
+            tenant_id,
+            repo,
+            &assignment::record_path(assignment_id),
+        )
+        .await?
+        .into_iter()
+        .map(|answer| answer.response)
+        .collect();
         let qualifies = evaluate_group_response(
-            task_prop_str(&task_node, "response_condition").as_deref(),
+            assignment::prop_str(record, "response_condition").as_deref(),
             &response,
-            &previous_responses,
+            &previous,
         )?;
         task_node
             .properties
             .insert("qualifies".to_string(), PropertyValue::Boolean(qualifies));
+
+        let name = match completer.home.as_deref() {
+            Some(home) => assignment::display_name(storage, tenant_id, repo, home).await,
+            None => None,
+        };
+        let recorded = assignment::record_response(
+            storage,
+            tenant_id,
+            repo,
+            assignment_id,
+            &task_path,
+            Some(assignee.as_str()),
+            &completer.id,
+            name.as_deref(),
+            &response,
+            qualifies,
+        )
+        .await?;
+        if !recorded {
+            return Err(FlowError::AlreadyTerminated {
+                status: "completed".to_string(),
+            });
+        }
     }
 
-    // 4. Mark the task node completed
+    // 6. Mark the task node completed
     let now = chrono::Utc::now().to_rfc3339();
     task_node.properties.insert(
         "status".to_string(),
@@ -932,73 +1015,52 @@ pub async fn complete_task<S: Storage>(
 
     persist_inbox_task(storage, tenant_id, repo, task_node.clone()).await?;
 
-    // 4b. A GROUP assignment resumes its flow ONCE, not once per member.
+    // 7. A GROUP assignment closes ONCE and resumes its flow once.
     //
     // Every member holds a real inbox task, so this completion API is the only
     // place that can tell whether the authored policy (any / all / quorum,
-    // narrowed by `response_condition`) is now satisfied — and the only place
-    // that can take the losing tasks back out of people's inboxes when it is.
-    // Both outcomes are DESIGNABLE: the flow resumes with `group.satisfied`
-    // either way, so "first response wins" and "nobody accepted" are two
-    // ordinary branches rather than one silent dead end.
-    let group_summary = if let Some(group_path) = assignment_group.clone() {
-        let required = task_prop_usize(&task_node, "assignment_required").unwrap_or(1);
+    // narrowed by `response_condition`) is now met, and the only place that can
+    // take the other tasks back out of people's inboxes when it is. It counts
+    // the answers recorded on the record, never the members' editable copies.
+    // Both outcomes are DESIGNABLE: a flow resumes with `group.satisfied` either
+    // way, so "first answer wins" and "nobody accepted" are ordinary branches.
+    let group_summary = if let Some((assignment_id, record)) = &record {
+        let record_path = assignment::record_path(assignment_id);
+        let group_path = assignment::prop_str(record, "group").unwrap_or_default();
+        let required = assignment::prop_usize(record, "required").unwrap_or(1);
         let completion =
-            task_prop_str(&task_node, "assignment_completion").unwrap_or_else(|| "any".to_string());
+            assignment::prop_str(record, "completion").unwrap_or_else(|| "any".to_string());
+        let member_paths = assignment::prop_strings(record, "task_paths");
+        let total = assignment::prop_usize(record, "total").unwrap_or(member_paths.len());
 
-        let mut siblings = Vec::new();
-        for path in assignment_paths.iter() {
-            if path == &task_path {
-                siblings.push(task_node.clone());
-            } else if let Ok(node) = load_task_node(storage, tenant_id, repo, path).await {
-                siblings.push(node);
-            }
-        }
-        if siblings.is_empty() {
-            siblings.push(task_node.clone());
-        }
-
-        let total = siblings.len();
-        let mut responses = Vec::new();
-        let mut pending = Vec::new();
-        let mut qualifying = 0usize;
-        let mut responded = 0usize;
-        for node in &siblings {
-            match task_prop_str(node, "status")
-                .unwrap_or_else(|| "pending".to_string())
-                .as_str()
-            {
-                "completed" => {
-                    responded += 1;
-                    let qualifies = task_qualifies(node);
-                    if qualifies {
-                        qualifying += 1;
-                    }
-                    responses.push(serde_json::json!({
-                        "assignee": task_prop_str(node, "assignee"),
-                        "task_path": node.path,
-                        "response": task_response(node),
-                        "qualifies": qualifies,
-                        "completed_by": task_prop_str(node, "completed_by"),
-                        "responded_at": task_prop_time(node, "responded_at"),
-                    }));
-                }
-                "pending" => pending.push(node.clone()),
-                _ => {}
-            }
-        }
-
+        let answers = assignment::responses(storage, tenant_id, repo, &record_path).await?;
+        let responded = answers.len();
+        let qualifying = answers.iter().filter(|a| a.qualifies).count();
         let satisfied = qualifying >= required;
-        if !satisfied && !pending.is_empty() {
-            // Answered, but the policy still needs more qualifying responses.
-            // This person's task is done; the flow keeps waiting on the rest.
+
+        if !satisfied && responded < member_paths.len() {
+            // Answered, but the policy still needs more qualifying answers.
+            // Everyone's task shows the progress ("2 of 3 helpers").
+            for path in &member_paths {
+                let _ = assignment::set_task_fields(
+                    storage,
+                    tenant_id,
+                    repo,
+                    path,
+                    &[
+                        ("assignment_responded", serde_json::json!(responded)),
+                        ("assignment_qualifying", serde_json::json!(qualifying)),
+                    ],
+                )
+                .await;
+            }
             tracing::info!(
                 task_id = %task_id,
-                group = %group_path,
+                assignment = %assignment_id,
                 qualifying,
                 required,
-                pending = pending.len(),
-                "Group task completed; waiting for more responses"
+                responded,
+                "Group task answered; waiting for more answers"
             );
             return Ok(TaskCompletionResult {
                 task_id,
@@ -1008,37 +1070,73 @@ pub async fn complete_task<S: Storage>(
             });
         }
 
-        for mut node in pending {
-            node.properties.insert(
-                "status".to_string(),
-                PropertyValue::String("cancelled".to_string()),
+        // Only the completion that creates the `closed` marker closes the
+        // record, updates the members and resumes the flow.
+        if !assignment::close(storage, tenant_id, repo, assignment_id, satisfied).await? {
+            return Ok(TaskCompletionResult {
+                task_id,
+                task_path,
+                status: "completed".to_string(),
+                flow: None,
+            });
+        }
+
+        let outcome = if satisfied {
+            "satisfied"
+        } else {
+            "unsatisfied"
+        };
+        let resolved_by: Vec<String> = answers
+            .iter()
+            .filter(|a| a.qualifies)
+            .filter_map(|a| a.completed_by_name.clone())
+            .collect();
+        for path in &member_paths {
+            let pending = matches!(
+                assignment::load(storage, tenant_id, repo, path).await,
+                Ok(Some(node)) if task_prop_str(&node, "status").as_deref() == Some("pending")
             );
-            node.properties.insert(
-                "cancellation_reason".to_string(),
-                PropertyValue::String("group_completed".to_string()),
-            );
-            let cancelled_path = node.path.clone();
-            if let Err(error) = persist_inbox_task(storage, tenant_id, repo, node).await {
-                // A stale task left pending is confusing but not corrupting:
-                // its flow has already moved on and completing it later finds
-                // the instance no longer waiting on this step.
+            let mut fields = vec![
+                ("assignment_status", serde_json::json!(outcome)),
+                ("assignment_responded", serde_json::json!(responded)),
+                ("assignment_qualifying", serde_json::json!(qualifying)),
+                ("resolved_by_names", serde_json::json!(resolved_by)),
+            ];
+            if pending {
+                fields.push(("status", serde_json::json!("cancelled")));
+                fields.push(("cancellation_reason", serde_json::json!("group_completed")));
+            }
+            if let Err(error) =
+                assignment::set_task_fields(storage, tenant_id, repo, path, &fields).await
+            {
+                // A stale task left pending is confusing but not corrupting: the
+                // record is closed, so completing it later is refused.
                 tracing::warn!(
-                    task_path = %cancelled_path,
+                    task_path = %path,
                     error = %error,
-                    "Failed to cancel superseded group task"
+                    "Failed to update a member task of a closed group task"
                 );
             }
         }
 
         Some(serde_json::json!({
             "path": group_path,
+            "assignment_id": assignment_id,
             "completion": completion,
             "required": required,
             "total": total,
             "responded": responded,
             "qualifying": qualifying,
             "satisfied": satisfied,
-            "responses": responses,
+            "responses": answers.iter().map(|a| serde_json::json!({
+                "assignee": a.assignee,
+                "task_path": a.task_path,
+                "response": a.response,
+                "qualifies": a.qualifies,
+                "completed_by": a.completed_by,
+                "completed_by_name": a.completed_by_name,
+                "responded_at": a.responded_at,
+            })).collect::<Vec<_>>(),
         }))
     } else {
         None

@@ -444,6 +444,7 @@ export type {
   ChatEvent,
   Conversation,
   ConversationType,
+  MessageFile,
   ConversationListItem,
   ConversationStatus,
   MessageBody,
@@ -496,6 +497,7 @@ export type {
   PlanActionReceipt,
   PlanActionOptions,
   ConversationManagerOptions,
+  AssignTaskOptions,
 } from './conversations';
 
 // Conversation stores (framework-agnostic)

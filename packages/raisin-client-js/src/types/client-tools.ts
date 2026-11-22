@@ -88,8 +88,13 @@ export interface ClientToolResultAck {
 export interface ClientMessageOptions {
   /** Tools + context to attach (`metadata.client`). */
   client?: ClientToolsMessageMeta;
-  /** Files attached to the message (`metadata.attachments`). */
+  /** Files attached to the message (`metadata.attachments`, for agents). */
   attachments?: Attachment[];
+  /**
+   * Files for a person-to-person or group message (`body.attachments`): assets below
+   * `assets:/messages/<conversation id>/`, uploaded with a token the application's server minted.
+   */
+  files?: Array<{ ref: { 'raisin:ref': string; 'raisin:workspace': string }; name?: string; mime_type?: string; size?: number }>;
   /** Use this as the message's `client_id` (default: a fresh UUID). */
   clientId?: string;
 }

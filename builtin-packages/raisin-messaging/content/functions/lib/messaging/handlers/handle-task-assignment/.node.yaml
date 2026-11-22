@@ -2,15 +2,17 @@ node_type: raisin:Function
 properties:
   title: Handle Task Assignment
   description: >
-    Handles task assignment messages by creating InboxTask and notifications.
-    This handler is triggered when a message with type "task_assignment" is sent.
-    It creates task entries and notifies the assignee.
-  language: Starlark
-  entry_file: index.py:handle_task_assignment
+    A person assigns a task through their outbox (message_type task_assignment):
+    to one person (held to task_permissions of /config/messaging) or to a whole
+    circle (held to the circle's messaging.tasks policy), where every member gets
+    the task in their own inbox and a system-only record holds the completion
+    policy (any, all, quorum). The sender is the outbox's home, never a field.
+  language: javascript
+  entry_file: index.js:handle_task_assignment
   execution_mode: Async
   enabled: true
   resource_limits:
-    timeout_ms: 10000
+    timeout_ms: 60000
     max_memory_bytes: 33554432
   input_schema:
     type: object

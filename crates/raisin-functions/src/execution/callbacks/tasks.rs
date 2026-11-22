@@ -67,6 +67,35 @@ fn completer_from_auth(auth: &Option<AuthContext>) -> TaskCompleter {
     }
 }
 
+/// The task content a group assignment copies to every member: the optional
+/// fields of a `raisin.tasks.create` request, as InboxTask properties.
+fn task_content(request: &Value) -> Value {
+    let mut task = json!({});
+    for key in ["description", "conversation_id", "source_message_id"] {
+        if let Some(value) = request.get(key).and_then(|v| v.as_str()) {
+            task[key] = json!(value);
+        }
+    }
+    for key in ["options", "attachments"] {
+        if let Some(value) = request.get(key).filter(|v| v.is_array()) {
+            task[key] = value.clone();
+        }
+    }
+    for key in ["input_schema", "data", "assigned_by"] {
+        if let Some(value) = request.get(key).filter(|v| v.is_object()) {
+            task[key] = value.clone();
+        }
+    }
+    if let Some(priority) = request.get("priority").and_then(|v| v.as_i64()) {
+        task["priority"] = json!(priority);
+    }
+    if let Some(due_in_seconds) = request.get("due_in_seconds").and_then(|v| v.as_i64()) {
+        task["due_at"] =
+            json!((Utc::now() + chrono::Duration::seconds(due_in_seconds)).to_rfc3339());
+    }
+    task
+}
+
 /// Create task_create callback: `raisin.tasks.create(request)`
 ///
 /// Creates a human task (raisin:InboxTask) in the assignee's inbox.
@@ -75,7 +104,13 @@ fn completer_from_auth(auth: &Option<AuthContext>) -> TaskCompleter {
 /// - `task_type`: "approval" | "input" | "review" | "action", or any
 ///   application-defined slug matching `[a-z][a-z0-9_-]{0,63}`
 /// - `title`: Task title string
-/// - `assignee`: User path (e.g., "/users/manager" or "users/manager")
+/// - `assignee`: User path (e.g., "/users/manager" or "users/manager"), or a
+///   GROUP: a circle (`/circles/<name>`, `circle:<node id>`) or a permission
+///   group (`/groups/<name>`). A group gets one task per member plus a
+///   system-only record; add `completion` (any | all | quorum), `required`
+///   (quorum), `response_condition` (REL) and optionally a stable
+///   `assignment_id` (a retried creation then assigns once). Returns
+///   `{ assignment_id, task_paths, created }` for a group.
 ///
 /// Optional request fields:
 /// - `description`: Task description
@@ -83,6 +118,11 @@ fn completer_from_auth(auth: &Option<AuthContext>) -> TaskCompleter {
 /// - `input_schema`: JSON schema for input tasks
 /// - `due_in_seconds`: Task due time in seconds from now
 /// - `priority`: 1-5, where 5 is highest
+/// - `data`: structured payload for the task UI
+/// - `conversation_id`: the conversation a chat shows the task in
+/// - `attachments`: asset references that come with the task
+/// - `assigned_by`: `{ key, display_name }` of the person who assigned it
+/// - `source_message_id`: the outbox message it was assigned with
 ///
 /// Returns: { task_id, task_path }
 pub fn create_task_create<S>(
@@ -135,6 +175,62 @@ where
                      input, review, action)",
                     task_type
                 )));
+            }
+
+            // A GROUP: a circle (`/circles/…` or `circle:<node id>`) or a
+            // permission group. Every member receives the task in their own
+            // inbox, and a system-only record holds the policy (see
+            // raisin_flow_runtime::assignment). Returns { assignment_id,
+            // task_paths, created } instead of a single task.
+            if let Some(group) = raisin_flow_runtime::assignment::resolve_group(
+                storage.as_ref(),
+                &tenant,
+                &repo,
+                assignee,
+            )
+            .await
+            .map_err(|e| raisin_error::Error::Validation(e.to_string()))?
+            {
+                let policy = raisin_flow_runtime::assignment::Policy::new(
+                    request.get("completion").and_then(|v| v.as_str()),
+                    request.get("required").and_then(|v| v.as_u64()),
+                    request
+                        .get("response_condition")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    group.members.len(),
+                )
+                .map_err(|e| raisin_error::Error::Validation(e.to_string()))?;
+                let mut task = task_content(&request);
+                task["task_type"] = json!(task_type);
+                task["title"] = json!(title);
+                let created = raisin_flow_runtime::assignment::create_assignment(
+                    storage.as_ref(),
+                    &tenant,
+                    &repo,
+                    raisin_flow_runtime::assignment::NewAssignment {
+                        assignment_id: request
+                            .get("assignment_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        group,
+                        policy,
+                        task,
+                        flow_instance_id: None,
+                        step_id: None,
+                        assigned_by: request
+                            .get("assigned_by")
+                            .filter(|v| v.is_object())
+                            .cloned(),
+                    },
+                )
+                .await
+                .map_err(|e| raisin_error::Error::Validation(e.to_string()))?;
+                return Ok(json!({
+                    "assignment_id": created.assignment_id,
+                    "task_paths": created.task_paths,
+                    "created": created.created,
+                }));
             }
 
             // Generate task ID and path
@@ -239,6 +335,23 @@ where
                 let due_at = Utc::now() + chrono::Duration::seconds(due_in_seconds);
                 node.properties
                     .insert("due_at".to_string(), PropertyValue::Date(due_at.into()));
+            }
+
+            // Where the task came from and what comes with it (declared on
+            // raisin:InboxTask v9): the conversation a chat shows it in, the
+            // files, who assigned it, the outbox message it was assigned with.
+            for key in ["conversation_id", "source_message_id"] {
+                if let Some(value) = request.get(key).and_then(|v| v.as_str()) {
+                    node.properties
+                        .insert(key.to_string(), PropertyValue::String(value.to_string()));
+                }
+            }
+            for key in ["assigned_by", "attachments"] {
+                if let Some(value) = request.get(key).filter(|v| v.is_object() || v.is_array()) {
+                    if let Ok(prop) = serde_json::from_value::<PropertyValue>(value.clone()) {
+                        node.properties.insert(key.to_string(), prop);
+                    }
+                }
             }
 
             // Create NodeService for the inbox workspace. User homes (and

@@ -77,6 +77,38 @@ export interface CreateConversationOptions {
   signal?: AbortSignal;
 }
 
+/** A task assigned through the outbox (`db.conversations.assignTask`). */
+export interface AssignTaskOptions {
+  /** A user key (`u_…`), user id or home path; or a circle: `circle:<node id>` / `/circles/<name>`. */
+  assignee: string;
+  /** `approval`, `input`, `review`, `action` or any slug of the application's (`sign_contract`, `bring_item`). Default `action`. */
+  task_type?: string;
+  title: string;
+  description?: string;
+  /** Answer buttons: `[{ value, label, style? }]`. */
+  options?: Array<{ value: string; label: string; style?: string }>;
+  /** JSON Schema of an input answer. */
+  input_schema?: Record<string, unknown>;
+  /** Structured payload for the task card (e.g. the document to sign). */
+  data?: Record<string, unknown>;
+  /** 1–5, 5 highest. */
+  priority?: number;
+  due_in_seconds?: number;
+  /** Show the task as a card in this conversation (a circle defaults to its group chat). */
+  conversation_id?: string;
+  /** Files, below `assets:/messages/<conversation id>/`. */
+  attachments?: ClientMessageOptions['files'];
+  /** Circles: `any` (default), `all` or `quorum`. */
+  completion?: 'any' | 'all' | 'quorum';
+  /** Circles with `quorum`: answers needed. */
+  required?: number;
+  /** Circles: a REL deciding whether an answer counts (e.g. `response.action == 'yes'`). */
+  response_condition?: string;
+  /** Message id (default: a fresh UUID). */
+  clientId?: string;
+  signal?: AbortSignal;
+}
+
 /** Default inactivity timeout for sendMessage SSE streams (2 minutes) */
 export const DEFAULT_SEND_MESSAGE_INACTIVITY_TIMEOUT_MS = 120_000;
 
@@ -95,8 +127,10 @@ export interface SendMessageOptions {
   inactivityTimeoutMs?: number;
   /** Browser tools + context to attach to the message (`metadata.client`). */
   client?: ClientMessageOptions['client'];
-  /** Files attached to the message (`metadata.attachments`). */
+  /** Files attached to the message (`metadata.attachments`, for agents). */
   attachments?: ClientMessageOptions['attachments'];
+  /** Files of a message between people or to a group (`body.attachments`). */
+  files?: ClientMessageOptions['files'];
   /** Use this as the message's `client_id` (default: a fresh UUID). */
   clientId?: string;
 }
@@ -248,6 +282,11 @@ export class ConversationManager {
         unreadCount: props.unread_count,
         lastMessage: props.last_message,
         updatedAt: row.updated_at ?? row.created_at,
+        subject: props.subject,
+        circleId: props.circle_id,
+        circleType: props.circle_type,
+        memberCount: props.member_count,
+        membership: props.membership,
       } satisfies ConversationListItem;
     });
   }
@@ -484,6 +523,7 @@ export class ConversationManager {
     const messageOptions: ClientMessageOptions = {
       client: options?.client,
       attachments: options?.attachments,
+      files: options?.files,
       clientId: options?.clientId,
     };
 
@@ -648,6 +688,9 @@ export class ConversationManager {
     }
 
     const messagePath = `${userHome}/outbox/msg-${messageId}`;
+    // Files of a message between people (or to a group) travel in the body, where the messaging
+    // handler checks them against the conversation's folder; an agent reads metadata.attachments.
+    const files = !recipientId.startsWith('agent:') && options?.files?.length ? options.files : undefined;
     const outboxProperties = {
       role: 'user',
       message_type: 'chat',
@@ -655,7 +698,7 @@ export class ConversationManager {
       sender_id: userId,
       sender_path: userHome,
       recipient_id: recipientId,
-      body: { content, message_text: content, thread_id: conversationId },
+      body: { content, message_text: content, thread_id: conversationId, ...(files ? { attachments: files } : {}) },
       conversation_id: conversationId,
       client_id: messageId,
       ...(metadata ? { metadata } : {}),
@@ -667,6 +710,54 @@ export class ConversationManager {
       [messagePath, JSON.stringify(outboxProperties)],
     );
     return messageId;
+  }
+
+  /**
+   * Assign a task through the caller's outbox — to one person, or to every member of a circle.
+   *
+   * The engine takes the sender from the outbox and applies the rules: `task_permissions` of
+   * `/config/messaging` between people, the circle's `messaging.tasks` policy for a circle (moderators by
+   * default). A circle gets one task per member and a record only the engine reads, closed by
+   * `completion`: `any` (first answer wins, e.g. "someone bring toilet paper"), `all` ("everyone confirm"),
+   * `quorum` with `required` ("we need three helpers").
+   *
+   * Resolves with the outbox message; watch its `status` (`delivered`, or `failed` with
+   * `failure_reason`). The task(s) appear in the assignees' inboxes (`db.inbox.listTasks()`).
+   *
+   * @example
+   * ```typescript
+   * await db.conversations.assignTask({
+   *   assignee: 'circle:3f2c…',          // or a user key: 'u_…'
+   *   task_type: 'bring_item',
+   *   title: 'Bring toilet paper on Saturday',
+   *   completion: 'any',
+   * });
+   * ```
+   */
+  async assignTask(task: AssignTaskOptions): Promise<{ messageId: string; messagePath: string }> {
+    if (!task || typeof task.assignee !== 'string' || !task.assignee) throw new Error('assignee is required');
+    if (typeof task.title !== 'string' || !task.title.trim()) throw new Error('title is required');
+    const workspace = 'raisin:access_control';
+    const { userId, userHome } = await this.ensureCurrentUser();
+    const messageId = task.clientId || crypto.randomUUID();
+    const messagePath = `${userHome}/outbox/task-${messageId}`;
+    const { clientId: _clientId, signal: _signal, ...body } = task;
+    await this.sqlQuery(
+      `INSERT INTO '${workspace}' (path, node_type, properties) VALUES ($1, 'raisin:Message', $2::jsonb) RETURNING id`,
+      [messagePath, JSON.stringify({
+        message_type: 'task_assignment',
+        status: 'pending',
+        // Required by raisin:Message. The engine takes the sender from the outbox and only checks
+        // that this names the same person; the recipient is the assignee (a person or a circle).
+        sender_id: userId,
+        recipient_id: task.assignee,
+        subject: task.title,
+        body: { task_type: 'action', ...body },
+        client_id: messageId,
+        created_at: new Date().toISOString(),
+      })],
+    );
+    return { messageId, messagePath };
   }
 
   /**
