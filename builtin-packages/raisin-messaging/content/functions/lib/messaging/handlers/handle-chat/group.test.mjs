@@ -262,6 +262,12 @@ test("a one-to-one message cannot name another conversation's id", async () => {
   const benCopy = [...f.nodes.values()].find((n) => n.path === `${home('ben')}/inbox/chats/conv-ab`);
   assert.equal(benCopy.properties.participants.length, 2);
 
+  // Two accounts of one person cannot adopt a third conversation's id that neither of them holds.
+  const adopt = outbox(f, 'mallory', { recipient_id: KEYS.cara, body: { message_text: 'x', thread_id: 'conv-ab' } });
+  await handle_chat({ node: adopt });
+  assert.equal(adopt.properties.failure_reason, 'not_this_conversation');
+  assert.equal([...f.nodes.values()].some((n) => n.path === `${home('cara')}/inbox/chats/conv-ab`), false);
+
   // No thread named: a fresh conversation.
   const fresh = outbox(f, 'mallory', { recipient_id: KEYS.cara, body: { message_text: 'hello' } });
   await handle_chat({ node: fresh });

@@ -232,14 +232,29 @@ export async function conversationBetween(sender, recipient, requested) {
   }
   const copies = await Promise.all([sender, recipient].map((party) =>
     raisin.nodes.get(party.workspace, `${party.path}/inbox/chats/${requested}`)));
-  for (const copy of copies) {
+  // Every copy of the id anywhere, not only the two parties': a person may create conversation copies in
+  // their own inbox, so two accounts of one person would otherwise adopt a third conversation's id (and
+  // its files) by naming it while neither holds it.
+  const elsewhere = await sqlRows(
+    `SELECT path, properties FROM 'raisin:access_control'
+     WHERE node_type = 'raisin:Conversation' AND properties->>'conversation_id' = $1 LIMIT 100`,
+    [requested],
+  );
+  for (const copy of [...copies, ...elsewhere]) {
     if (!copy) continue;
-    const parties = copy.properties?.participants;
-    if (!Array.isArray(parties) || parties.length !== 2 || !parties.includes(sender.id) || !parties.includes(recipient.id)) {
-      return { error: 'not_this_conversation' };
-    }
+    if (!betweenExactly(copy.properties, sender.id, recipient.id)) return { error: 'not_this_conversation' };
   }
   return { id: requested, own: Boolean(copies[0]) };
+}
+
+function betweenExactly(properties, a, b) {
+  let p = properties;
+  if (typeof p === 'string') {
+    try { p = JSON.parse(p); } catch { return false; }
+  }
+  const parties = p?.participants;
+  if (!Array.isArray(parties) || parties.length !== 2) return false;
+  return parties.includes(a) && parties.includes(b);
 }
 
 const CONVERSATION_ID = /^[A-Za-z0-9_-]{1,128}$/;
