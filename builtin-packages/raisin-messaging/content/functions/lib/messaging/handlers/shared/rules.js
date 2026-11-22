@@ -237,7 +237,20 @@ export async function conversationBetween(sender, recipient, requested) {
     return { error: 'not_this_conversation' };
   }
   const record = await raisin.nodes.get(ACL, `${CONVERSATION_RECORDS}/${requested}`);
-  if (!record) return { id: requested, own: false };
+  if (!record) {
+    // No record yet: new, or begun before records existed. A copy of the id in anyone else's home (which
+    // only the system can write; the two parties' own homes are left out, since they may make copies there)
+    // means it is someone else's conversation, and it is not registered for these two.
+    const elsewhere = await sqlRows(
+      `SELECT path FROM 'raisin:access_control'
+       WHERE node_type = 'raisin:Conversation' AND properties->>'conversation_id' = $1
+         AND path NOT LIKE $2 AND path NOT LIKE $3 LIMIT 1`,
+      [requested, `${sender.path}/%`, `${recipient.path}/%`],
+    );
+    const foreign = elsewhere.some((row) => typeof row?.path === 'string'
+      && !row.path.startsWith(`${sender.path}/`) && !row.path.startsWith(`${recipient.path}/`));
+    return foreign ? { error: 'not_this_conversation' } : { id: requested, own: false };
+  }
   if (!betweenExactly(record.properties, sender.id, recipient.id)) return { error: 'not_this_conversation' };
   return { id: requested, own: true };
 }

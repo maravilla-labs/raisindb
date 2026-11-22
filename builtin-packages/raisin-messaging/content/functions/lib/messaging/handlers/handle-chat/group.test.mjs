@@ -281,3 +281,20 @@ test("a one-to-one message cannot name another conversation's id", async () => {
   await handle_chat({ node: fresh });
   assert.equal(fresh.properties.status, 'delivered');
 });
+
+test('a conversation begun before records existed cannot be claimed by others', async () => {
+  const { f } = world();
+  // ana and ben's old conversation: copies in their homes, no record.
+  for (const who of ['ana', 'ben']) {
+    f.put(AC, `${home(who)}/inbox/chats/conv-old`, { node_type: 'raisin:Conversation', properties: { conversation_id: 'conv-old', participants: ['node-ana', 'node-ben'] } });
+  }
+  const claim = outbox(f, 'mallory', { recipient_id: KEYS.cara, body: { message_text: 'x', thread_id: 'conv-old' } });
+  await handle_chat({ node: claim });
+  assert.equal(claim.properties.failure_reason, 'not_this_conversation');
+  assert.equal([...f.nodes.values()].some((n) => n.path === '/conversation-records/conv-old'), false);
+  // Its own parties carry on, and that registers it.
+  const own = outbox(f, 'ana', { recipient_id: KEYS.ben, body: { message_text: 'still us', thread_id: 'conv-old' } });
+  await handle_chat({ node: own });
+  assert.equal(own.properties.status, 'delivered');
+  assert.ok([...f.nodes.values()].some((n) => n.path === '/conversation-records/conv-old'));
+});
