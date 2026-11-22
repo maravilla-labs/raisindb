@@ -201,6 +201,10 @@ expect('people cannot read conversation records',
 // Mallory makes a copy of that id in her own inbox (allowed), naming herself and ana.
 await sql(people.mallory.token, `INSERT INTO '${AC}' (path, node_type, properties) VALUES ($1, 'raisin:Conversation', $2::jsonb)`,
   [`${people.mallory.home}/inbox/chats/${dmId}`, JSON.stringify({ conversation_id: dmId, participants: [people.mallory.id, people.ana.id] })]).catch(() => {});
+// The query the rules use to find copies outside two homes (whole path segments, not a LIKE pattern).
+const outside = await sql(admin, `SELECT path FROM '${AC}' WHERE node_type = 'raisin:Conversation'
+  AND properties->>'conversation_id' = $1 AND NOT DESCENDANT_OF($2) AND NOT DESCENDANT_OF($3)`, [dmId, people.ana.home, people.ben.home]);
+expect('NOT DESCENDANT_OF leaves out exactly the two homes', outside.length === 1 && outside[0].path.startsWith(`${people.mallory.home}/`), JSON.stringify(outside));
 const d2 = await post('mallory', { message_type: 'chat', recipient_id: people.ana.id, body: { message_text: 'me too', thread_id: dmId } });
 const d2s = await until('mallory\'s message settled', async () => {
   const s = await outboxStatus('mallory', d2);

@@ -40,6 +40,14 @@ function world({ messaging, config, blocks = [] } = {}) {
       return blocks.some(([a, b]) => a === blocker && b === blockee) ? [{ id: blockee }] : [];
     }
     if (/GRAPH_TABLE/.test(sql)) return [];
+    if (/NOT DESCENDANT_OF/.test(sql)) {
+      // Conversation copies of an id outside the given homes (whole path segments).
+      const [id, ...homes] = params;
+      return [...f.nodes.values()]
+        .filter((n) => n.node_type === 'raisin:Conversation' && n.properties?.conversation_id === id)
+        .filter((n) => !homes.some((h) => n.path.startsWith(`${h}/`)))
+        .map((n) => ({ path: n.path }));
+    }
     return query(sql, params);
   };
   f.api.nodes.getById = async (ws, id) => [...f.nodes.values()].find((x) => x.workspace === ws && x.id === id) || null;

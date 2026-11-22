@@ -238,14 +238,16 @@ export async function conversationBetween(sender, recipient, requested) {
   }
   const record = await raisin.nodes.get(ACL, `${CONVERSATION_RECORDS}/${requested}`);
   if (!record) {
-    // No record yet: new, or begun before records existed. A copy of the id in anyone else's home (which
-    // only the system can write; the two parties' own homes are left out, since they may make copies there)
-    // means it is someone else's conversation, and it is not registered for these two.
+    // No record yet: new, or begun before records existed. A copy of the id in any home but the two
+    // parties' (who may make copies in their own) means it is someone else's conversation, and it is not
+    // registered for these two. The homes are left out by whole path segments (DESCENDANT_OF), not by a
+    // LIKE pattern, whose `_` would also match other homes. Every one-to-one with a person or visitor has
+    // that party's copy in raisin:access_control (an agent's own copy lives elsewhere).
     const elsewhere = await sqlRows(
       `SELECT path FROM 'raisin:access_control'
        WHERE node_type = 'raisin:Conversation' AND properties->>'conversation_id' = $1
-         AND path NOT LIKE $2 AND path NOT LIKE $3 LIMIT 1`,
-      [requested, `${sender.path}/%`, `${recipient.path}/%`],
+         AND NOT DESCENDANT_OF($2) AND NOT DESCENDANT_OF($3) LIMIT 1`,
+      [requested, sender.path, recipient.path],
     );
     const foreign = elsewhere.some((row) => typeof row?.path === 'string'
       && !row.path.startsWith(`${sender.path}/`) && !row.path.startsWith(`${recipient.path}/`));
