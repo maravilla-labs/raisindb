@@ -221,7 +221,7 @@ test('a task names only a conversation the sender has with the assignee, and is 
   await handle_task_assignment({ node: foreign });
   assert.equal(foreign.properties.failure_reason, 'not_this_conversation');
   // Files from another conversation than the named one.
-  f.put(AC, `${home('mallory')}/inbox/chats/conv-ma`, { node_type: 'raisin:Conversation', properties: { participants: ['node-ana', 'node-mallory'] } });
+  f.put(AC, '/conversation-records/conv-ma', { node_type: 'raisin:ConversationRecord', properties: { conversation_id: 'conv-ma', participants: ['node-ana', 'node-mallory'] } });
   const elsewhere = outbox(f, 'mallory', { assignee: KEYS.ana, task_type: 'bring_item', title: 'x', conversation_id: 'conv-ma',
     attachments: [{ 'raisin:ref': '/messages/conv-ab/a.jpg', 'raisin:workspace': 'assets' }] });
   await handle_task_assignment({ node: elsewhere });
@@ -230,8 +230,12 @@ test('a task names only a conversation the sender has with the assignee, and is 
   await handle_task_assignment({ node: unknown });
   assert.equal(unknown.properties.failure_reason, 'not_this_conversation');
 
-  f.put(AC, `${home('ben')}/inbox/chats/conv-ab`, { node_type: 'raisin:Conversation', properties: { participants: ['node-ana', 'node-ben'] } });
-  f.put(AC, `${home('ana')}/inbox/chats/conv-ab`, { node_type: 'raisin:Conversation', properties: { participants: ['node-ana', 'node-ben'] } });
+  // The system's record says who conv-ab is between; inbox copies decide nothing.
+  f.put(AC, '/conversation-records/conv-ab', { node_type: 'raisin:ConversationRecord', properties: { conversation_id: 'conv-ab', participants: ['node-ana', 'node-ben'] } });
+  f.put(AC, `${home('mallory')}/inbox/chats/conv-mm`, { node_type: 'raisin:Conversation', properties: { participants: ['node-ana', 'node-mallory'] } });
+  const forged = outbox(f, 'mallory', { assignee: KEYS.ana, task_type: 'bring_item', title: 'x', conversation_id: 'conv-mm' });
+  await handle_task_assignment({ node: forged });
+  assert.equal(forged.properties.failure_reason, 'not_this_conversation', 'a copy of their own making is no conversation');
   const ok = outbox(f, 'ben', { assignee: KEYS.ana, task_type: 'bring_item', title: 'Cake', conversation_id: 'conv-ab',
     attachments: [{ 'raisin:ref': '/messages/conv-ab/recipe.pdf', 'raisin:workspace': 'assets' }] });
   await handle_task_assignment({ node: ok });

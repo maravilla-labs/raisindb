@@ -1,5 +1,5 @@
 name: raisin-messaging
-version: 1.1.0
+version: 1.1.1
 title: RaisinDB Messaging Package
 description: >
   Provides the core inbox/outbox messaging pipeline, chat delivery (one to one
@@ -111,6 +111,7 @@ workspace_patches:
         - raisin:VisitorSession
         - raisin:TaskAssignment
         - raisin:TaskAssignmentResponse
+        - raisin:ConversationRecord
   default:
     allowed_node_types:
       add:

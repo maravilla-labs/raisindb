@@ -17,9 +17,10 @@
  * The `raisin` global is injected at runtime -- do NOT import it.
  */
 
-import { sqlRows, idCondition, isAgentId, nodeIdOf } from './parties.js';
+import { sqlRows, idCondition, isAgentId, nodeIdOf, createIdempotent } from './parties.js';
 import { circlesOf } from './circles.js';
 
+const ACL = 'raisin:access_control';
 const ALWAYS = { mode: 'any_of', rules: [{ type: 'always' }] };
 
 export const AI_INTERMEDIATE_TYPES = new Set([
@@ -215,36 +216,52 @@ export async function rateViolation(config, senderHome) {
 
 // ─── Attachments ────────────────────────────────────────────────────────────
 
+/** Where the system keeps who each one-to-one conversation is between (raisin:ConversationRecord). */
+export const CONVERSATION_RECORDS = '/conversation-records';
+
 /**
- * The one-to-one conversation a message or task may name. The sender chooses `requested`, so it is taken only
- * when every existing copy of it (the sender's, the recipient's) is between exactly these two; a group
- * conversation (`grp-…`) never is. Without this, naming another conversation's id would plant it in the
- * recipient's inbox, and with it a claim on that conversation's files.
+ * The one-to-one conversation a message or task may name. The sender chooses `requested`, and a person may
+ * create conversation copies in their own inbox (any id, any participants), so no copy decides anything: the
+ * system's record of the conversation does (`/conversation-records/<id>`, written by `registerConversation`
+ * on its first delivery, readable by nobody but the engine). A requested id is taken only when its record
+ * names exactly these two, or when it has none yet (a new conversation, registered on delivery). A group
+ * conversation (`grp-…`) never is one: its circle is its authority.
  *
- * `{ id, own }`: `id` null when nothing was requested (the caller mints one); `own` when the sender already
- * has the conversation, the only case in which its files may be attached (an upload is granted only for a
- * conversation in the uploader's own inbox). Or `{ error: 'not_this_conversation' }`.
+ * `{ id, own }`: `id` null when nothing was requested (the caller mints one); `own` when the record already
+ * named these two, the only case in which the conversation's files may be attached (uploads are granted
+ * against the same record). Or `{ error: 'not_this_conversation' }`.
  */
 export async function conversationBetween(sender, recipient, requested) {
   if (requested === undefined || requested === null || requested === '') return { id: null, own: false };
   if (typeof requested !== 'string' || !CONVERSATION_ID.test(requested) || requested.startsWith('grp-')) {
     return { error: 'not_this_conversation' };
   }
-  const copies = await Promise.all([sender, recipient].map((party) =>
-    raisin.nodes.get(party.workspace, `${party.path}/inbox/chats/${requested}`)));
-  // Every copy of the id anywhere, not only the two parties': a person may create conversation copies in
-  // their own inbox, so two accounts of one person would otherwise adopt a third conversation's id (and
-  // its files) by naming it while neither holds it.
-  const elsewhere = await sqlRows(
-    `SELECT path, properties FROM 'raisin:access_control'
-     WHERE node_type = 'raisin:Conversation' AND properties->>'conversation_id' = $1 LIMIT 100`,
-    [requested],
-  );
-  for (const copy of [...copies, ...elsewhere]) {
-    if (!copy) continue;
-    if (!betweenExactly(copy.properties, sender.id, recipient.id)) return { error: 'not_this_conversation' };
+  const record = await raisin.nodes.get(ACL, `${CONVERSATION_RECORDS}/${requested}`);
+  if (!record) return { id: requested, own: false };
+  if (!betweenExactly(record.properties, sender.id, recipient.id)) return { error: 'not_this_conversation' };
+  return { id: requested, own: true };
+}
+
+/**
+ * Record that conversation `id` is between `a` and `b`, unless it already is. False when the id is
+ * already another pair's (two first messages raced for it): the caller refuses.
+ */
+export async function registerConversation(id, a, b) {
+  const path = `${CONVERSATION_RECORDS}/${id}`;
+  let record = await raisin.nodes.get(ACL, path);
+  if (!record) {
+    if (!(await raisin.nodes.get(ACL, CONVERSATION_RECORDS))) {
+      await createIdempotent(ACL, '/', {
+        slug: CONVERSATION_RECORDS.slice(1), name: CONVERSATION_RECORDS.slice(1), node_type: 'raisin:AclFolder', properties: {},
+      });
+    }
+    await createIdempotent(ACL, CONVERSATION_RECORDS, {
+      slug: id, name: id, node_type: 'raisin:ConversationRecord',
+      properties: { conversation_id: id, participants: [a, b].sort(), created_at: new Date().toISOString() },
+    });
+    record = await raisin.nodes.get(ACL, path);
   }
-  return { id: requested, own: Boolean(copies[0]) };
+  return Boolean(record) && betweenExactly(record.properties, a, b);
 }
 
 function betweenExactly(properties, a, b) {

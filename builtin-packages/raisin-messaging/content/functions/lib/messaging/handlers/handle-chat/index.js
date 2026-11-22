@@ -55,7 +55,7 @@ import {
 } from '../shared/parties.js';
 import {
   AI_INTERMEDIATE_TYPES, checkPermission, getMessagingConfig, lengthViolation, rateViolation,
-  checkAttachments, conversationBetween,
+  checkAttachments, conversationBetween, registerConversation,
 } from '../shared/rules.js';
 import { circleReference, resolveCircle, rosterFor, mayAct, conversationIdOf } from '../shared/circles.js';
 
@@ -152,6 +152,10 @@ export async function handle_chat(input) {
   const conversationId = thread.id ?? ('conv-' + await raisin.crypto.uuid());
   const attachments = checkAttachments(body.attachments, thread.own ? conversationId : null);
   if (attachments.error) return refuse(triggerWorkspace, node.path, attachments.error, TAG);
+  // The system's record of who the conversation is between, before either copy is written.
+  if (!thread.own && !(await registerConversation(conversationId, sender.id, recipient.id))) {
+    return refuse(triggerWorkspace, node.path, 'not_this_conversation', TAG);
+  }
 
   const streamChannel = `chat:${conversationId}`;
   const subject = props.subject || body.subject || 'Chat';

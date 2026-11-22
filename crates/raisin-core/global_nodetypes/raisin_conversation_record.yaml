@@ -1,0 +1,38 @@
+name: raisin:ConversationRecord
+description: >-
+  The authority of ONE one-to-one conversation: who it is between. Lives at
+  raisin:access_control:/conversation-records/<conversation id>, written only
+  by the messaging handler when the conversation's first message is
+  delivered. Each party holds a raisin:Conversation copy in their own inbox,
+  which they may create and edit themselves, so a copy proves nothing: a
+  message naming the conversation, an upload into it and a grant for its
+  files are all checked against this record. Group conversations (grp-<circle>)
+  have none: the circle's graph is their authority.
+icon: messages-square
+version: 1
+strict: true
+indexable: true
+index_types: [Property]
+properties:
+  # The conversation id (the record's name).
+  - name: conversation_id
+    type: String
+    required: true
+    title: Conversation
+    index: [Property]
+
+  # The two parties' ids (user node ids, agent:<name>, visitor:<key>), sorted.
+  - name: participants
+    type: Array
+    required: true
+    title: Participants
+    index: [Property]
+
+  - name: created_at
+    type: Date
+    required: false
+    title: Created
+
+versionable: false
+publishable: false
+auditable: true

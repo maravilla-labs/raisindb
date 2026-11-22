@@ -22,6 +22,7 @@ Refer to other docs in this folder for architecture and usage guides.
 | raisin:Conversation | ✅ Implemented | `builtin-packages/raisin-messaging/nodetypes/conversation.yaml` |
 | raisin:TaskAssignment | ✅ Implemented | `crates/raisin-core/global_nodetypes/raisin_task_assignment.yaml` (group task authority) |
 | raisin:TaskAssignmentResponse | ✅ Implemented | `crates/raisin-core/global_nodetypes/raisin_task_assignment_response.yaml` |
+| raisin:ConversationRecord | ✅ Implemented | `crates/raisin-core/global_nodetypes/raisin_conversation_record.yaml` (who a one-to-one conversation is between, at `/conversation-records/<id>`; inbox copies are user-writable and decide nothing) |
 
 ### Message Type Handlers
 

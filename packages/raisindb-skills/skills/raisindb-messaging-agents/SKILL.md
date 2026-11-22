@@ -243,6 +243,14 @@ Complete with `db.inbox.completeTask(id, response)`. A task with
 state from a member's copy: people may edit their own inbox; the record is
 the authority.
 
+The same holds for conversations. A person may create `raisin:Conversation`
+copies in their own inbox with any id and participants, so a copy never proves
+membership. A group conversation (`grp-<circle>`) belongs to the circle's
+graph (`MEMBER_OF` / `MODERATES`); a one-to-one conversation to its engine-only
+`raisin:ConversationRecord` at `/conversation-records/<id>` (who it is between,
+written on its first delivery). A server that grants uploads or file reads for
+a conversation checks those, with its own key.
+
 **Files**: `{ ref: { 'raisin:ref', 'raisin:workspace': 'assets' }, name,
 mime_type, size }` below `assets:/messages/<conversation id>/` (the
 reference in its own object, or the engine drops name and type). Your server

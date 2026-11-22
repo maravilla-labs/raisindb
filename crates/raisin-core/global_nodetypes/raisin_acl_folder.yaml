@@ -1,7 +1,7 @@
 name: raisin:AclFolder
 description: Access control folder for organizing users, roles, and groups
 icon: shield
-version: 4
+version: 5
 extends: raisin:Folder
 indexable: true
 index_types: [Fulltext]
@@ -34,6 +34,10 @@ allowed_children:
   - raisin:StewardshipOverride
   # /task-assignments (group task records, engine-written).
   - raisin:TaskAssignment
+  # (its answers; only ever written as children of a TaskAssignment by the engine)
+  - raisin:TaskAssignmentResponse
+  # /conversation-records (one-to-one conversation authority, engine-written).
+  - raisin:ConversationRecord
   # /config.
   - raisin:SecurityConfig
   - raisin:StewardshipConfig

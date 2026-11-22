@@ -184,5 +184,43 @@ expect('the record is satisfied', record[0]?.properties?.status === 'satisfied',
 const recordAsMember = await sql(people.ana.token, `SELECT path FROM '${AC}' WHERE path = $1`, [`/task-assignments/${assigned.assignment_id}`]);
 expect('members cannot read the record', recordAsMember.length === 0, JSON.stringify(recordAsMember));
 
+// --- One to one: the conversation's record, not the inbox copies --------------------------
+const dmId = `conv-e2e-${Date.now().toString(36)}`;
+const d1 = await post('ana', { message_type: 'chat', recipient_id: people.ben.id, body: { message_text: 'Hi Ben', thread_id: dmId } });
+const d1s = await until('ana\'s direct message settled', async () => {
+  const s = await outboxStatus('ana', d1);
+  return ['delivered', 'failed'].includes(s?.status) ? s : null;
+});
+must('ana\'s direct message delivered', d1s.status === 'delivered', JSON.stringify(d1s));
+const dmRecord = await sql(admin, `SELECT properties FROM '${AC}' WHERE path = $1`, [`/conversation-records/${dmId}`]);
+expect('the conversation has a record of its two parties', dmRecord[0]?.properties?.participants?.length === 2
+  && !JSON.stringify(dmRecord[0].properties.participants).includes(people.mallory.id), JSON.stringify(dmRecord[0]?.properties));
+expect('people cannot read conversation records',
+  (await sql(people.ana.token, `SELECT path FROM '${AC}' WHERE path = $1`, [`/conversation-records/${dmId}`])).length === 0);
+
+// Mallory makes a copy of that id in her own inbox (allowed), naming herself and ana.
+await sql(people.mallory.token, `INSERT INTO '${AC}' (path, node_type, properties) VALUES ($1, 'raisin:Conversation', $2::jsonb)`,
+  [`${people.mallory.home}/inbox/chats/${dmId}`, JSON.stringify({ conversation_id: dmId, participants: [people.mallory.id, people.ana.id] })]).catch(() => {});
+const d2 = await post('mallory', { message_type: 'chat', recipient_id: people.ana.id, body: { message_text: 'me too', thread_id: dmId } });
+const d2s = await until('mallory\'s message settled', async () => {
+  const s = await outboxStatus('mallory', d2);
+  return ['delivered', 'failed'].includes(s?.status) ? s : null;
+});
+expect('a copy of her own making does not get mallory into it', d2s.status === 'failed' && d2s.failure_reason === 'not_this_conversation', JSON.stringify(d2s));
+const d3 = await post('ben', { message_type: 'chat', recipient_id: people.ana.id, body: { message_text: 'Hi Ana', thread_id: dmId } });
+const d3s = await until('ben\'s reply settled', async () => {
+  const s = await outboxStatus('ben', d3);
+  return ['delivered', 'failed'].includes(s?.status) ? s : null;
+});
+expect('… nor blocks ana and ben', d3s.status === 'delivered', JSON.stringify(d3s));
+const d4 = await post('mallory', { message_type: 'chat', recipient_id: people.ana.id, body: { message_text: 'x', thread_id: conv } });
+const d4s = await until('a planted group id settled', async () => {
+  const s = await outboxStatus('mallory', d4);
+  return ['delivered', 'failed'].includes(s?.status) ? s : null;
+});
+expect('a group\'s id cannot be planted in someone\'s inbox', d4s.status === 'failed', JSON.stringify(d4s));
+const planted = await sql(admin, `SELECT path FROM '${AC}' WHERE path = $1`, [`${people.ana.home}/inbox/chats/${conv}`]);
+expect('… ana\'s only copy of it is her own group one', planted.length <= 1);
+
 console.log(failed ? `\n${failed} failed (repository ${repo})` : `\nall passed (repository ${repo})`);
 process.exit(failed ? 1 : 0);

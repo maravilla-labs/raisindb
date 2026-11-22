@@ -268,6 +268,14 @@ test("a one-to-one message cannot name another conversation's id", async () => {
   assert.equal(adopt.properties.failure_reason, 'not_this_conversation');
   assert.equal([...f.nodes.values()].some((n) => n.path === `${home('cara')}/inbox/chats/conv-ab`), false);
 
+  // A copy planted under conv-ab in someone else's inbox neither blocks ana and ben nor joins mallory.
+  f.put(AC, `${home('mallory')}/inbox/chats/conv-ab`, { node_type: 'raisin:Conversation', properties: { conversation_id: 'conv-ab', participants: ['node-mallory', 'node-cara'] } });
+  const still = outbox(f, 'ben', { recipient_id: KEYS.ana, body: { message_text: 'still here', thread_id: 'conv-ab' } });
+  await handle_chat({ node: still });
+  assert.equal(still.properties.status, 'delivered');
+  const record = [...f.nodes.values()].find((n) => n.path === '/conversation-records/conv-ab');
+  assert.deepEqual([...record.properties.participants].sort(), ['node-ana', 'node-ben']);
+
   // No thread named: a fresh conversation.
   const fresh = outbox(f, 'mallory', { recipient_id: KEYS.cara, body: { message_text: 'hello' } });
   await handle_chat({ node: fresh });

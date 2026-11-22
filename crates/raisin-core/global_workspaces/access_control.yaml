@@ -26,6 +26,8 @@ allowed_node_types:
   # Group task authority under /task-assignments (engine-written only)
   - raisin:TaskAssignment
   - raisin:TaskAssignmentResponse
+  # One-to-one conversation authority under /conversation-records (engine-written only)
+  - raisin:ConversationRecord
 allowed_root_node_types:
   - raisin:User
   - raisin:Role
@@ -190,6 +192,14 @@ initial_structure:
       properties:
         icon: "users"
         color: "#06b6d4"
+    # One-to-one conversation records (raisin:ConversationRecord): who a
+    # conversation is between. Engine-written only; no role grants anything
+    # here, since a person's own inbox copy is theirs to edit.
+    - node_type: raisin:AclFolder
+      name: conversation-records
+      properties:
+        icon: "messages-square"
+        color: "#0ea5e9"
     # Group task records (raisin:TaskAssignment). Engine-written only; no role
     # grants anything here, so members never read other members' answers.
     - node_type: raisin:AclFolder
