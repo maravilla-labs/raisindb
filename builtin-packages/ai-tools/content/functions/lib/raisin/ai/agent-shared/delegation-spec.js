@@ -19,6 +19,7 @@
  */
 
 import { digestOf, safeName, shortRun, normToolName } from './run-names.js';
+import { LOAD_SKILL_FUNCTION } from './skills.js';
 
 /** Function paths of the delegation surface. */
 export const DELEGATION_FUNCTIONS = Object.freeze({
@@ -456,7 +457,11 @@ export function narrowTools(agentTools, grant, { mayDelegate }) {
   for (const t of agentTools || []) {
     const isDelegation = DELEGATION_TOOL_PATHS.includes(t.function_path);
     if (isDelegation && !mayDelegate) continue;
-    if (want && !want.has(normToolName(t.name)) && !(t.function_path && want.has(normToolName(t.function_path.split('/').pop())))) continue;
+    // The skill loader is how the agent reads its own skills, not a
+    // capability a parent grants: a grant that does not name it must not
+    // leave the child with a skills index it cannot open.
+    const isSkillLoader = t.function_path === LOAD_SKILL_FUNCTION.path;
+    if (want && !isSkillLoader && !want.has(normToolName(t.name)) && !(t.function_path && want.has(normToolName(t.function_path.split('/').pop())))) continue;
     kept.push(t);
   }
   if (want) {

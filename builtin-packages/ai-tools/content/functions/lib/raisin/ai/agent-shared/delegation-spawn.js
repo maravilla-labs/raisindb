@@ -22,7 +22,18 @@ import { getEffectiveExecutionMode, planApprovalOptional, requiresPlanApproval }
 import { actingUser, runAgent } from './run-caller.js';
 import { AI_WS, requireParentRun, ensureFolders, listChildren, snapshots } from './delegation-core.js';
 import { resolveRunTools } from './run-tools.js';
+import { loadSkillGrant } from './skills.js';
 import { DEFAULT_RUN_REDUCER, DEFAULT_MODEL_TURN_FUNCTION, PROJECT_FUNCTION } from './run-names.js';
+
+async function childSkills(agentProps) {
+  return loadSkillGrant({
+    agentProps,
+    stepSkills: [],
+    getNode: (ws, path) => raisin.nodes.get(ws, path),
+    getNodeById: typeof raisin.nodes.getById === 'function' ? (ws, id) => raisin.nodes.getById(ws, id) : undefined,
+    getChildren: (ws, path) => raisin.nodes.getChildren(ws, path),
+  }).catch(() => []);
+}
 
 function fail(message, cls) {
   return Object.assign(new Error(message), { error_class: cls });
@@ -202,7 +213,10 @@ export async function spawnChild(input, { functionPath, taskBinding = null } = {
   }
   const childProps = (await loadAgent(childPath)).properties || {};
   const mayDelegate = depth + 1 < Math.min(policy.max_depth, policyOf(childProps).max_depth);
-  const hasSkills = Array.isArray(childProps.skills) && childProps.skills.length > 0;
+  // The same skill grant a top-level run of this agent gets (its `skills:`
+  // plus the global layers it has not switched off), so the child is offered
+  // `load-skill` exactly when the agent would be.
+  const hasSkills = (await childSkills(childProps)).length > 0;
   const { tools: agentTools } = await resolveRunTools(childProps, { hasSkills });
   const { tools, refused } = narrowTools(agentTools, spec.tools, { mayDelegate });
   if (refused.length) {

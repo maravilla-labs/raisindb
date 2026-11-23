@@ -217,3 +217,34 @@ test('a finished child carries its artifacts and the evidence it handed back', a
   assert.equal(done.payload.child.evidence[0].kind, 'verified');
   assert.equal(done.payload.child.waiting_for, undefined);
 });
+
+// ── Skills: a child gets the skill loader exactly like a top-level run ──────
+
+test('a child of an agent with skills is offered load-skill, even when the parent grants named tools only', async () => {
+  const { f, spawns, at } = childWorld();
+  f.put('functions', '/lib/raisin/ai/load-skill', { node_type: 'raisin:Function', name: 'load-skill', properties: { name: 'load-skill', description: 'Load a skill', read_only: true, input_schema: { type: 'object', properties: { name: { type: 'string' } } } } });
+  f.put('functions', '/lib-skills/building-an-automation', { node_type: 'raisin:Skill', properties: { name: 'building-an-automation', description: 'How to build an automation.' } });
+  const builder = await f.api.nodes.get('functions', '/agents/builder');
+  f.put('functions', '/agents/builder', {
+    ...builder,
+    properties: { ...builder.properties, global_skills: false, skills: [{ 'raisin:path': '/lib-skills/building-an-automation', 'raisin:workspace': 'functions' }] },
+  });
+
+  const env = await spawn({ agent_ref: '/agents/builder', key: 'b', objective: 'Build the reminder', tools: ['search'], __raisin_context: at(1, FN.spawn) });
+  assert.equal(env.status, 'succeeded', JSON.stringify(env.payload));
+  const names = spawns[0].input.tools.map((t) => t.name);
+  assert.ok(names.includes('load-skill'), `load-skill offered: ${names}`);
+  assert.ok(names.includes('search'));
+  assert.ok(!names.includes('write'), 'the grant still narrows the real tools');
+  assert.ok(spawns[0].objective.allowed_tools.includes('/lib/raisin/ai/load-skill'), 'and core lets the child call it');
+});
+
+test('a child of an agent without skills gets no skill loader', async () => {
+  const { f, spawns, at } = childWorld();
+  f.put('functions', '/lib/raisin/ai/load-skill', { node_type: 'raisin:Function', name: 'load-skill', properties: { name: 'load-skill', description: 'Load a skill', input_schema: { type: 'object', properties: {} } } });
+  const builder = await f.api.nodes.get('functions', '/agents/builder');
+  f.put('functions', '/agents/builder', { ...builder, properties: { ...builder.properties, global_skills: false } });
+  const env = await spawn({ agent_ref: '/agents/builder', key: 'b', objective: 'x', __raisin_context: at(1, FN.spawn) });
+  assert.equal(env.status, 'succeeded', JSON.stringify(env.payload));
+  assert.ok(!spawns[0].input.tools.some((t) => t.name === 'load-skill'));
+});
