@@ -65,6 +65,57 @@ pub fn merge_with_stored(definition: &NodeType, stored: &NodeType) -> NodeType {
     merged
 }
 
+/// The part of `definition` that can be written over `stored` without a
+/// breaking change: [`merge_with_stored`], except that a property the stored
+/// copy already declares keeps its stored type, and keeps being optional when
+/// the stored copy says so, and a property only the stored copy has is kept.
+///
+/// A definition whose full apply is breaking (a type corrected from `String`
+/// to `Date`, a property dropped) used to be withheld WHOLE, so a branch also
+/// went without every additive change that came with or after it: a forked
+/// `publish` or `edit-*` branch kept a `raisin:Package` without
+/// `content_hash`, a `raisin:Event` without `start_utc`, years of additions
+/// behind one old type change. The resync writes this instead and leaves only
+/// the breaking remainder pending for an operator.
+pub fn non_breaking_merge(definition: &NodeType, stored: &NodeType) -> NodeType {
+    let mut merged = merge_with_stored(definition, stored);
+    let stored_props = stored.properties.clone().unwrap_or_default();
+    let mut props = Vec::new();
+    for prop in definition.properties.clone().unwrap_or_default() {
+        let mut prop = prop;
+        if let Some(old) = stored_props
+            .iter()
+            .find(|p| p.name.is_some() && p.name == prop.name)
+        {
+            if old.property_type != prop.property_type {
+                prop.property_type = old.property_type.clone();
+            }
+            if !old.required.unwrap_or(false) && prop.required.unwrap_or(false) {
+                prop.required = old.required;
+            }
+        }
+        props.push(prop);
+    }
+    for old in &stored_props {
+        let declared = props.iter().any(|p| p.name.is_some() && p.name == old.name);
+        if !declared {
+            props.push(old.clone());
+        }
+    }
+    merged.properties = if props.is_empty() && definition.properties.is_none() {
+        None
+    } else {
+        Some(props)
+    };
+    merged
+}
+
+/// Whether two copies of a NodeType say the same thing (ignoring what storage
+/// owns: identity, timestamps, the stored version).
+pub fn same_definition(a: &NodeType, b: &NodeType) -> bool {
+    normalized(a) == normalized(b)
+}
+
 /// Strip what storage owns (identity, timestamps, the stored `version`, which
 /// storage bumps on every write) and order-insensitive lists, so two copies of
 /// the same definition compare equal.
@@ -96,6 +147,56 @@ mod tests {
 
     fn nt(yaml: &str) -> NodeType {
         serde_yaml::from_str(yaml).expect("test NodeType YAML should parse")
+    }
+
+    #[test]
+    fn the_non_breaking_part_adds_and_keeps_but_never_changes_a_type() {
+        let def = nt(
+            "name: t:E\nproperties:\n  - name: start\n    type: Date\n    required: true\n  - name: start_utc\n    type: String\n",
+        );
+        let stored = nt(
+            "name: t:E\nproperties:\n  - name: start\n    type: String\n  - name: legacy\n    type: String\n",
+        );
+        let merged = non_breaking_merge(&def, &stored);
+        let props = merged.properties.clone().unwrap();
+        let by = |n: &str| props.iter().find(|p| p.name.as_deref() == Some(n)).cloned();
+        assert_eq!(
+            by("start").unwrap().property_type,
+            by_type(&stored, "start")
+        );
+        assert_ne!(
+            by("start").unwrap().required,
+            Some(true),
+            "not made required"
+        );
+        assert!(by("start_utc").is_some(), "the new property lands");
+        assert!(by("legacy").is_some(), "a stored-only property is kept");
+        assert!(
+            crate::system_updates::detect_nodetype_breaking_changes(&stored, &merged).is_empty(),
+            "nothing breaking is written"
+        );
+        assert!(
+            !stored_nodetype_matches(&def, &merged),
+            "the breaking remainder stays pending"
+        );
+        assert!(
+            same_definition(&non_breaking_merge(&def, &merged), &merged),
+            "idempotent"
+        );
+    }
+
+    fn by_type(
+        nt: &NodeType,
+        name: &str,
+    ) -> raisin_models::nodes::properties::schema::PropertyType {
+        nt.properties
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|p| p.name.as_deref() == Some(name))
+            .unwrap()
+            .property_type
+            .clone()
     }
 
     #[test]

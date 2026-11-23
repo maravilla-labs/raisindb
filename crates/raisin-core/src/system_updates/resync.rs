@@ -33,7 +33,9 @@ use super::apply::{apply_nodetype, apply_workspace};
 use super::breaking_changes::{
     detect_nodetype_breaking_changes, detect_workspace_breaking_changes,
 };
-use super::merge::{merge_with_stored, stored_nodetype_matches};
+use super::merge::{
+    merge_with_stored, non_breaking_merge, same_definition, stored_nodetype_matches,
+};
 use raisin_error::Result;
 use raisin_models::nodes::types::NodeType;
 use raisin_models::workspace::Workspace;
@@ -174,20 +176,68 @@ pub async fn resync_nodetypes<S: Storage, R: SystemUpdateRepository>(
             .await?;
             outcome.applied += 1;
         } else {
+            // The full change is breaking, but most of it rarely is: write the
+            // part that is not (new properties, allowed children, indexes …),
+            // keep the stored types and optionality, and leave only the
+            // breaking remainder pending. Withholding the whole definition left
+            // forked branches years of additions behind one old type change.
+            // Written only when it changes something, so a pending type costs
+            // nothing on later boots; no hash is recorded, the remainder is
+            // still owed.
+            let mut wrote_part = false;
+            if policy == AutoApplyPolicy::NonBreaking {
+                if let Some(existing) = &current {
+                    let part = non_breaking_merge(nodetype, existing);
+                    if !same_definition(&part, existing) {
+                        write_part(storage.clone(), tenant_id, repo_id, branch, part, existing)
+                            .await?;
+                        wrote_part = true;
+                    }
+                }
+            }
             outcome.pending += 1;
             tracing::warn!(
                 tenant_id = %tenant_id,
                 repo_id = %repo_id,
+                branch = %branch,
                 nodetype = %nodetype.name,
                 breaking_changes = breaking.len(),
+                non_breaking_part_written = wrote_part,
                 policy = ?policy,
-                "Built-in NodeType changed but was NOT auto-applied; \
-                 apply it from the admin console (system updates)"
+                "Built-in NodeType changed but was NOT fully auto-applied; \
+                 apply the rest from the admin console (system updates)"
             );
         }
     }
 
     Ok(outcome)
+}
+
+/// Write the non-breaking part of a definition over the stored copy on one
+/// branch, keeping its identity. Not recorded as applied.
+async fn write_part<S: Storage>(
+    storage: Arc<S>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    mut part: NodeType,
+    existing: &NodeType,
+) -> Result<()> {
+    part.id = existing.id.clone();
+    part.created_at = existing.created_at;
+    part.updated_at = Some(chrono::Utc::now());
+    let name = part.name.clone();
+    storage
+        .node_types()
+        .put(
+            BranchScope::new(tenant_id, repo_id, branch),
+            part,
+            raisin_storage::CommitMetadata::system(format!(
+                "System update (non-breaking part): {name}"
+            )),
+        )
+        .await?;
+    Ok(())
 }
 
 /// Merge a built-in Workspace definition with what is stored, preserving
@@ -967,6 +1017,160 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(outcome.applied, 0);
+    }
+
+    /// Regression for the branches left behind after 0.7.54 (solutas): the
+    /// applied hash is recorded, `main` is current, and a forked `edit-*`
+    /// branch holds a `raisin:Package` from long ago — missing later
+    /// properties AND with a property of another type. The type difference
+    /// made the whole definition breaking, so the branch was withheld every
+    /// boot and never got the additions either. Now the non-breaking part
+    /// lands, the stored type stays, the remainder stays pending, and a second
+    /// boot writes nothing.
+    #[tokio::test]
+    async fn a_stale_forked_branch_gets_the_non_breaking_part_of_a_breaking_definition() {
+        use crate::definitions::DefinitionResolver;
+        use crate::system_updates::check_pending_updates;
+        use raisin_storage::CommitMetadata;
+
+        const EDIT: &str = "edit-someone-blueprints-starter";
+        let storage = Arc::new(InMemoryStorage::default());
+        let repo = MemoryUpdateRepo::default();
+        let resolver = DefinitionResolver::embedded_only();
+        let defs = resolver.nodetypes();
+        for b in [EDIT, BRANCH] {
+            resync_nodetypes(
+                storage.clone(),
+                &repo,
+                TENANT,
+                REPO,
+                b,
+                &defs,
+                AutoApplyPolicy::NonBreaking,
+            )
+            .await
+            .unwrap();
+        }
+
+        let (pkg, _) = defs
+            .iter()
+            .find(|(nt, _)| nt.name == "raisin:Package")
+            .unwrap()
+            .clone();
+        let mut old = pkg.clone();
+        let props = old.properties.as_mut().unwrap();
+        props.retain(|p| p.name.as_deref() != Some("content_hash"));
+        let author = props
+            .iter_mut()
+            .find(|p| p.name.as_deref() == Some("author"))
+            .expect("raisin:Package declares author");
+        let old_type = if author.property_type
+            == raisin_models::nodes::properties::schema::PropertyType::Float
+        {
+            raisin_models::nodes::properties::schema::PropertyType::String
+        } else {
+            raisin_models::nodes::properties::schema::PropertyType::Float
+        };
+        author.property_type = old_type.clone();
+        storage
+            .node_types()
+            .put(
+                BranchScope::new(TENANT, REPO, EDIT),
+                old,
+                CommitMetadata::system("old fork"),
+            )
+            .await
+            .unwrap();
+
+        let stored = |b: &'static str| {
+            let storage = storage.clone();
+            async move {
+                storage
+                    .node_types()
+                    .get(BranchScope::new(TENANT, REPO, b), "raisin:Package", None)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let main_before = stored(BRANCH).await;
+
+        let pending = check_pending_updates(storage.clone(), &repo, &resolver, TENANT, REPO, EDIT)
+            .await
+            .unwrap();
+        assert!(pending
+            .updates
+            .iter()
+            .any(|u| u.name == "raisin:Package" && u.is_breaking));
+
+        for b in [EDIT, BRANCH] {
+            resync_nodetypes(
+                storage.clone(),
+                &repo,
+                TENANT,
+                REPO,
+                b,
+                &defs,
+                AutoApplyPolicy::NonBreaking,
+            )
+            .await
+            .unwrap();
+        }
+        let edit = stored(EDIT).await;
+        let prop = |nt: &NodeType, n: &str| {
+            nt.properties
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|p| p.name.as_deref() == Some(n))
+                .cloned()
+        };
+        assert!(
+            prop(&edit, "content_hash").is_some(),
+            "the missing property landed on the fork"
+        );
+        assert_eq!(
+            prop(&edit, "author").unwrap().property_type,
+            old_type,
+            "the stored type stays"
+        );
+        assert!(
+            same_definition(&stored(BRANCH).await, &main_before),
+            "main is untouched"
+        );
+
+        // The breaking remainder is still owed on the fork, and nothing more.
+        let pending = check_pending_updates(storage.clone(), &repo, &resolver, TENANT, REPO, EDIT)
+            .await
+            .unwrap();
+        let fork_pending: Vec<_> = pending
+            .updates
+            .iter()
+            .filter(|u| u.resource_type == ResourceType::NodeType)
+            .map(|u| u.name.as_str())
+            .collect();
+        assert_eq!(fork_pending, vec!["raisin:Package"]);
+
+        // A second boot writes nothing.
+        let before = stored(EDIT).await;
+        let outcome = resync_nodetypes(
+            storage.clone(),
+            &repo,
+            TENANT,
+            REPO,
+            EDIT,
+            &defs,
+            AutoApplyPolicy::NonBreaking,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.applied, 0);
+        assert_eq!(outcome.pending, 1);
+        assert_eq!(
+            stored(EDIT).await.updated_at,
+            before.updated_at,
+            "no rewrite on a later boot"
+        );
     }
 
     #[test]
