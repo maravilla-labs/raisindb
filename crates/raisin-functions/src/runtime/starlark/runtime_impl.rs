@@ -15,12 +15,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::runtime::Handle;
 
+use crate::runtime::host_gateway::HostGateway;
+
 use super::conversions::{json_to_starlark, starlark_value_to_json};
 use super::gateway::raisin_gateway_module;
 use super::setup_code::generate_setup_code;
-use super::thread_local::{
-    clear_logs, clear_thread_api, set_thread_api, set_thread_policy, take_logs,
-};
+use super::thread_local::{clear_logs, clear_thread_api, set_thread_api, take_logs};
 use crate::api::FunctionApi;
 use crate::runtime::FunctionRuntime;
 use crate::types::{
@@ -271,16 +271,20 @@ impl FunctionRuntime for StarlarkRuntime {
             "Executing Starlark function"
         );
 
-        // Get tokio runtime handle
-        let handle = self
-            .handle
+        // Host calls block on the tokio runtime: there must be one.
+        self.handle
             .clone()
             .or_else(|| Handle::try_current().ok())
             .ok_or_else(|| Error::Internal("No tokio runtime available".to_string()))?;
 
-        // Set thread-local API, handle, and log emitter for the gateway function
-        set_thread_api(api.clone(), handle.clone(), context.log_emitter.clone());
-        set_thread_policy(context.policy);
+        // The execution's host gateway: its policy, its deadline (the
+        // function's timeout) and, when a caller registered one, its
+        // cancellation (a stopped agent run).
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(metadata.resource_limits.timeout_ms.max(1));
+        let gateway =
+            HostGateway::for_execution(api.clone(), context.policy, &execution_id, deadline);
+        set_thread_api(gateway, context.log_emitter.clone());
 
         // Clear any stale logs from previous executions
         clear_logs();

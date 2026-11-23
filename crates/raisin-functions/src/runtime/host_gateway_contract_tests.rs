@@ -177,7 +177,7 @@ macro_rules! contract {
 }
 
 contract!(JavaScript, js_deadline, js_stop, js_pure);
-contract!(Starlark, starlark_deadline, starlark_stop, starlark_pure, #[ignore = "lands with the Starlark step"]);
+contract!(Starlark, starlark_deadline, starlark_stop, starlark_pure);
 #[cfg(feature = "wasm")]
 mod wasm_contract {
     use super::*;

@@ -10,8 +10,8 @@ use starlark::starlark_module;
 use starlark::values::{none::NoneType, tuple::UnpackTuple, Heap, Value};
 
 use super::conversions::{json_to_starlark, starlark_value_to_json};
-use super::thread_local::{push_log, CURRENT_API, CURRENT_HANDLE, CURRENT_POLICY};
-use crate::runtime::bindings::methods::registry;
+use super::thread_local::{push_log, CURRENT_GATEWAY};
+use crate::runtime::host_gateway::{call_blocking, HostGateway};
 use crate::types::LogEntry;
 
 /// Gateway function module that provides __raisin_call
@@ -26,26 +26,17 @@ pub(super) fn raisin_gateway_module(builder: &mut GlobalsBuilder) {
     /// Returns:
     ///   JSON string with the result
     fn __raisin_call<'v>(method: &str, args: Value<'v>) -> anyhow::Result<String> {
+        let gateway = CURRENT_GATEWAY
+            .with(|cell| cell.borrow().clone())
+            .ok_or_else(|| anyhow::anyhow!("RaisinDB API not initialized"))?;
         // A deterministic call reaches no host API at all.
-        if !CURRENT_POLICY.with(|cell| cell.get()).allows_host_calls() {
-            let denied = serde_json::json!({
-                "error": true,
-                "message": format!("{}: {method}", crate::types::ExecutionPolicy::HOST_DENIED),
-            });
-            return Ok(denied.to_string());
+        if let Err(denied) = gateway.check_allowed(method) {
+            return Ok(denied.envelope());
         }
-        // Get API and handle from thread-local storage
-        let api = CURRENT_API.with(|cell| cell.borrow().clone());
-        let handle = CURRENT_HANDLE.with(|cell| cell.borrow().clone());
-
-        let api = api.ok_or_else(|| anyhow::anyhow!("RaisinDB API not initialized"))?;
-        let handle = handle.ok_or_else(|| anyhow::anyhow!("Tokio handle not available"))?;
-
-        // Look up the method in the registry
-        let reg = registry();
-        let method_desc = reg
-            .find_by_internal_name(method)
-            .ok_or_else(|| anyhow::anyhow!("Unknown method: {}", method))?;
+        // An unknown method is a Starlark error, not an envelope, as always.
+        if !HostGateway::is_registry_method(method) {
+            return Err(anyhow::anyhow!("Unknown method: {}", method));
+        }
 
         // Convert Starlark args list to JSON
         let json_args: Vec<serde_json::Value> =
@@ -58,25 +49,11 @@ pub(super) fn raisin_gateway_module(builder: &mut GlobalsBuilder) {
                 ));
             };
 
-        // Call the invoker using block_in_place to avoid "Cannot start a runtime from within a runtime" panic.
-        // This is needed because StarlarkRuntime::execute() is async, and the Starlark evaluator is sync.
-        // block_in_place tells tokio to park the current task while we block.
-        let invoker = method_desc.invoker;
-        let result = tokio::task::block_in_place(|| {
-            handle.block_on(async move { (invoker)(api, json_args).await })
-        });
-
-        match result {
+        // The evaluator is synchronous: block this thread on the call. The
+        // gateway applies the execution's deadline and stop.
+        match call_blocking(gateway.call(method, json_args)) {
             Ok(invoke_result) => Ok(invoke_result.to_json_string()),
-            Err(e) => {
-                // Return error as JSON string
-                let error_json = serde_json::json!({
-                    "error": true,
-                    "message": e.to_string()
-                });
-                Ok(serde_json::to_string(&error_json)
-                    .unwrap_or_else(|_| r#"{"error":true,"message":"Unknown error"}"#.to_string()))
-            }
+            Err(e) => Ok(e.envelope()),
         }
     }
 
