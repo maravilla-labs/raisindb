@@ -33,6 +33,10 @@ pub struct MockFunctionApi {
     /// connection and went silent. Used to test that the function deadline
     /// cuts a blocked host call.
     email_hangs: bool,
+    /// When set, `http_request` never completes — a provider that never
+    /// answers. Used by the host-gateway contract test (deadline, stop) for
+    /// every runtime.
+    http_hangs: bool,
     /// Scripted `http_request` responses, consumed in order. Empty means "echo
     /// the request back as a 200", the historical behaviour every existing test
     /// relies on. Scripting exists so a function under test can be driven
@@ -92,6 +96,7 @@ impl MockFunctionApi {
             node_write_error: None,
             all_errors: None,
             email_hangs: false,
+            http_hangs: false,
             http_responses: std::sync::Mutex::new(std::collections::VecDeque::new()),
             sql_queries: std::sync::Mutex::new(Vec::new()),
             http_calls: std::sync::Mutex::new(Vec::new()),
@@ -173,6 +178,12 @@ impl MockFunctionApi {
     /// Make `email_send` hang forever (a silent provider).
     pub fn with_email_hang(mut self) -> Self {
         self.email_hangs = true;
+        self
+    }
+
+    /// Make every `http_request` hang forever.
+    pub fn with_http_hang(mut self) -> Self {
+        self.http_hangs = true;
         self
     }
 
@@ -359,6 +370,9 @@ impl FunctionApi for MockFunctionApi {
         self.http_calls.lock().unwrap().push(serde_json::json!({
             "method": method, "url": url, "options": options.clone()
         }));
+        if self.http_hangs {
+            std::future::pending::<()>().await;
+        }
         if let Some(scripted) = self.http_responses.lock().unwrap().pop_front() {
             return Ok(scripted);
         }

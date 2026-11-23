@@ -14,6 +14,9 @@ pub mod bindings;
 pub mod crypto;
 pub mod email;
 pub mod fetch;
+pub mod host_gateway;
+#[cfg(test)]
+mod host_gateway_contract_tests;
 pub mod imap;
 mod quickjs;
 mod sandbox;

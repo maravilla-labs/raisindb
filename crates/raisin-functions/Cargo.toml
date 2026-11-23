@@ -49,6 +49,8 @@ raisin-agent-runtime = { path = "../raisin-agent-runtime" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+# The cancellation an execution's host calls give up on (host_gateway.rs).
+tokio-util = "0.7"
 async-trait = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
@@ -158,5 +160,3 @@ rand = "0.8"
 wat = "1"
 # Test-only: ephemeral RocksDB job stores for scheduler callback tests.
 tempfile = { workspace = true }
-# Test-only: a cancellation token to cancel an execution's host call with.
-tokio-util = "0.7"
