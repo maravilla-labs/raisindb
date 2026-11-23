@@ -40,8 +40,8 @@ test('budgets: an agent\'s own run_budgets are the defaults; a request lowers, n
   assert.equal(b.max_wall_ms, 60 * 60 * 1000, 'an undeclared limit is the top-level default');
   assert.equal(b.on_exceeded, 'pause', 'on_exceeded as configured');
 
-  const lowered = childBudgets({ max_model_calls: 10, max_operations: 1000, on_exceeded: 'pause' }, BUILDER_OWN);
-  assert.equal(lowered.max_model_calls, 10);
+  const lowered = childBudgets({ max_model_calls: 30, max_operations: 1000, on_exceeded: 'pause' }, BUILDER_OWN);
+  assert.equal(lowered.max_model_calls, 30);
   assert.equal(lowered.max_operations, 240, 'a request cannot exceed the agent\'s own');
   assert.equal(lowered.on_exceeded, 'pause');
   assert.equal(childBudgets({ on_exceeded: 'fail' }, BUILDER_OWN).on_exceeded, 'fail', 'a parent may ask for fail');
@@ -108,14 +108,14 @@ test('the parent\'s budget request and writes only narrow; the parent\'s grant b
   const { spawns, at } = childWorld({ parentExecutor: { node_dev: { roots: [{ workspace: 'automations', path: '/flows', ops: ['read', 'create'] }] } } });
   const env = await spawn({
     agent_ref: '/agents/builder', key: 'b', objective: 'x',
-    budget: { max_model_calls: 500, max_operations: 20, on_exceeded: 'fail' },
+    budget: { max_model_calls: 500, max_operations: 200, on_exceeded: 'fail' },
     writes: [{ workspace: 'automations', path: '/flows/reminder' }],
     __raisin_context: at(1, FN.spawn),
   });
   assert.equal(env.status, 'succeeded', JSON.stringify(env.payload));
   const req = spawns[0];
   assert.equal(req.budgets.max_model_calls, 40);
-  assert.equal(req.budgets.max_operations, 20);
+  assert.equal(req.budgets.max_operations, 200);
   assert.equal(req.on_exceeded, 'fail');
   assert.deepEqual(req.objective.allowed_writes, [
     { workspace: 'automations', path: '/flows/reminder', ops: ['read', 'create'] },
@@ -247,4 +247,35 @@ test('a child of an agent without skills gets no skill loader', async () => {
   const env = await spawn({ agent_ref: '/agents/builder', key: 'b', objective: 'x', __raisin_context: at(1, FN.spawn) });
   assert.equal(env.status, 'succeeded', JSON.stringify(env.payload));
   assert.ok(!spawns[0].input.tools.some((t) => t.name === 'load-skill'));
+});
+
+// ── Budgets: a parent cannot starve a configured child ─────────────────────
+
+test('a request far below the agent\'s own budget is raised to half of it, and says so', () => {
+  const notes = [];
+  const b = childBudgets({ max_model_calls: 8, max_operations: 40, max_total_tokens: 50000 }, BUILDER_OWN, notes);
+  assert.equal(b.max_model_calls, 20, 'half of 40');
+  assert.equal(b.max_operations, 120, 'half of 240');
+  assert.equal(b.max_total_tokens, 150000, 'half of 300000');
+  assert.equal(notes.length, 3);
+  assert.match(notes[0], /max_model_calls: asked for 8, raised to 20/);
+
+  const exact = childBudgets({ max_model_calls: 8, exact: true }, BUILDER_OWN, []);
+  assert.equal(exact.max_model_calls, 8, 'exact: true takes the number as given');
+
+  const plain = childBudgets({ max_model_calls: 8 }, null, notes);
+  assert.equal(plain.max_model_calls, 8, 'an agent without run_budgets is unaffected');
+});
+
+test('the spawn answer reports a raised budget to the parent', async () => {
+  const { spawns, at } = childWorld();
+  const env = await spawn({
+    agent_ref: '/agents/builder', key: 'b', objective: 'x',
+    budget: { max_model_calls: 8, max_operations: 40, max_total_tokens: 50000 },
+    __raisin_context: at(1, FN.spawn),
+  });
+  assert.equal(env.status, 'succeeded', JSON.stringify(env.payload));
+  assert.equal(spawns[0].budgets.max_total_tokens, 150000);
+  assert.equal(spawns[0].budgets.exact, undefined, 'the flag never reaches core');
+  assert.equal(env.payload.child.budget_adjusted.length, 3);
 });

@@ -85,7 +85,7 @@ properties:
             value: {}
       budget:
         type: object
-        description: "Limits: max_model_calls, max_operations, max_wall_s, max_total_tokens (clamped). An agent with its own run_budgets starts from them and a limit here can only lower one; on_exceeded: fail makes an overrun fail instead of pausing."
+        description: "Usually leave this out: an agent with its own run_budgets starts from them. Limits: max_model_calls, max_operations, max_wall_s, max_total_tokens (clamped). A limit here can only lower the agent's own, and not below half of it unless exact: true; the answer's budget_adjusted says what was raised. on_exceeded: fail makes an overrun fail instead of pausing."
       independent:
         type: boolean
         description: "Required to start a child while another is still working: this work does not depend on it."

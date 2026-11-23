@@ -213,9 +213,22 @@ const ON_EXCEEDED = new Set(['pause', 'fail']);
  * budgets it runs with at top level, a requested value may LOWER a limit the
  * agent declares but never raise it, nothing exceeds the engine ceiling, and
  * `on_exceeded` is the agent's own (`fail` may still be requested; `pause`
- * cannot be, since a paused child holds its parent's wait).
+ * cannot be, since a paused child holds its parent's wait). A request below
+ * half of a declared limit is raised to that half (see `FLOORED`), and each
+ * raise is described in `notes` when given.
  */
-export function childBudgets(raw, own = null) {
+/**
+ * The limits a parent's request may not cut below half of what the child
+ * agent declares for itself. A model asked to delegate tends to pick small
+ * round numbers (8 model calls, 50k tokens); Builder spends ~12k tokens of
+ * prompt per call, so such a child could not finish anything and failed or
+ * paused for reasons nobody chose. `exact: true` in the request takes the
+ * numbers as given.
+ */
+const FLOORED = Object.freeze(['max_model_calls', 'max_operations', 'max_total_tokens', 'max_wall_ms']);
+export const MIN_SHARE_OF_OWN = 0.5;
+
+export function childBudgets(raw, own = null, notes = null) {
   const cfg = own && typeof own === 'object' && !Array.isArray(own) ? own : null;
   const b = cfg ? { ...AGENT_RUN_DEFAULTS } : { ...DEFAULT_CHILD_BUDGETS };
   delete b.on_exceeded;
@@ -235,7 +248,19 @@ export function childBudgets(raw, own = null) {
     const v = src[k] !== undefined ? src[k] : b[k];
     if (v === undefined) continue;
     const n = int(v, 1, BUDGET_CEILING[k], b[k]);
-    b[k] = declared.has(k) ? Math.min(n, b[k]) : n;
+    if (!declared.has(k)) {
+      b[k] = n;
+      continue;
+    }
+    const floor = Math.ceil(b[k] * MIN_SHARE_OF_OWN);
+    if (n < floor && FLOORED.includes(k) && src.exact !== true) {
+      if (Array.isArray(notes)) {
+        notes.push(`${k}: asked for ${n}, raised to ${floor}; this agent needs at least half of its own ${b[k]} (pass exact: true to insist)`);
+      }
+      b[k] = floor;
+    } else {
+      b[k] = Math.min(n, b[k]);
+    }
   }
   const ownPolicy = cfg && ON_EXCEEDED.has(cfg.on_exceeded) ? cfg.on_exceeded : 'fail';
   b.on_exceeded = src.on_exceeded === 'fail' ? 'fail' : ownPolicy;

@@ -169,8 +169,10 @@ export function inheritedConfig({ configured, childProps, tools, spec, parentRoo
   const own = agentRoots(childProps);
   const grant = own ? childGrant({ own, parent: parentRoots, writes: spec.writes }) : null;
   const writeScope = grant ? grant.write_scope : (Array.isArray(spec.writes) ? spec.writes : null);
+  const budgetNotes = [];
   return {
-    budget: childBudgets(spec.budget_request, childProps.run_budgets),
+    budget: childBudgets(spec.budget_request, childProps.run_budgets, budgetNotes),
+    budgetNotes,
     allowedWrites: grant ? grant.roots : (Array.isArray(spec.writes) ? spec.writes : null),
     config: {
       execution_mode: mode,
@@ -295,6 +297,7 @@ export async function spawnChild(input, { functionPath, taskBinding = null } = {
       objective: spec.objective.goal,
       tools: tools.map((t) => t.name),
       budgets: spawned.budgets,
+      ...(inherited.budgetNotes && inherited.budgetNotes.length ? { budget_adjusted: inherited.budgetNotes } : {}),
       execution_mode: inherited.config.execution_mode,
       ...(inherited.config.node_dev ? { write_roots: inherited.config.node_dev.roots } : {}),
     },
