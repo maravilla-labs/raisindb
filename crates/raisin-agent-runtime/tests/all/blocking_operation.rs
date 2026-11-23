@@ -104,3 +104,35 @@ async fn the_lease_is_renewed_while_the_operation_blocks_its_thread() {
         .iter()
         .any(|e| matches!(e.kind, RunEventKind::OperationCompleted { .. })));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_operation_past_its_deadline_is_cut_off_as_a_retryable_timeout() {
+    let h = Harness::tokio();
+    let run = h.create("/a").await;
+    let now = h.svc.now();
+    let d = Arc::new(RunDriver::new(
+        h.svc.clone(),
+        Mode::Planner(planner(vec![op_with(|s| s.deadline_ms = Some(now + 300))])),
+        Arc::new(ThreadBlockingExecutor { ms: 4_000 }),
+    ));
+    let started = Instant::now();
+    d.drive(&h.scope, &run, "w1").await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(2_000),
+        "the deadline waited for the blocked operation ({:?})",
+        started.elapsed()
+    );
+    let events = h.events(&run).await;
+    let failure = events
+        .iter()
+        .find_map(|e| match &e.kind {
+            RunEventKind::OperationCompleted {
+                outcome: OpOutcome::Retryable,
+                failure,
+                ..
+            } => failure.clone(),
+            _ => None,
+        })
+        .expect("a retryable completion with a failure");
+    assert_eq!(failure.class, "timeout");
+}

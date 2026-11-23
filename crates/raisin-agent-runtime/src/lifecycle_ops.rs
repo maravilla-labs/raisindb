@@ -39,6 +39,14 @@ pub struct OperationResult {
     pub expires_in_ms: Option<u64>,
 }
 
+/// How many attempts a replay-safe operation gets across lease takeovers.
+/// Each takeover used to re-dispatch it again, without end: a model call that
+/// never answered in time was re-issued by every sweep. After this many, the
+/// operation is abandoned like a non-replay-safe one, which counts as a failed
+/// operation (so the run's `max_consecutive_op_failures` budget can pause it)
+/// and hands the decision to the reducer.
+pub const MAX_REDISPATCH_ATTEMPTS: u32 = 3;
+
 /// A result at least this big is "large": checkpoints reference it.
 pub const LARGE_RESULT_BYTES: u64 = 4 * 1024;
 /// How many large-result refs the record keeps (a rolling window).
@@ -426,10 +434,15 @@ pub fn apply_takeover(
                     pause_requested,
                 },
             ..
-        } if op.replay_safe => {
+        } if op.replay_safe && op.attempt < MAX_REDISPATCH_ATTEMPTS => {
             let lease = taken_over(&mut tx);
             op.attempt += 1;
             op.lease_epoch = lease.epoch;
+            // The deadline is relative to the attempt: carry the same allowance
+            // over, or a re-dispatched attempt would start already late.
+            if let Some(deadline) = op.deadline_ms {
+                op.deadline_ms = Some(now + deadline.saturating_sub(op.started_at_ms));
+            }
             op.started_at_ms = now;
             tx.push(started_event(&op));
             redispatch = Some(LeaseFence {
@@ -455,7 +468,11 @@ pub fn apply_takeover(
             };
             tx.push(RunEventKind::OperationAbandoned {
                 op_id: op.op_id.clone(),
-                reason: "lease_expired_not_replay_safe".into(),
+                reason: if op.replay_safe {
+                    "lease_expired_attempts_exhausted".into()
+                } else {
+                    "lease_expired_not_replay_safe".into()
+                },
                 effect_id: op.effect_id.clone(),
                 for_call_id: op.for_call_id.clone(),
             });

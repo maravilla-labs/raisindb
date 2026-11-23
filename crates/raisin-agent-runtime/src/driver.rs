@@ -452,6 +452,14 @@ impl RunDriver {
         tokio::pin!(handle);
         let period = Duration::from_millis(svc.config.renew_every_ms.max(1));
         let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        // The operation's deadline is enforced HERE, through the same
+        // cancellation a stop uses (so the function's I/O is dropped), not by
+        // waiting for the executor to give up on its own.
+        let deadline = tokio::time::sleep(match op.deadline_ms {
+            Some(d) => Duration::from_millis(d.saturating_sub(svc.now())),
+            None => Duration::from_secs(365 * 24 * 3600),
+        });
+        tokio::pin!(deadline);
         let result = loop {
             tokio::select! {
                 biased;
@@ -473,6 +481,19 @@ impl RunDriver {
                     let _ = tokio::time::timeout(CANCEL_GRACE, &mut handle).await;
                     abort.abort();
                     break OperationResult { outcome: Some(OpOutcome::Cancelled), ..OperationResult::default() };
+                }
+                _ = &mut deadline, if op.deadline_ms.is_some() => {
+                    token.cancel();
+                    let _ = tokio::time::timeout(CANCEL_GRACE, &mut handle).await;
+                    abort.abort();
+                    break OperationResult {
+                        outcome: Some(OpOutcome::Retryable),
+                        payload: Some(json!({
+                            "error_class": "timeout",
+                            "message": "the operation did not finish before its deadline",
+                        })),
+                        ..OperationResult::default()
+                    };
                 }
                 _ = tick.tick() => match svc.renew_lease(scope, run, fence).await {
                     Ok(r) => if matches!(r.state, RunState::Cancelling { .. }) { token.cancel(); },

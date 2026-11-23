@@ -208,3 +208,47 @@ async fn completed_op_is_not_redispatched_after_crash_between_commit_and_next() 
     assert_eq!(exec.started().len(), 1, "not executed again");
     assert_eq!(exec.total_side_effects(), 1);
 }
+
+/// A replay-safe operation (a model turn) whose attempts keep losing their
+/// lease is not re-dispatched forever: after MAX_REDISPATCH_ATTEMPTS it is
+/// abandoned and counts as a failed operation.
+#[tokio::test]
+async fn takeover_stops_redispatching_after_the_attempt_cap() {
+    use raisin_agent_runtime::lifecycle::MAX_REDISPATCH_ATTEMPTS;
+    let h = Harness::manual();
+    let run = h.create("/a").await;
+    let g = h.svc.acquire_lease(&h.scope, &run, "w1").await.unwrap();
+    let spec = OperationSpec {
+        kind: Some(OperationKind::ModelTurn),
+        replay_safe: Some(true),
+        ..OperationSpec::default()
+    };
+    h.svc
+        .begin_operation(&h.scope, &run, &g.fence, spec)
+        .await
+        .unwrap();
+    for i in 0..MAX_REDISPATCH_ATTEMPTS + 2 {
+        h.advance(TTL + 1);
+        h.svc
+            .recover(&h.scope, &format!("w{}", i + 2))
+            .await
+            .unwrap();
+    }
+    let events = h.events(&run).await;
+    let max_attempt = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            RunEventKind::OperationStarted { attempt, .. } => Some(*attempt),
+            _ => None,
+        })
+        .max()
+        .unwrap();
+    assert_eq!(max_attempt, MAX_REDISPATCH_ATTEMPTS);
+    assert!(events.iter().any(|e| matches!(
+        &e.kind,
+        RunEventKind::OperationAbandoned { reason, .. } if reason == "lease_expired_attempts_exhausted"
+    )));
+    let rec = h.rec(&run).await;
+    assert!(rec.state.active_op().is_none());
+    assert_eq!(rec.usage.consecutive_op_failures, 1);
+}

@@ -20,6 +20,16 @@ use crate::record::{AgentRunRecord, OperationKind, PendingKind};
 use crate::state::{NonEmpty, RunOutcome, RunState, TerminalStatus};
 use crate::tx::{Transition, Tx};
 
+/// How long one model turn may take, retries inside the turn included.
+///
+/// Measured on the production model: a turn normally answers in 5–7 s and a
+/// long reasoning turn took up to ~98 s; the turn function retries a transient
+/// failure up to twice. Five minutes covers three such calls. When it passes,
+/// the driver cancels the turn (dropping the provider request) and records a
+/// retryable `timeout` failure; the turn function's own timeout (330 s) stays
+/// a backstop behind it.
+pub const MODEL_TURN_DEADLINE_MS: u64 = 300_000;
+
 /// The operation spec an effect asks for. `op_id` is the id the operation
 /// will get, injected into tool args as `__raisin_context`.
 fn spec_for(effect: &Effect, op_id: &OperationId, run: &RunId, now: u64) -> Option<OperationSpec> {
@@ -65,6 +75,7 @@ fn spec_for(effect: &Effect, op_id: &OperationId, run: &RunId, now: u64) -> Opti
                 .map(|r| CallId(r.call_id.clone()))
                 .collect(),
             input: serde_json::to_value(&effect.body).ok(),
+            deadline_ms: Some(now + MODEL_TURN_DEADLINE_MS),
             ..OperationSpec::default()
         }),
         _ => None,

@@ -14,7 +14,9 @@ properties:
   execution_context: system
   enabled: true
   resource_limits:
-    timeout_ms: 300000
+    # A backstop: the run runtime ends a model turn at 300 s (its operation
+    # deadline, MODEL_TURN_DEADLINE_MS) through the run's cancellation.
+    timeout_ms: 330000
     max_memory_bytes: 268435456
   network_policy:
     http_enabled: true
