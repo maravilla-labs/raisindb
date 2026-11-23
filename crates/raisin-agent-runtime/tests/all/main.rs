@@ -11,6 +11,7 @@
 mod common;
 
 mod admission;
+mod blocking_operation;
 mod cancellation;
 mod checkpoints;
 mod children;

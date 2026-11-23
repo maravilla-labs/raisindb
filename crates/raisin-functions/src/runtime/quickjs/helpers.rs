@@ -69,13 +69,61 @@ where
     F: std::future::Future<Output = T>,
 {
     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    // The execution's cancellation (an agent run that was stopped), read here,
+    // during the poll, where the execution's task-local is visible. Firing it
+    // drops the call's future, and with it the HTTP request.
+    let cancel = raisin_storage::jobs::execution_cancel::current();
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
-            tokio::time::timeout(remaining, future).await.map_err(|_| {
-                raisin_error::Error::Internal(format!(
-                    "function timed out during host call `{what}`"
-                ))
-            })
+            let timed = async {
+                tokio::time::timeout(remaining, future).await.map_err(|_| {
+                    raisin_error::Error::Internal(format!(
+                        "function timed out during host call `{what}`"
+                    ))
+                })
+            };
+            match cancel {
+                Some(token) => tokio::select! {
+                    r = timed => r,
+                    _ = token.cancelled() => Err(raisin_error::Error::Internal(format!(
+                        "execution cancelled during host call `{what}`"
+                    ))),
+                },
+                None => timed.await,
+            }
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raisin_storage::jobs::execution_cancel;
+    use std::time::{Duration, Instant};
+
+    /// A stopped agent run must not keep its provider request running: the
+    /// host call in flight gives up as soon as the execution is cancelled,
+    /// long before its own deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_execution_drops_its_host_call() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let _reg = execution_cancel::register("op-x#1", token.clone());
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            canceller.cancel();
+        });
+        let started = Instant::now();
+        let result = execution_cancel::scope("op-x#1", async {
+            run_async_blocking_until(
+                tokio::time::sleep(Duration::from_secs(30)),
+                Instant::now() + Duration::from_secs(60),
+                "ai.completion",
+            )
+        })
+        .await;
+        let err = result.expect_err("the call must end on cancel");
+        assert!(err.to_string().contains("cancelled"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 }

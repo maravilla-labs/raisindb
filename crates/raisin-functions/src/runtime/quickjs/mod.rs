@@ -197,11 +197,16 @@ impl FunctionRuntime for QuickJsRuntime {
         let interrupt_deadline =
             Instant::now() + std::time::Duration::from_millis(timeout_ms.max(1));
         let interrupted = Arc::new(AtomicBool::new(false));
+        // A caller may cancel this execution (a stopped agent run): then the
+        // interpreter stops at the next bytecode, like a timeout.
+        let cancel = raisin_storage::jobs::execution_cancel::token_for(&execution_id);
         {
             let interrupted = interrupted.clone();
             runtime
                 .set_interrupt_handler(Some(Box::new(move || {
-                    if Instant::now() >= interrupt_deadline {
+                    if Instant::now() >= interrupt_deadline
+                        || cancel.as_ref().is_some_and(|c| c.is_cancelled())
+                    {
                         interrupted.store(true, Ordering::Relaxed);
                         true
                     } else {
@@ -524,7 +529,8 @@ impl FunctionRuntime for QuickJsRuntime {
         // Apply timeout
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(timeout_ms),
-            execution_future,
+            // Host calls made during this execution see its cancellation.
+            raisin_storage::jobs::execution_cancel::scope(&execution_id, execution_future),
         )
         .await;
 

@@ -31,13 +31,21 @@ pub struct Harness {
 
 impl Harness {
     fn build(clock: Arc<dyn Clock>, manual: Option<Arc<ManualClock>>) -> Self {
+        Self::build_with(clock, manual, ServiceConfig::default())
+    }
+
+    fn build_with(
+        clock: Arc<dyn Clock>,
+        manual: Option<Arc<ManualClock>>,
+        config: ServiceConfig,
+    ) -> Self {
         let store = Arc::new(InMemoryAgentRunStore::default());
         let waker = Arc::new(RecordingWaker::default());
         let svc = Arc::new(AgentRunService::new(
             store.clone(),
             waker.clone(),
             clock,
-            ServiceConfig::default(),
+            config,
         ));
         Self {
             svc,
@@ -57,6 +65,11 @@ impl Harness {
     /// A harness on tokio time (use with `start_paused`).
     pub fn tokio() -> Self {
         Self::build(Arc::new(TokioClock::new(T0)), None)
+    }
+
+    /// A harness on tokio time with its own lease tunables.
+    pub fn tokio_with(config: ServiceConfig) -> Self {
+        Self::build_with(Arc::new(TokioClock::new(T0)), None, config)
     }
 
     pub fn advance(&self, ms: u64) {

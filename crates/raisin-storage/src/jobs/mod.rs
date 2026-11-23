@@ -17,6 +17,7 @@
 
 pub mod ai_usage;
 pub mod conversation_events;
+pub mod execution_cancel;
 pub mod flow_events;
 pub mod flow_starters;
 pub mod monitor;

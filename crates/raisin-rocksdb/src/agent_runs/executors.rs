@@ -88,6 +88,10 @@ impl FunctionCaller {
         input: Value,
     ) -> Result<Value, String> {
         let execution_id = execution_id(ctx);
+        // A stop reaches the function's own I/O: the runtime gives up on any
+        // host call in flight (dropping a provider request) when it fires.
+        let _cancel =
+            raisin_storage::jobs::execution_cancel::register(&execution_id, ctx.token.clone());
         let result = (self.functions)(
             path.to_string(),
             execution_id,

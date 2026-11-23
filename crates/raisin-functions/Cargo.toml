@@ -158,3 +158,5 @@ rand = "0.8"
 wat = "1"
 # Test-only: ephemeral RocksDB job stores for scheduler callback tests.
 tempfile = { workspace = true }
+# Test-only: a cancellation token to cancel an execution's host call with.
+tokio-util = "0.7"

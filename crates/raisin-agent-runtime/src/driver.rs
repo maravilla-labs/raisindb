@@ -137,6 +137,10 @@ pub enum DriveOutcome {
     Exited(RunStatus),
 }
 
+/// How long a cancelled operation may take to return by itself before the
+/// driver stops waiting for it.
+const CANCEL_GRACE: Duration = Duration::from_millis(250);
+
 enum Exec {
     Done,
     Lost,
@@ -433,21 +437,47 @@ impl RunDriver {
             subject: Some(rec.subject.clone()),
             executor_config: rec.executor_config.clone(),
         };
-        let fut = self.executor.execute(ctx);
-        tokio::pin!(fut);
+        // The operation runs on its OWN task. An executor may block the thread
+        // it is polled on until its I/O ends — the JavaScript runtime awaits a
+        // host call (the model turn's provider request) inside the
+        // interpreter's poll. Polled here, that froze this loop with it: no
+        // lease renewal (the sweeper then re-issued the operation as a second
+        // attempt) and no reaction to a stop (the run stayed `cancelling` while
+        // the model kept being called). On its own task it blocks only itself.
+        // A cancelled operation's task is aborted and whatever it returns later
+        // is never read, so a late result cannot land.
+        let executor = self.executor.clone();
+        let handle = tokio::spawn(async move { executor.execute(ctx).await });
+        let abort = handle.abort_handle();
+        tokio::pin!(handle);
         let period = Duration::from_millis(svc.config.renew_every_ms.max(1));
         let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         let result = loop {
             tokio::select! {
                 biased;
-                r = &mut fut => break r,
+                r = &mut handle => break match r {
+                    Ok(r) => r,
+                    Err(e) => OperationResult {
+                        outcome: Some(OpOutcome::Failed),
+                        payload: Some(json!({
+                            "error_class": "executor",
+                            "message": if e.is_panic() { "the operation panicked" } else { "the operation was aborted" },
+                        })),
+                        ..OperationResult::default()
+                    },
+                },
                 _ = token.cancelled(), if op.interruptible => {
+                    // A cooperative executor sees the same token and returns on
+                    // its own; give it a moment to, then stop waiting for one
+                    // that cannot (a call blocked in its thread).
+                    let _ = tokio::time::timeout(CANCEL_GRACE, &mut handle).await;
+                    abort.abort();
                     break OperationResult { outcome: Some(OpOutcome::Cancelled), ..OperationResult::default() };
                 }
                 _ = tick.tick() => match svc.renew_lease(scope, run, fence).await {
                     Ok(r) => if matches!(r.state, RunState::Cancelling { .. }) { token.cancel(); },
-                    Err(e) if e.is_lease_lost() => return Ok(Exec::Lost),
-                    Err(e) => return Err(e),
+                    Err(e) if e.is_lease_lost() => { abort.abort(); return Ok(Exec::Lost); }
+                    Err(e) => { abort.abort(); return Err(e); }
                 },
             }
         };
