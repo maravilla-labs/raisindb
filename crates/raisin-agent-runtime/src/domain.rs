@@ -174,6 +174,7 @@ pub async fn map_event(ev: &RunEvent, loader: &dyn ResultLoader) -> Option<Reduc
             usage,
             result_ref,
             tool_calls,
+            ..
         } => {
             let payload = match result_ref {
                 Some(r) => loader.load_json(&r.key).await,

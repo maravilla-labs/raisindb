@@ -109,6 +109,97 @@ pub struct OpUsage {
     pub output_tokens: u64,
 }
 
+/// Why an operation did not succeed, safe to show a person.
+///
+/// The executor's own message carries provider internals ("AI fallback
+/// failed: API request failed: HTTP 504 Gateway Timeout: class=timeout");
+/// that stays in the stored result. The event carries only a class and a
+/// fixed sentence for it, so a client can say "the AI service timed out,
+/// retrying (attempt 2)" instead of showing "Thinking…" while a turn fails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpFailure {
+    /// `timeout`, `rate_limit`, `overloaded`, `upstream`, `unauthorized`,
+    /// `config`, `tool_error`, … or `error` when nothing better is known.
+    pub class: String,
+    /// A short sentence for that class; never the executor's own text.
+    pub message: String,
+}
+
+impl OpFailure {
+    /// The failure an operation result describes (its payload's
+    /// `error_class` and `message`), or `None` for a success.
+    pub fn from_result(outcome: OpOutcome, payload: Option<&serde_json::Value>) -> Option<Self> {
+        if !matches!(
+            outcome,
+            OpOutcome::Retryable | OpOutcome::Failed | OpOutcome::Blocked
+        ) {
+            return None;
+        }
+        let declared = payload
+            .and_then(|p| p.get("error_class"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("error")
+            .to_ascii_lowercase();
+        let raw = payload
+            .and_then(|p| p.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let class = refine_class(&declared, &raw);
+        let message = sentence_for(&class).to_string();
+        Some(Self { class, message })
+    }
+}
+
+/// A generic class ("provider", "error") refined from what the raw message
+/// says. Only the class is taken from it, never the text.
+fn refine_class(declared: &str, raw: &str) -> String {
+    let generic = matches!(declared, "provider" | "error" | "unknown" | "");
+    if !generic {
+        return match declared {
+            "rate_limited" | "ratelimit" | "too_many_requests" => "rate_limit".into(),
+            other => other.into(),
+        };
+    }
+    if let Some(i) = raw.find("class=") {
+        let tail = &raw[i + 6..];
+        let c: String = tail
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !c.is_empty() && c != "provider" {
+            return refine_class(&c, "");
+        }
+    }
+    if raw.contains("timed out") || raw.contains("timeout") || raw.contains(" 504") {
+        "timeout".into()
+    } else if raw.contains(" 429") || raw.contains("rate limit") {
+        "rate_limit".into()
+    } else if raw.contains(" 529") || raw.contains("overloaded") || raw.contains(" 503") {
+        "overloaded".into()
+    } else if raw.contains(" 500") || raw.contains(" 502") || raw.contains("bad gateway") {
+        "upstream".into()
+    } else if declared == "provider" {
+        "upstream".into()
+    } else {
+        "error".into()
+    }
+}
+
+fn sentence_for(class: &str) -> &'static str {
+    match class {
+        "timeout" => "The AI service did not answer in time.",
+        "rate_limit" => "The AI service is limiting requests right now.",
+        "overloaded" => "The AI service is overloaded right now.",
+        "upstream" => "The AI service returned an error.",
+        "unauthorized" => "This operation is not permitted.",
+        "config" => "The agent is not configured correctly.",
+        "tool_error" => "A tool failed.",
+        "budget" | "budget_exceeded" => "The run reached its budget.",
+        _ => "The operation failed.",
+    }
+}
+
 /// A large payload stored beside the run, never inline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultRef {
@@ -186,6 +277,10 @@ pub enum RunEventKind {
         result_ref: Option<ResultRef>,
         /// ModelTurn only: the call ids the model asked for.
         tool_calls: Vec<CallId>,
+        /// A failed, retryable or blocked operation: what went wrong, in words
+        /// safe to show a person (see [`OpFailure`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<OpFailure>,
     },
     OperationCancelled {
         op_id: OperationId,
@@ -327,5 +422,40 @@ impl RunEventKind {
             .ok()
             .and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod op_failure_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_provider_timeout_is_classed_and_its_internals_are_not_repeated() {
+        let f = OpFailure::from_result(
+            OpOutcome::Retryable,
+            Some(&json!({
+                "error_class": "provider",
+                "message": "AI fallback failed: API request failed: HTTP 504 Gateway Timeout: class=timeout"
+            })),
+        )
+        .unwrap();
+        assert_eq!(f.class, "timeout");
+        assert!(!f.message.contains("504") && !f.message.contains("fallback"));
+    }
+
+    #[test]
+    fn a_declared_class_is_kept_and_success_has_none() {
+        let f = OpFailure::from_result(OpOutcome::Failed, Some(&json!({"error_class": "config"})))
+            .unwrap();
+        assert_eq!(f.class, "config");
+        assert!(OpFailure::from_result(OpOutcome::Succeeded, None).is_none());
+        assert!(OpFailure::from_result(OpOutcome::Cancelled, None).is_none());
+        let g = OpFailure::from_result(
+            OpOutcome::Retryable,
+            Some(&json!({"error_class": "provider", "message": "HTTP 429 Too Many Requests"})),
+        )
+        .unwrap();
+        assert_eq!(g.class, "rate_limit");
     }
 }

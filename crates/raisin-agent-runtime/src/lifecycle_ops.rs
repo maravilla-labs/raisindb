@@ -71,6 +71,7 @@ pub(crate) fn completed(
     outcome: OpOutcome,
 ) {
     let result_ref = result_ref(tx, op, &result.payload);
+    let failure = crate::events::OpFailure::from_result(outcome, result.payload.as_ref());
     let seq = tx.push(RunEventKind::OperationCompleted {
         op_id: op.op_id.clone(),
         kind: Some(op.kind.clone()),
@@ -81,6 +82,7 @@ pub(crate) fn completed(
         usage: result.usage,
         result_ref,
         tool_calls: result.tool_calls.clone(),
+        failure,
     });
     tx.idem.push((op.idempotency_key.clone(), seq));
     budget::accumulate(&mut tx.rec.usage, &op.kind, outcome, result.usage);
