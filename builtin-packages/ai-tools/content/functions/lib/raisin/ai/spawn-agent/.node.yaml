@@ -54,7 +54,7 @@ properties:
         description: "Tool names the child may use (a subset of its agent's tools). Omit for all of them."
       writes:
         type: array
-        description: "Subtrees the child may write. [] = read-only. Omit = unrestricted (its own rights still apply)."
+        description: "Subtrees the child may write. [] = read-only. Omit = unrestricted (its own rights still apply). An agent with its own working roots keeps them as its limit: writes only narrow them."
         items:
           type: object
           required: [workspace, path]
@@ -85,7 +85,7 @@ properties:
             value: {}
       budget:
         type: object
-        description: "Limits: max_model_calls, max_operations, max_wall_s, max_total_tokens (clamped)"
+        description: "Limits: max_model_calls, max_operations, max_wall_s, max_total_tokens (clamped). An agent with its own run_budgets starts from them and a limit here can only lower one; on_exceeded: fail makes an overrun fail instead of pausing."
       independent:
         type: boolean
         description: "Required to start a child while another is still working: this work does not depend on it."

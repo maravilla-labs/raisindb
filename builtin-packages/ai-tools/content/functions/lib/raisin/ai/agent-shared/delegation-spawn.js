@@ -16,8 +16,9 @@
 
 import {
   normalizeSpawn, policyOf, agentPath, agentSlug, narrowTools, childChatName, spawnKeyOf,
-  briefText, childDone, invalid, coreObjective, LIMITS,
+  briefText, childDone, invalid, coreObjective, LIMITS, childBudgets, agentRoots, childGrant,
 } from './delegation-spec.js';
+import { getEffectiveExecutionMode, planApprovalOptional, requiresPlanApproval } from './utils.js';
 import { actingUser, runAgent } from './run-caller.js';
 import { AI_WS, requireParentRun, ensureFolders, listChildren, snapshots } from './delegation-core.js';
 import { resolveRunTools } from './run-tools.js';
@@ -124,6 +125,56 @@ async function writeTranscript(chatsRoot, chatName, props, brief, parentRunId) {
 }
 
 /**
+ * What a child of a CONFIGURED agent (`agent_ref`) inherits from that agent,
+ * so it behaves as it does at top level (run-entry.js `buildCreateRequest`):
+ *
+ * - its execution mode and approval behaviour — a mode that makes a person
+ *   approve (a plan, a build spec) still does; nothing is forced automatic;
+ * - its `run_budgets` as the starting budgets (a requested `budget` may only
+ *   lower them) and its `on_exceeded`;
+ * - its `node_dev.roots` as the write grant, narrowed by the parent's grant
+ *   and the requested `writes` (`childGrant`), on the run record AND in the
+ *   reducer's config, where e.g. Builder reads it.
+ *
+ * A child that copies the calling agent (no `agent_ref`) keeps the delegated
+ * defaults: automatic, small budgets that fail on overrun, and the parent's
+ * own grant (core copies the parent's executor config).
+ */
+export function inheritedConfig({ configured, childProps, tools, spec, parentRoots, runConfig = {} }) {
+  if (!configured) {
+    return {
+      budget: spec.budget,
+      allowedWrites: Array.isArray(spec.writes) ? spec.writes : null,
+      config: {
+        ...runConfig,
+        execution_mode: 'automatic',
+        requires_approval: false,
+        ...(Array.isArray(spec.writes) ? { write_scope: spec.writes } : {}),
+      },
+    };
+  }
+  const mode = getEffectiveExecutionMode(childProps.execution_mode);
+  const plans = tools.some((t) => t.domain_op === 'plan.create');
+  const own = agentRoots(childProps);
+  const grant = own ? childGrant({ own, parent: parentRoots, writes: spec.writes }) : null;
+  const writeScope = grant ? grant.write_scope : (Array.isArray(spec.writes) ? spec.writes : null);
+  return {
+    budget: childBudgets(spec.budget_request, childProps.run_budgets),
+    allowedWrites: grant ? grant.roots : (Array.isArray(spec.writes) ? spec.writes : null),
+    config: {
+      execution_mode: mode,
+      requires_approval: requiresPlanApproval(mode) && plans,
+      approval_optional: planApprovalOptional(mode) && plans,
+      // As at top level, the agent's run_config comes after the mode; the
+      // grant comes last, so no run_config can widen it.
+      ...runConfig,
+      ...(grant ? { node_dev: { roots: grant.roots } } : {}),
+      ...(writeScope ? { write_scope: writeScope } : {}),
+    },
+  };
+}
+
+/**
  * Spawn one child run for the calling run. Returns
  * `{ child, replayed, live_children, chat_path }`.
  */
@@ -158,6 +209,12 @@ export async function spawnChild(input, { functionPath, taskBinding = null } = {
     throw invalid(`${childPath} does not offer: ${refused.join(', ')}. Its tools: ${agentTools.map((t) => t.name).join(', ') || 'none'}.`);
   }
 
+  // Before anything is written: a grant that leaves nothing refuses the spawn.
+  const runConfig = childProps.run_config && typeof childProps.run_config === 'object' ? childProps.run_config : {};
+  const parentRoots = parent.rec.executor_config && parent.rec.executor_config.node_dev
+    && Array.isArray(parent.rec.executor_config.node_dev.roots) ? parent.rec.executor_config.node_dev.roots : null;
+  const inherited = inheritedConfig({ configured: !!spec.agent, childProps, tools, spec, parentRoots, runConfig });
+
   const slug = agentSlug(childPath);
   const user = actingUser(parent.rec);
   const context = await selectContext(spec, parent);
@@ -177,11 +234,11 @@ export async function spawnChild(input, { functionPath, taskBinding = null } = {
   // Core narrows every call the child makes to its grant; the projection is
   // the reducer's own operation and is always allowed.
   const allowedTools = [...tools.filter((t) => t.kind !== 'domain' && t.function_path).map((t) => t.function_path), PROJECT_FUNCTION];
-  const { on_exceeded: onExceeded, ...budgets } = spec.budget;
-  const runConfig = childProps.run_config && typeof childProps.run_config === 'object' ? childProps.run_config : {};
+  const { on_exceeded: onExceeded, ...budgets } = inherited.budget;
+  const objectiveSpec = { ...spec, writes: inherited.allowedWrites };
   const spawned = await raisin.agentRuns.spawnChild({
     run_id: parent.runId,
-    objective: coreObjective(spec, { brief, allowedTools, contextSelection: context.selection }),
+    objective: coreObjective(objectiveSpec, { brief, allowedTools, contextSelection: context.selection }),
     budgets,
     on_exceeded: onExceeded || 'fail',
     spawn_key: key,
@@ -200,12 +257,7 @@ export async function spawnChild(input, { functionPath, taskBinding = null } = {
       message_path: briefPath,
       tools,
       plan: null,
-      config: {
-        ...runConfig,
-        execution_mode: 'automatic',
-        requires_approval: false,
-        ...(Array.isArray(spec.writes) ? { write_scope: spec.writes } : {}),
-      },
+      config: inherited.config,
       context: {
         workspace: AI_WS,
         chat_path: chatPath,
@@ -229,6 +281,8 @@ export async function spawnChild(input, { functionPath, taskBinding = null } = {
       objective: spec.objective.goal,
       tools: tools.map((t) => t.name),
       budgets: spawned.budgets,
+      execution_mode: inherited.config.execution_mode,
+      ...(inherited.config.node_dev ? { write_roots: inherited.config.node_dev.roots } : {}),
     },
     replayed: !spawned.created,
     chat_path: chatPath,

@@ -7,7 +7,10 @@ properties:
     until one has (mode any), then get their results: outcome, summary,
     artifacts, acceptance and any messages they sent you. Your run waits durably
     (the runtime delivers each hand-back); a new user message interrupts the
-    wait and the children keep working.
+    wait and the children keep working. When every child still working is
+    blocked on a person (an approval or a question it asked) or paused, it
+    answers at once with done: false and needs_attention naming what each one
+    waits for: tell the user, since only a person can approve or answer.
   execution_mode: inline
   execution_context: system
   category: delegation

@@ -7,7 +7,7 @@
  */
 
 import { buildEnvelope, errorEnvelope, runContextOf, locator, keyToken } from './tool-envelope.js';
-import { DELEGATION_FUNCTIONS, waitSatisfied, childDone } from './delegation-spec.js';
+import { DELEGATION_FUNCTIONS, waitSatisfied, childDone, childBlocked } from './delegation-spec.js';
 import {
   AI_WS, requireParentRun, listChildren, pickChild, childOf, childSnapshot, snapshots, readMailbox, isLive,
   controlChild,
@@ -53,10 +53,17 @@ export async function inspect(input, fnPath = DELEGATION_FUNCTIONS.inspect) {
   const messages = await readMailbox(parent);
   if (!ref) {
     const children = await snapshots(parent, views);
-    return { payload: { children, live: children.filter((c) => !childDone(c)).length, ...(messages.length ? { messages } : {}) } };
+    const attention = children.filter(childBlocked).map((c) => c.attention);
+    return {
+      payload: {
+        children, live: children.filter((c) => !childDone(c)).length,
+        ...(attention.length ? { needs_attention: attention } : {}),
+        ...(messages.length ? { messages } : {}),
+      },
+    };
   }
   const child = await childSnapshot(parent, childOf(views, ref), { events: input.include_events !== false });
-  return { payload: { child, ...(messages.length ? { messages } : {}) } };
+  return { payload: { child, ...(child.attention ? { needs_attention: [child.attention] } : {}), ...(messages.length ? { messages } : {}) } };
 }
 
 /**
@@ -158,13 +165,37 @@ export async function wait(input, fnPath = DELEGATION_FUNCTIONS.wait) {
       },
     };
   }
-  const next = chosen.find((v) => !childDone(children.find((c) => c.run_id === v.link.run_id)));
+  // A child blocked on a person (an approval, a question) or paused does not
+  // move until someone acts, so parking on it would wait with it. Park on a
+  // child that is still working; when every pending child is blocked, answer
+  // now with what each one waits for, so the parent can relay it.
+  const pending = children.filter((c) => !childDone(c));
+  const blocked = pending.filter(childBlocked);
+  const working = pending.filter((c) => !childBlocked(c));
+  if (!working.length) {
+    const messages = await readMailbox(parent);
+    return {
+      payload: {
+        done: false,
+        mode,
+        children,
+        finished: children.length - pending.length,
+        pending: pending.map((c) => c.key || c.run_id),
+        needs_attention: blocked.map((c) => c.attention),
+        ...(messages.length ? { messages } : {}),
+        message: `No child run can continue on its own: ${blocked.map((c) => c.attention).join(' ')} `
+          + 'Only a person can approve or answer what a child asks: tell the user what it asks. Waiting again answers the same until someone has acted.',
+      },
+    };
+  }
+  const next = chosen.find((v) => working.some((c) => c.run_id === v.link.run_id));
   return {
     status: 'waiting',
     resumeKey: `child:${next.link.run_id}`,
     payload: {
-      waiting_for: children.filter((c) => !childDone(c)).map((c) => c.key || c.run_id),
+      waiting_for: pending.map((c) => c.key || c.run_id),
       mode,
+      ...(blocked.length ? { needs_attention: blocked.map((c) => c.attention) } : {}),
       message: 'Waiting for the child runs; each hand-back arrives through the run mailbox.',
     },
   };

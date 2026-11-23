@@ -12,7 +12,7 @@ export const CHAT = '/agents/lead/inbox/chats/c1';
 
 const TERMINAL = new Set(['completed', 'failed', 'stopped']);
 
-export function childWorld({ leadProps = {}, depth = 0 } = {}) {
+export function childWorld({ leadProps = {}, depth = 0, parentExecutor = null } = {}) {
   const runs = {};
   const f = fakeRaisin({ runs });
   const spawns = [];
@@ -25,6 +25,7 @@ export function childWorld({ leadProps = {}, depth = 0 } = {}) {
       principal: { kind: 'agent', id: 'functions:/agents/lead', on_behalf_of: 'user-1' },
       state: { status: 'running', activity: { activity: 'operating', op: { op_id: `${PARENT}/op/1`, input: { tool: '/x' } } } },
       children: [], mailbox: [], usage: {},
+      ...(parentExecutor ? { executor_config: parentExecutor } : {}),
     },
     projection: { items: [{ key: 't1', title: 'Review', status: 'in_progress' }] },
   };
@@ -95,6 +96,15 @@ export function childWorld({ leadProps = {}, depth = 0 } = {}) {
     parent().mailbox.push({ item: { mail_no: parent().mailbox.length + 1, kind: 'message', from_run: runId }, payload: message });
   };
   const running = (runId) => { runs[runId].status = 'running'; };
+  /** The child opens requests (core's `PendingRequest`s) and waits on them. */
+  const waitingOn = (runId, open) => {
+    runs[runId].status = 'waiting';
+    runs[runId].run.state = { status: 'waiting', open };
+  };
+  const paused = (runId, reason = { kind: 'budget', which: 'max_model_calls' }) => {
+    runs[runId].status = 'paused';
+    runs[runId].run.state = { status: 'paused', open: [], reason };
+  };
 
   f.put('ai', CHAT, { node_type: 'raisin:Conversation', properties: { agent_ref: '/agents/lead' } });
   f.put('ai', `${CHAT}/m1`, { node_type: 'raisin:Message', properties: { role: 'user', content: 'Review the docs and fix typos' } });
@@ -104,5 +114,21 @@ export function childWorld({ leadProps = {}, depth = 0 } = {}) {
   f.put('functions', '/lib/demo/write', { node_type: 'raisin:Function', name: 'write', properties: { name: 'write', description: 'Write', input_schema: { type: 'object', properties: { path: { type: 'string' } } } } });
   f.put('functions', '/lib/raisin/ai/spawn-agent', { node_type: 'raisin:Function', name: 'spawn-agent', properties: { name: 'spawn-agent', description: 'Spawn', input_schema: { type: 'object', properties: { objective: { type: 'object' } } } } });
 
-  return { f, runs, spawns, childControls, at, finish, post, running, isTerminal: (id) => TERMINAL.has(runs[id].status) };
+  // A configured agent of its own: a mode that needs a person's approval,
+  // its own budgets and working roots (the shape of Studio's Builder).
+  f.put('functions', '/agents/builder', {
+    node_type: 'raisin:AIAgent',
+    properties: {
+      title: 'Builder', tools: ['/lib/demo/search', '/lib/demo/write'], execution_mode: 'approve_then_auto',
+      run_reducer: '/lib/demo/builder-run-step',
+      run_config: { prior_run_tool_result_chars: 400 },
+      run_budgets: { max_model_calls: 40, max_operations: 240, max_consecutive_op_failures: 6, max_total_tokens: 300000, on_exceeded: 'pause' },
+      node_dev: { roots: [
+        { workspace: 'automations', path: '/', ops: ['read', 'create', 'update', 'delete'] },
+        { workspace: 'tags', path: '/', ops: ['read'] },
+      ] },
+    },
+  });
+
+  return { f, runs, spawns, childControls, at, finish, post, running, waitingOn, paused, isTerminal: (id) => TERMINAL.has(runs[id].status) };
 }

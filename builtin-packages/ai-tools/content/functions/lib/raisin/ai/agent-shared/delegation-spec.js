@@ -188,18 +188,223 @@ export function normalizeExpected(raw) {
   }));
 }
 
-/** A child's budgets: requested values clamped to the ceiling, `fail` on overrun (core's `on_exceeded`). */
-export function childBudgets(raw) {
-  const b = { ...DEFAULT_CHILD_BUDGETS };
-  const src = raw && typeof raw === 'object' ? raw : {};
-  if (src.max_wall_s !== undefined) b.max_wall_ms = Number(src.max_wall_s) * 1000;
+/**
+ * The budgets a CONFIGURED agent runs with at top level when its
+ * `run_budgets` leave a limit out (run-entry.js `DEFAULT_RUN_BUDGETS`).
+ */
+export const AGENT_RUN_DEFAULTS = Object.freeze({
+  max_model_calls: 60,
+  max_operations: 300,
+  max_consecutive_op_failures: 8,
+  max_wall_ms: 60 * 60 * 1000,
+});
+
+const ON_EXCEEDED = new Set(['pause', 'fail']);
+
+/**
+ * A child's budgets (core's `on_exceeded` travels inside).
+ *
+ * Without `own` (an agent that declares no `run_budgets`, or a copy of the
+ * calling agent): small defaults, the requested values clamped to the engine
+ * ceiling, and an overrun FAILS.
+ *
+ * With `own` (the child agent's `run_budgets`): the child starts from the
+ * budgets it runs with at top level, a requested value may LOWER a limit the
+ * agent declares but never raise it, nothing exceeds the engine ceiling, and
+ * `on_exceeded` is the agent's own (`fail` may still be requested; `pause`
+ * cannot be, since a paused child holds its parent's wait).
+ */
+export function childBudgets(raw, own = null) {
+  const cfg = own && typeof own === 'object' && !Array.isArray(own) ? own : null;
+  const b = cfg ? { ...AGENT_RUN_DEFAULTS } : { ...DEFAULT_CHILD_BUDGETS };
+  delete b.on_exceeded;
+  const declared = new Set();
+  if (cfg) {
+    const ownSrc = { ...cfg };
+    if (ownSrc.max_wall_s !== undefined && ownSrc.max_wall_ms === undefined) ownSrc.max_wall_ms = Number(ownSrc.max_wall_s) * 1000;
+    for (const k of Object.keys(BUDGET_CEILING)) {
+      if (ownSrc[k] === undefined || ownSrc[k] === null) continue;
+      b[k] = int(ownSrc[k], 1, BUDGET_CEILING[k], b[k]);
+      declared.add(k);
+    }
+  }
+  const src = raw && typeof raw === 'object' ? { ...raw } : {};
+  if (src.max_wall_s !== undefined) src.max_wall_ms = Number(src.max_wall_s) * 1000;
   for (const k of Object.keys(BUDGET_CEILING)) {
     const v = src[k] !== undefined ? src[k] : b[k];
     if (v === undefined) continue;
-    b[k] = int(v, 1, BUDGET_CEILING[k], b[k]);
+    const n = int(v, 1, BUDGET_CEILING[k], b[k]);
+    b[k] = declared.has(k) ? Math.min(n, b[k]) : n;
   }
-  b.on_exceeded = 'fail';
+  const ownPolicy = cfg && ON_EXCEEDED.has(cfg.on_exceeded) ? cfg.on_exceeded : 'fail';
+  b.on_exceeded = src.on_exceeded === 'fail' ? 'fail' : ownPolicy;
   return b;
+}
+
+// ── The child's write grant (core: `executor_config.node_dev.roots`) ─────────
+
+const OPS = Object.freeze(['read', 'create', 'update', 'delete', 'move', 'copy']);
+
+function normPath(p) {
+  const s = str(p) || '/';
+  const t = s.length > 1 ? s.replace(/\/+$/, '') : s;
+  return t.startsWith('/') ? t : `/${t}`;
+}
+
+function within(path, root) {
+  return root === '/' || path === root || path.startsWith(`${root}/`);
+}
+
+/** Ops both roots allow (`undefined` = every op). */
+function opsBoth(a, b) {
+  if (!Array.isArray(a) && !Array.isArray(b)) return undefined;
+  const x = Array.isArray(a) ? a : OPS;
+  const y = Array.isArray(b) ? b : OPS;
+  return OPS.filter((o) => x.includes(o) && y.includes(o));
+}
+
+/** An agent's `node_dev.roots`, cleaned (`null` when it declares none). */
+export function agentRoots(agentProps) {
+  const roots = agentProps && agentProps.node_dev && agentProps.node_dev.roots;
+  if (!Array.isArray(roots)) return null;
+  const clean = roots
+    .filter((r) => r && typeof r === 'object' && str(r.workspace))
+    .map((r) => ({
+      workspace: str(r.workspace),
+      path: normPath(r.path),
+      ...(Array.isArray(r.ops) ? { ops: OPS.filter((o) => r.ops.includes(o)) } : {}),
+    }));
+  return clean.length ? clean : null;
+}
+
+/**
+ * The part of roots `a` that roots `b` also cover: the deeper of two nested
+ * paths, with the ops both allow. A pair that shares no ops is dropped.
+ */
+export function intersectRoots(a, b) {
+  const out = [];
+  const seen = new Set();
+  for (const x of a || []) {
+    for (const y of b || []) {
+      if (x.workspace !== y.workspace) continue;
+      const xp = normPath(x.path);
+      const yp = normPath(y.path);
+      let path = null;
+      if (within(xp, yp)) path = xp;
+      else if (within(yp, xp)) path = yp;
+      if (!path) continue;
+      const ops = opsBoth(x.ops, y.ops);
+      if (Array.isArray(ops) && !ops.length) continue;
+      const root = { workspace: x.workspace, path, ...(ops ? { ops } : {}) };
+      const id = JSON.stringify(root);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(root);
+    }
+  }
+  return out;
+}
+
+/**
+ * The write grant of a child of a CONFIGURED agent that declares
+ * `node_dev.roots`: its own roots, narrowed by the parent's grant (when the
+ * parent has one) and by the model's `writes` (when given). Outside the
+ * requested writes the child keeps READ access to its own roots, so it can
+ * still look around the way it does at top level; `writes: []` makes every
+ * root read-only. Never wider than the agent's own configuration.
+ *
+ * Returns `{ roots, write_scope }` (`write_scope` only when `writes` was
+ * given: the subtrees the child may change). Throws when nothing is left: core reads
+ * an empty grant as NO grant (unconfined), so an empty result is refused
+ * here instead of being handed on.
+ */
+export function childGrant({ own, parent = null, writes = null }) {
+  let base = own;
+  if (Array.isArray(parent) && parent.length) {
+    base = intersectRoots(own, parent.map((r) => ({ ...r, path: normPath(r.path) })));
+    if (!base.length) {
+      throw Object.assign(new Error(`The delegating run may not grant this agent any of its working roots (${own.map((r) => `${r.workspace}:${r.path}`).join(', ')}).`), { error_class: 'permission_denied' });
+    }
+  }
+  if (!Array.isArray(writes)) {
+    return { roots: base, write_scope: null };
+  }
+  const writable = writes.length ? intersectRoots(base, writes.map((w) => ({ workspace: w.workspace, path: normPath(w.path) }))) : [];
+  if (writes.length && !writable.some((r) => !Array.isArray(r.ops) || r.ops.some((o) => o !== 'read'))) {
+    throw invalid(`writes lie outside what this agent may write: ${base.map((r) => `${r.workspace}:${r.path}`).join(', ')}.`);
+  }
+  const readOnly = base
+    .map((r) => ({ ...r, ops: opsBoth(r.ops, ['read']) }))
+    .filter((r) => r.ops.length);
+  const roots = [...writable, ...readOnly.filter((r) => !writable.some((w) => JSON.stringify(w) === JSON.stringify(r)))];
+  if (!roots.length) {
+    throw Object.assign(new Error('This agent has no root it may read; it cannot run as a read-only child.'), { error_class: 'permission_denied' });
+  }
+  return { roots, write_scope: writable.map((r) => ({ workspace: r.workspace, path: r.path })) };
+}
+
+// ── What a child asks for ────────────────────────────────────────────────────
+
+const clip = (v, n) => (typeof v === 'string' ? v.slice(0, n) : v);
+
+/**
+ * The open requests of a child's run record (core's `PendingRequest`s, in
+ * every state that can hold them), as a parent reads them. `needs_person`
+ * marks what only a person can answer (an approval, a question).
+ */
+export function openRequestsOf(rec) {
+  const st = (rec && rec.state) || {};
+  const open = Array.isArray(st.open) ? st.open
+    : st.activity && Array.isArray(st.activity.open) ? st.activity.open : [];
+  return open.slice(0, 10).map((r) => {
+    const k = (r && r.kind) || {};
+    const base = { request_id: r.request_id, kind: k.kind || 'unknown', ...(r.expires_at_ms ? { expires_at_ms: r.expires_at_ms } : {}) };
+    switch (k.kind) {
+      case 'approval':
+        return {
+          ...base, needs_person: true, summary: clip(k.summary, 2000),
+          ...(k.scope ? { scope: k.scope } : {}),
+          subject_digest: k.subject_digest,
+          ...(k.changes !== undefined && k.changes !== null ? { changes: boundedJson(k.changes, 4000) } : {}),
+        };
+      case 'input':
+        return {
+          ...base, needs_person: true, prompt: clip(k.prompt, 2000),
+          ...(Array.isArray(k.choices) ? { choices: k.choices.slice(0, 20) } : {}),
+          ...(k.schema ? { schema: boundedJson(k.schema, 2000) } : {}),
+        };
+      case 'external':
+        return { ...base, needs_person: false, ...(k.tool ? { tool: k.tool } : {}) };
+      case 'child':
+        return { ...base, needs_person: false, child_run_id: k.child_run_id };
+      default:
+        return base;
+    }
+  });
+}
+
+function boundedJson(v, n) {
+  let text;
+  try { text = JSON.stringify(v); } catch (_) { return null; }
+  return text && text.length > n ? { truncated: true, preview: text.slice(0, n) } : v;
+}
+
+/** A child that cannot move on without someone: a request only a person answers, or a pause. */
+export function childBlocked(child) {
+  return !childDone(child) && (child.status === 'paused'
+    || (Array.isArray(child.waiting_for) && child.waiting_for.some((r) => r.needs_person)));
+}
+
+/** One line a parent can relay: what the child waits for. */
+export function attentionLine(child) {
+  const who = child.key || child.run_id;
+  if (child.status === 'paused') {
+    return `Child ${who} is paused${child.paused_reason ? ` (${JSON.stringify(child.paused_reason)})` : ''}; message-agent resumes it.`;
+  }
+  const asks = (child.waiting_for || []).filter((r) => r.needs_person).map((r) => (r.kind === 'approval'
+    ? `approval of: ${r.summary || 'a change'}`
+    : `an answer to: ${r.prompt}${Array.isArray(r.choices) && r.choices.length ? ` (choices: ${r.choices.map((c) => (typeof c === 'string' ? c : (c && (c.label || c.value)) || JSON.stringify(c))).join(', ')})` : ''}`));
+  return `Child ${who} is waiting for ${asks.join('; ')}.`;
 }
 
 /**
@@ -230,6 +435,7 @@ export function normalizeSpawn(args) {
     expected_artifacts: normalizeExpected(a.expected_artifacts),
     checks: normalizeChecks(a.checks),
     budget: childBudgets(a.budget),
+    budget_request: a.budget && typeof a.budget === 'object' ? a.budget : null,
     independent: a.independent === true,
   };
 }

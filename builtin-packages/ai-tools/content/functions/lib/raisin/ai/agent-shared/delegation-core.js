@@ -18,6 +18,7 @@
 import { requireRunOperation } from './run-caller.js';
 import {
   TERMINAL_STATUSES, childDone, acceptance, acceptanceReads, specOfObjective, agentPath, taskKey,
+  openRequestsOf, childBlocked, attentionLine,
 } from './delegation-spec.js';
 
 export const AI_WS = 'ai';
@@ -100,6 +101,20 @@ export async function childSnapshot(parent, view, { events = false } = {}) {
     usage: view.usage || (insp && insp.usage) || null,
   };
   if (outcome && outcome.code) snap.failure_code = outcome.code;
+  // The proof the child handed back with its outcome (core: `detail.evidence`).
+  if (Array.isArray(detail.evidence) && detail.evidence.length) snap.evidence = detail.evidence.slice(0, 20);
+  // What the child is asking for: a request only a person can answer (an
+  // approval, a question) leaves it waiting, and a parent that parks on its
+  // hand-back would wait with it. The parent sees it here and relays it.
+  if (!childDone(snap)) {
+    const open = openRequestsOf(rec);
+    if (open.length) snap.waiting_for = open;
+    if (status === 'paused' && rec.state && rec.state.reason) snap.paused_reason = rec.state.reason;
+    const items = insp && insp.run && insp.run.projection && Array.isArray(insp.run.projection.items)
+      ? insp.run.projection.items : [];
+    if (items.length) snap.progress = items.slice(0, 20).map((i) => ({ title: i.title, status: i.status }));
+    if (childBlocked(snap)) snap.attention = attentionLine(snap);
+  }
   if (events && insp && Array.isArray(insp.events)) {
     snap.recent_events = insp.events.slice(-15).map((e) => ({ seq: e.seq, type: e.kind && e.kind.type }));
   }
