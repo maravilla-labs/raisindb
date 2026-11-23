@@ -292,6 +292,9 @@ impl GroqProvider {
             tool_choice,
             response_format,
             stream: if stream { Some(true) } else { None },
+            stream_options: stream.then_some(GroqStreamOptions {
+                include_usage: true,
+            }),
         }
     }
 

@@ -155,11 +155,37 @@ impl ModelTurnExecutor for FunctionModelTurnExecutor {
             "agent_ref": ctx.agent_ref, "subject": ctx.subject,
             "executor_config": ctx.executor_config, "request": request,
         });
-        match self.caller.call(ctx, auth, &path, input).await {
-            Ok(output) => model_turn_result(output),
+        // The runtime also records every completion the function makes, from
+        // the provider's own response. That is the fallback when the
+        // function's reported usage is missing or zero, so a turn the model
+        // was paid for is never metered as free.
+        let tracked = raisin_storage::jobs::ai_usage::track(&execution_id(ctx));
+        let called = self.caller.call(ctx, auth, &path, input).await;
+        let measured = tracked.take();
+        match called {
+            Ok(output) => with_measured_usage(model_turn_result(output), &measured),
             Err(message) => failed(OpOutcome::Retryable, "provider", message),
         }
     }
+}
+
+/// `result` with the runtime-measured usage when the function reported none.
+fn with_measured_usage(
+    mut result: OperationResult,
+    measured: &raisin_storage::jobs::ai_usage::UsageTotals,
+) -> OperationResult {
+    let reported = result
+        .usage
+        .as_ref()
+        .map(|u| u.input_tokens + u.output_tokens)
+        .unwrap_or(0);
+    if reported == 0 && measured.total_tokens() > 0 {
+        result.usage = Some(OpUsage {
+            input_tokens: measured.input_tokens(),
+            output_tokens: measured.output_tokens(),
+        });
+    }
+    result
 }
 
 /// Normalize a model-turn function's output into an operation result.
@@ -498,6 +524,44 @@ async fn write_tool_usage(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod model_turn_usage_tests {
+    use super::*;
+    use raisin_storage::jobs::ai_usage::{ModelCall, UsageTotals};
+
+    fn measured(i: u64, o: u64) -> UsageTotals {
+        UsageTotals {
+            calls: vec![ModelCall {
+                model: "m".into(),
+                input_tokens: i,
+                output_tokens: o,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_turn_reported_as_zero_tokens_takes_the_measured_usage() {
+        let r = model_turn_result(json!({ "usage": { "input_tokens": 0, "output_tokens": 0 } }));
+        let u = with_measured_usage(r, &measured(1200, 80)).usage.unwrap();
+        assert_eq!((u.input_tokens, u.output_tokens), (1200, 80));
+    }
+
+    #[test]
+    fn a_reported_usage_wins_over_the_measured_one() {
+        let r = model_turn_result(json!({ "usage": { "input_tokens": 10, "output_tokens": 2 } }));
+        let u = with_measured_usage(r, &measured(1200, 80)).usage.unwrap();
+        assert_eq!((u.input_tokens, u.output_tokens), (10, 2));
+    }
+
+    #[test]
+    fn a_failed_turn_gets_no_usage_invented() {
+        let r = model_turn_result(json!({ "error_class": "provider", "retryable": true }));
+        assert!(with_measured_usage(r, &UsageTotals::default())
+            .usage
+            .is_none());
+    }
 }
 
 /// A tool's own model usage, recorded against a real RocksDB conversation.

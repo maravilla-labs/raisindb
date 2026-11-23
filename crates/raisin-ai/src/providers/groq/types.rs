@@ -21,6 +21,18 @@ pub(super) struct GroqChatRequest {
     /// Whether to stream the response
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// Streaming only: ask for the token usage on the final chunk. OpenAI and
+    /// the gateways that follow it (the custom provider) send none on a stream
+    /// unless asked, so every streamed turn was metered as zero tokens and a
+    /// run's token budget counted nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<GroqStreamOptions>,
+}
+
+/// `stream_options` of an OpenAI-shaped streaming request.
+#[derive(Debug, Serialize)]
+pub(super) struct GroqStreamOptions {
+    pub include_usage: bool,
 }
 
 /// Response format for Groq (OpenAI-compatible json_object mode)

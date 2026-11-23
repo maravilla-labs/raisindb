@@ -978,3 +978,18 @@ fn a_js_message_with_an_image_part_reaches_the_wire_as_a_data_url() {
         "data:image/png;base64,QUJD"
     );
 }
+
+/// A streamed request asks for usage (`stream_options.include_usage`), or an
+/// OpenAI-shaped gateway sends none and the turn is metered as zero tokens; a
+/// non-streamed request carries no `stream_options` (some servers refuse it
+/// there).
+#[test]
+fn a_streamed_request_asks_for_usage() {
+    let request = CompletionRequest::new("m".to_string(), vec![Message::user("hi")]);
+    let streamed = serde_json::to_value(GroqProvider::build_chat_request(&request, true)).unwrap();
+    assert_eq!(streamed["stream"], true);
+    assert_eq!(streamed["stream_options"]["include_usage"], true);
+    let plain = serde_json::to_value(GroqProvider::build_chat_request(&request, false)).unwrap();
+    assert!(plain.get("stream_options").is_none());
+    assert!(plain.get("stream").is_none());
+}
