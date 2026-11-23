@@ -17,22 +17,17 @@
 //! provider request keeps running, and keeps being paid for, after the person
 //! pressed stop. The caller that owns the cancellation (the run's operation
 //! executor) [`register`]s its token under the execution id the SERVER minted;
-//! the runtime picks it up for that execution ([`scope`]) and every host call
-//! made inside reads it back ([`current`]) and gives up when it fires.
+//! the runtime looks it up for that execution ([`token_for`]) and hands it to
+//! its host gateway, whose every call gives up when it fires.
 //!
 //! Same shape and same reason for living here as [`super::ai_usage`]: both the
 //! runtime and the run executor depend on this crate, not on each other.
 
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
 static TOKENS: Lazy<DashMap<String, CancellationToken>> = Lazy::new(DashMap::new);
-
-tokio::task_local! {
-    static CURRENT: CancellationToken;
-}
 
 /// Make `token` the cancellation of execution `execution_id` until the guard
 /// drops. An id already registered is not taken over.
@@ -55,21 +50,6 @@ pub fn token_for(execution_id: &str) -> Option<CancellationToken> {
     TOKENS.get(execution_id).map(|t| t.clone())
 }
 
-/// Run `fut` with `execution_id`'s token (if one is registered) as the
-/// [`current`] one.
-pub async fn scope<F: Future>(execution_id: &str, fut: F) -> F::Output {
-    match token_for(execution_id) {
-        Some(token) => CURRENT.scope(token, fut).await,
-        None => fut.await,
-    }
-}
-
-/// The cancellation of the execution being polled, if it has one. Readable
-/// from synchronous code called during that poll (a host call).
-pub fn current() -> Option<CancellationToken> {
-    CURRENT.try_with(|t| t.clone()).ok()
-}
-
 /// The handle on one registration. Dropping it removes the registration.
 #[derive(Debug)]
 pub struct Registered {
@@ -89,15 +69,13 @@ impl Drop for Registered {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn a_registered_token_is_current_inside_its_scope_only() {
+    #[test]
+    fn a_registered_token_is_found_until_its_guard_drops() {
         let token = CancellationToken::new();
         let guard = register("op-1#1", token.clone());
-        assert!(current().is_none());
-        let seen = scope("op-1#1", async { current() }).await;
         token.cancel();
-        assert!(seen.expect("current inside the scope").is_cancelled());
-        assert!(scope("other#1", async { current() }).await.is_none());
+        assert!(token_for("op-1#1").expect("registered").is_cancelled());
+        assert!(token_for("other#1").is_none());
         drop(guard);
         assert!(token_for("op-1#1").is_none());
     }

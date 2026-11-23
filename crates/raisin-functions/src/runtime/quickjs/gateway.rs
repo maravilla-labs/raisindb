@@ -23,70 +23,28 @@
 //! The gateway itself never throws for API failures — the JS wrapper applies
 //! each method's documented error convention (throw / null / [] / sentinel /
 //! returned error object) on top of this uniform envelope, so the public
-//! surface behavior is preserved exactly.
+//! surface behavior is preserved exactly. The envelope also carries
+//! `error_class` (see `runtime/host_gateway.rs`).
+//!
+//! Policy, deadline, a stop and tracing are the shared [`HostGateway`]'s;
+//! this file only crosses the JavaScript boundary and blocks the
+//! interpreter's thread on the call.
 
 use rquickjs::{Ctx, Function};
-use std::sync::Arc;
 
-use super::helpers::run_async_blocking_until;
-use crate::api::FunctionApi;
-use crate::runtime::bindings::methods::registry;
-
-/// Serialize an error message into the gateway's error envelope.
-fn error_envelope(message: impl std::fmt::Display) -> String {
-    serde_json::to_string(&serde_json::json!({
-        "error": true,
-        "message": message.to_string(),
-    }))
-    .unwrap_or_else(|_| r#"{"error":true,"message":"Unknown error"}"#.to_string())
-}
+use crate::runtime::host_gateway::{call_blocking, HostGateway};
 
 /// Register the `__raisin_call` global used by `api_wrapper.js`.
 pub(super) fn register_registry_gateway<'js>(
     ctx: &Ctx<'js>,
-    api: Arc<dyn FunctionApi>,
-    allow: bool,
-    deadline: std::time::Instant,
+    gateway: HostGateway,
 ) -> std::result::Result<(), rquickjs::Error> {
     let call_fn = Function::new(
         ctx.clone(),
         move |method: String, args_json: String| -> String {
-            if !allow {
-                return error_envelope(format!(
-                    "{}: {method}",
-                    crate::types::ExecutionPolicy::HOST_DENIED
-                ));
-            }
-            let api = api.clone();
-
-            let Some(descriptor) = registry().find_by_internal_name(&method) else {
-                tracing::error!(method = %method, "__raisin_call: unknown method");
-                return error_envelope(format!("Unknown raisin API method: {}", method));
-            };
-
-            let args: Vec<serde_json::Value> = match serde_json::from_str(&args_json) {
-                Ok(serde_json::Value::Array(items)) => items,
-                Ok(other) => vec![other],
-                Err(e) => {
-                    tracing::error!(method = %method, error = %e, "__raisin_call: invalid arguments JSON");
-                    return error_envelope(format!("Invalid arguments for {}: {}", method, e));
-                }
-            };
-
-            let invoker = descriptor.invoker;
-            let result = run_async_blocking_until(
-                async move { (invoker)(api, args).await },
-                deadline,
-                &method,
-            )
-            .and_then(|r| r);
-
-            match result {
-                Ok(invoke_result) => invoke_result.to_json_string(),
-                Err(e) => {
-                    tracing::error!(method = %method, error = %e, "raisin API call failed");
-                    error_envelope(e)
-                }
+            match call_blocking(gateway.call_json(&method, &args_json)) {
+                Ok(json) => json,
+                Err(e) => e.envelope(),
             }
         },
     )?;
@@ -103,49 +61,40 @@ pub(super) fn register_registry_gateway<'js>(
 /// `__raisin_call` (`{"error":true,"message":...}` on failure).
 pub(super) fn register_plugin_gateway<'js>(
     ctx: &Ctx<'js>,
-    api: Arc<dyn FunctionApi>,
-    allow: bool,
-    deadline: std::time::Instant,
+    gateway: HostGateway,
 ) -> std::result::Result<(), rquickjs::Error> {
     let call_fn = Function::new(
         ctx.clone(),
         move |method: String, args_json: String| -> String {
-            if !allow {
-                return error_envelope(format!(
-                    "{}: {method}",
-                    crate::types::ExecutionPolicy::HOST_DENIED
-                ));
-            }
-            let api = api.clone();
-
             let args: serde_json::Value = match serde_json::from_str(&args_json) {
                 Ok(v) => v,
                 Err(e) => {
+                    // The policy answers first, as it always did.
+                    if let Err(denied) = gateway.check_allowed(&method) {
+                        return denied.envelope();
+                    }
                     tracing::error!(method = %method, error = %e, "__raisin_plugin_call: invalid arguments JSON");
-                    return error_envelope(format!("Invalid arguments for {}: {}", method, e));
+                    return legacy_envelope(format!("Invalid arguments for {}: {}", method, e));
                 }
             };
-
-            let what = method.clone();
-            let result = run_async_blocking_until(
-                async move { api.plugin_call(&method, args).await },
-                deadline,
-                &what,
-            )
-            .and_then(|r| r);
-
-            match result {
+            match call_blocking(gateway.plugin_call(&method, args)) {
                 Ok(value) => serde_json::to_string(&value).unwrap_or_else(|e| {
-                    error_envelope(format!("plugin result not serializable: {}", e))
+                    legacy_envelope(format!("plugin result not serializable: {}", e))
                 }),
-                Err(e) => {
-                    tracing::error!(error = %e, "plugin API call failed");
-                    error_envelope(e)
-                }
+                Err(e) => e.envelope(),
             }
         },
     )?;
 
     ctx.globals().set("__raisin_plugin_call", call_fn)?;
     Ok(())
+}
+
+/// The envelope for a failure that happens before the gateway is reached.
+fn legacy_envelope(message: impl std::fmt::Display) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "error": true,
+        "message": message.to_string(),
+    }))
+    .unwrap_or_else(|_| r#"{"error":true,"message":"Unknown error"}"#.to_string())
 }

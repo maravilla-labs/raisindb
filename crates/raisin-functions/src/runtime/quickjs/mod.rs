@@ -62,6 +62,7 @@ use std::time::Instant;
 use tracing::debug;
 
 use super::FUNCTION_EXECUTION_SEMAPHORE;
+use crate::runtime::host_gateway::HostGateway;
 use pool::{QuickJsPool, GLOBAL_QUICKJS_POOL};
 
 use crate::api::FunctionApi;
@@ -197,9 +198,18 @@ impl FunctionRuntime for QuickJsRuntime {
         let interrupt_deadline =
             Instant::now() + std::time::Duration::from_millis(timeout_ms.max(1));
         let interrupted = Arc::new(AtomicBool::new(false));
-        // A caller may cancel this execution (a stopped agent run): then the
-        // interpreter stops at the next bytecode, like a timeout.
-        let cancel = raisin_storage::jobs::execution_cancel::token_for(&execution_id);
+        // Every host call goes through the shared gateway, which carries this
+        // execution's deadline and, when a caller registered one, its
+        // cancellation (a stopped agent run). A cancelled execution also stops
+        // the interpreter at its next bytecode.
+        let gateway = HostGateway::for_execution(
+            api.clone(),
+            context.policy,
+            &execution_id,
+            interrupt_deadline,
+        );
+        let cancel = gateway.cancel_token().cloned();
+        let cancelled = cancel.clone();
         {
             let interrupted = interrupted.clone();
             runtime
@@ -274,7 +284,7 @@ impl FunctionRuntime for QuickJsRuntime {
                     api_clone.clone(),
                     log_emitter,
                     policy,
-                    interrupt_deadline,
+                    gateway.clone(),
                 ) {
                     // Extract the ACTUAL exception, exactly as the handler path
                     // does. `rquickjs` renders `Error::Exception` as the fixed
@@ -529,8 +539,7 @@ impl FunctionRuntime for QuickJsRuntime {
         // Apply timeout
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(timeout_ms),
-            // Host calls made during this execution see its cancellation.
-            raisin_storage::jobs::execution_cancel::scope(&execution_id, execution_future),
+            execution_future,
         )
         .await;
 
@@ -583,6 +592,17 @@ impl FunctionRuntime for QuickJsRuntime {
                 // If the engine-level interrupt fired, the underlying error is
                 // an opaque "interrupted" exception — report it as the timeout
                 // it actually is.
+                if interrupted.load(Ordering::Relaxed)
+                    && cancelled.as_ref().is_some_and(|c| c.is_cancelled())
+                {
+                    // Stopped by its caller, not out of time.
+                    return Ok(ExecutionResult::failure(
+                        execution_id,
+                        ExecutionError::runtime("execution cancelled"),
+                        stats,
+                    )
+                    .with_logs(captured_logs));
+                }
                 if interrupted.load(Ordering::Relaxed) {
                     tracing::debug!(
                         execution_id = %execution_id,

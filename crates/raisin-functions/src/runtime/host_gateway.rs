@@ -28,9 +28,10 @@
 //! was making) and the caller gets a [`HostError`] of class
 //! [`HostErrorClass::Timeout`] or [`HostErrorClass::Cancelled`].
 //!
-//! Error MESSAGES are exactly what each runtime reported before, so code that
-//! matches on them keeps working; the CLASS is new and travels beside the
-//! message (`error_class` in the JSON envelope).
+//! Error MESSAGES are exactly what each runtime reported before (a timeout or
+//! a stop reads as QuickJS always reported it, `Internal error: …`), so code
+//! that matches on them keeps working; the CLASS is new and travels beside
+//! the message (`error_class` in the JSON envelope).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -163,6 +164,11 @@ impl HostGateway {
         &self.api
     }
 
+    /// The execution's deadline, if it has one.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
     /// The execution's cancellation, if it has one.
     pub fn cancel_token(&self) -> Option<&CancellationToken> {
         self.cancel.as_ref()
@@ -263,13 +269,13 @@ impl HostGateway {
         let timed_out = || {
             HostError::new(
                 HostErrorClass::Timeout,
-                format!("function timed out during host call `{what}`"),
+                format!("Internal error: function timed out during host call `{what}`"),
             )
         };
         let cancelled = || {
             HostError::new(
                 HostErrorClass::Cancelled,
-                format!("execution cancelled during host call `{what}`"),
+                format!("Internal error: execution cancelled during host call `{what}`"),
             )
         };
         if self.is_cancelled() {
@@ -349,7 +355,7 @@ mod tests {
         assert_eq!(e.class, HostErrorClass::Timeout);
         assert_eq!(
             e.message,
-            "function timed out during host call `ai_completion`"
+            "Internal error: function timed out during host call `ai_completion`"
         );
 
         let token = CancellationToken::new();
@@ -367,7 +373,7 @@ mod tests {
         assert_eq!(e.class, HostErrorClass::Cancelled);
         assert_eq!(
             e.message,
-            "execution cancelled during host call `ai_completion`"
+            "Internal error: execution cancelled during host call `ai_completion`"
         );
     }
 }
