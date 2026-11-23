@@ -16,8 +16,7 @@ use std::sync::Arc;
 use wasmtime::component::{HasData, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
-use crate::api::FunctionApi;
-use crate::runtime::bindings::methods::registry;
+use crate::runtime::host_gateway::HostGateway;
 use crate::types::{LogEntry, LogLevel};
 
 wasmtime::component::bindgen!({
@@ -42,8 +41,9 @@ pub const HOST_ABI_VERSION: &str = "0.1.0";
 /// end of it — see the isolation notes in `runtime_impl.rs`. Nothing here is
 /// shared with another tenant.
 pub struct HostState {
-    /// The API the gateway dispatches into, already scoped to this tenant.
-    pub api: Arc<dyn FunctionApi>,
+    /// The execution's host gateway: the API (already scoped to this tenant),
+    /// the policy, the deadline and the stop. See `runtime/host_gateway.rs`.
+    pub gateway: HostGateway,
     /// Logs collected from the `log` import; drained out of the store at the end.
     pub logs: Vec<LogEntry>,
     /// Real-time SSE emitter, when the caller is streaming.
@@ -57,18 +57,6 @@ pub struct HostState {
     pub wasi: WasiCtx,
     /// Resource handles the guest holds (streams, mainly).
     pub table: ResourceTable,
-    /// Whether `host.call` may reach the API at all.
-    pub policy: HostPolicy,
-}
-
-/// What the generic gateway allows for one execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostPolicy {
-    /// An ordinary function: every registered `raisin.*` method.
-    Allow,
-    /// A PURE caller — an AgentRun domain reducer. Every `host.call` is an
-    /// `Err`, so purity is enforced at runtime, not only by convention.
-    DenyAll,
 }
 
 impl HostState {
@@ -110,7 +98,7 @@ impl HostState {
             .map(|p| p.name)
             .collect();
         route_plugin_call(
-            &*self.api,
+            &self.gateway,
             &method,
             &args,
             &crate::plugin::registered_plugin_methods(),
@@ -128,7 +116,7 @@ impl HostState {
 /// branch behaves the same in both runtimes. `methods`/`plugins` are the
 /// registry's view (`crate::plugin`), passed in so the routing is testable.
 pub(crate) async fn route_plugin_call(
-    api: &dyn FunctionApi,
+    gateway: &HostGateway,
     method: &str,
     args: &str,
     methods: &[String],
@@ -158,13 +146,10 @@ pub(crate) async fn route_plugin_call(
             return Err(format!("Invalid arguments for {}: {}", method, e));
         }
     };
-    match api.plugin_call(method, args).await {
+    match gateway.plugin_call(method, args).await {
         Ok(value) => serde_json::to_string(&value)
             .map_err(|e| format!("plugin result not serializable: {}", e)),
-        Err(e) => {
-            tracing::error!(method = %method, error = %e, "plugin API call failed");
-            Err(e.to_string())
-        }
+        Err(e) => Err(e.message),
     }
 }
 
@@ -172,7 +157,12 @@ pub(crate) async fn route_plugin_call(
 mod plugin_route_tests {
     use super::*;
     use crate::api::MockFunctionApi;
+    use crate::types::ExecutionPolicy;
     use serde_json::{json, Value};
+
+    fn gateway(api: &Arc<MockFunctionApi>) -> HostGateway {
+        HostGateway::new(api.clone(), ExecutionPolicy::Standard)
+    }
 
     fn media() -> Vec<String> {
         vec![
@@ -184,9 +174,9 @@ mod plugin_route_tests {
 
     #[tokio::test]
     async fn a_plugin_method_reaches_plugin_call_with_the_argument_array() {
-        let api = MockFunctionApi::new(json!({}));
+        let api = Arc::new(MockFunctionApi::new(json!({})));
         let out = route_plugin_call(
-            &api,
+            &gateway(&api),
             "media.browser.extractHtml",
             r#"[{"path":"/x"}]"#,
             &media(),
@@ -207,8 +197,8 @@ mod plugin_route_tests {
 
     #[tokio::test]
     async fn an_absent_optional_namespace_soft_fails_like_the_js_stub() {
-        let api = MockFunctionApi::new(json!({}));
-        let out = route_plugin_call(&api, "media.browser.extractHtml", "[]", &[], &[])
+        let api = Arc::new(MockFunctionApi::new(json!({})));
+        let out = route_plugin_call(&gateway(&api), "media.browser.extractHtml", "[]", &[], &[])
             .await
             .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -221,9 +211,9 @@ mod plugin_route_tests {
 
     #[tokio::test]
     async fn a_typo_in_a_loaded_namespace_and_a_foreign_name_are_errors() {
-        let api = MockFunctionApi::new(json!({}));
+        let api = Arc::new(MockFunctionApi::new(json!({})));
         for m in ["media.browser.extractHTML", "nosuch.thing"] {
-            let e = route_plugin_call(&api, m, "[]", &media(), &["media".into()])
+            let e = route_plugin_call(&gateway(&api), m, "[]", &media(), &["media".into()])
                 .await
                 .unwrap_err();
             assert_eq!(e, format!("Unknown raisin API method: {m}"));
@@ -232,10 +222,16 @@ mod plugin_route_tests {
 
     #[tokio::test]
     async fn the_capability_probe_lists_plugins_and_methods() {
-        let api = MockFunctionApi::new(json!({}));
-        let out = route_plugin_call(&api, CAPABILITIES_METHOD, "[]", &media(), &["media".into()])
-            .await
-            .unwrap();
+        let api = Arc::new(MockFunctionApi::new(json!({})));
+        let out = route_plugin_call(
+            &gateway(&api),
+            CAPABILITIES_METHOD,
+            "[]",
+            &media(),
+            &["media".into()],
+        )
+        .await
+        .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["plugins"], json!(["media"]));
         assert_eq!(v["methods"].as_array().unwrap().len(), 3);
@@ -247,35 +243,19 @@ impl host::Host for HostState {
     /// an unknown method, bad arguments and an API failure are all `Err`
     /// values the guest can see and handle. Only a host bug traps.
     async fn call(&mut self, method: String, args: String) -> Result<String, String> {
-        if self.policy == HostPolicy::DenyAll {
-            return Err(format!(
-                "{}: {method}",
-                crate::types::ExecutionPolicy::HOST_DENIED
-            ));
-        }
-        let Some(descriptor) = registry().find_by_internal_name(&method) else {
+        // The policy answers first, for registry and plugin methods alike.
+        self.gateway.check_allowed(&method).map_err(|e| e.message)?;
+        if !HostGateway::is_registry_method(&method) {
             // Not a registry method: a plugin binding (`media.*`), the capability
             // probe, or unknown - exactly what a JavaScript function can reach.
             return self.plugin_call(method, args).await;
-        };
-
-        let args: Vec<serde_json::Value> = match serde_json::from_str(&args) {
-            Ok(serde_json::Value::Array(items)) => items,
-            Ok(other) => vec![other],
-            Err(e) => {
-                tracing::error!(method = %method, error = %e, "wasm host call: invalid arguments JSON");
-                return Err(format!("Invalid arguments for {}: {}", method, e));
-            }
-        };
-
-        let invoker = descriptor.invoker;
-        match (invoker)(self.api.clone(), args).await {
-            Ok(result) => Ok(result.to_json_string()),
-            Err(e) => {
-                tracing::error!(method = %method, error = %e, "raisin API call failed");
-                Err(e.to_string())
-            }
         }
+        // Host imports are genuinely async: the gateway's call is awaited, so
+        // its deadline and stop apply with no thread blocked.
+        self.gateway
+            .call_json(&method, &args)
+            .await
+            .map_err(|e| e.message)
     }
 
     async fn log(&mut self, level: host::LogLevel, message: String) {

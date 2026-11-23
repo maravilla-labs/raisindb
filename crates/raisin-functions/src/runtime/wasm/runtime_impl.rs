@@ -53,6 +53,7 @@ use super::config::config;
 use super::engine::engine;
 use super::errors::{classify_trap, invalid_output, outer_timeout};
 use super::limits::FunctionLimiter;
+use crate::runtime::host_gateway::HostGateway;
 
 /// Grace period on top of the function's timeout for the outer wall clock.
 /// Epoch interruption only cuts off GUEST code; a host call awaiting I/O is
@@ -150,17 +151,26 @@ impl FunctionRuntime for WasmRuntime {
             super::purity::pure_wasi()
         };
 
+        // Every host call goes through the shared gateway: this execution's
+        // policy, its deadline and, when a caller registered one, its
+        // cancellation (a stopped agent run).
+        let gateway = HostGateway::for_execution(
+            api.clone(),
+            context.policy,
+            &execution_id,
+            std::time::Instant::now() + Duration::from_millis(limits.timeout_ms.max(1)),
+        );
+
         let mut store = Store::new(
             engine()?,
             HostState {
-                api,
+                gateway: gateway.clone(),
                 logs: Vec::new(),
                 log_emitter: context.log_emitter.clone(),
                 context_json,
                 limiter: FunctionLimiter::new(limits.max_memory_bytes as usize),
                 wasi,
                 table: ResourceTable::new(),
-                policy: super::purity::host_policy(context.policy),
             },
         );
         store.limiter(|state| &mut state.limiter);
@@ -178,7 +188,30 @@ impl FunctionRuntime for WasmRuntime {
                 .call_handler(&mut store, entrypoint, &input_json)
                 .await
         };
-        let outcome = tokio::time::timeout(deadline, call).await;
+        // A stop ends the execution even while the guest computes: the host
+        // calls see it through the gateway, and this drops the whole call.
+        let stop = async {
+            match gateway.cancel_token() {
+                Some(c) => c.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let outcome = tokio::select! {
+            r = tokio::time::timeout(deadline, call) => Some(r),
+            _ = stop => None,
+        };
+        let Some(outcome) = outcome else {
+            let stats = ExecutionStats {
+                duration_ms: start.elapsed().as_millis() as u64,
+                memory_used_bytes: store.data().limiter.peak_memory() as u64,
+                ..Default::default()
+            };
+            return Ok(ExecutionResult::failure(
+                execution_id,
+                crate::types::ExecutionError::runtime("execution cancelled"),
+                stats,
+            ));
+        };
 
         let stats = ExecutionStats {
             duration_ms: start.elapsed().as_millis() as u64,

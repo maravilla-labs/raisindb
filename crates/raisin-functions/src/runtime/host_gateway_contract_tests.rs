@@ -181,5 +181,5 @@ contract!(Starlark, starlark_deadline, starlark_stop, starlark_pure);
 #[cfg(feature = "wasm")]
 mod wasm_contract {
     use super::*;
-    contract!(Wasm, wasm_deadline, wasm_stop, wasm_pure, #[ignore = "lands with the WASM step"]);
+    contract!(Wasm, wasm_deadline, wasm_stop, wasm_pure);
 }

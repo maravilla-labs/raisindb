@@ -8,21 +8,17 @@
 //! The policy itself is generic (QuickJS and Starlark enforce it too); this is
 //! the component model's implementation of it:
 //!
-//! - every `host.call` answers `Err` ([`HostPolicy::DenyAll`]);
+//! - every `host.call` answers `Err` (the shared host gateway refuses it);
 //! - WASI's clocks are frozen at zero and its random sources are a fixed byte
 //!   cycle, so neither time nor entropy can make two calls on the same input
 //!   differ (guest hash maps seed from `wasi:random` too);
 //! - no args, env, preopens or captured output.
 //!
 //! [`ExecutionPolicy::Deterministic`]: crate::types::ExecutionPolicy::Deterministic
-//! [`HostPolicy::DenyAll`]: super::bindings::HostPolicy::DenyAll
 
 use std::time::Duration;
 
 use wasmtime_wasi::{Deterministic, HostMonotonicClock, HostWallClock, WasiCtxBuilder};
-
-use super::bindings::HostPolicy;
-use crate::types::ExecutionPolicy;
 
 /// A clock that never moves: a deterministic call must not observe time.
 struct FrozenClock;
@@ -56,13 +52,4 @@ pub(super) fn pure_wasi() -> wasmtime_wasi::WasiCtx {
         .insecure_random(Deterministic::new(BYTES.to_vec()))
         .insecure_random_seed(0)
         .build()
-}
-
-/// The host-call policy a generic execution policy maps to.
-pub(super) fn host_policy(policy: ExecutionPolicy) -> HostPolicy {
-    if policy.allows_host_calls() {
-        HostPolicy::Allow
-    } else {
-        HostPolicy::DenyAll
-    }
 }
