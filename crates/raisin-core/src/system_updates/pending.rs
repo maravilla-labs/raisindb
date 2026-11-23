@@ -19,6 +19,7 @@
 use super::breaking_changes::{
     detect_nodetype_breaking_changes, detect_workspace_breaking_changes,
 };
+use super::merge::{merge_with_stored, stored_nodetype_matches};
 use crate::definitions::DefinitionResolver;
 use raisin_error::Result;
 use raisin_storage::system_updates::{
@@ -100,31 +101,32 @@ pub async fn check_pending_updates<S: Storage, R: SystemUpdateRepository>(
             None => (None, None),
         };
 
-        // Check if update is needed
-        let needs_update = match &old_hash {
-            Some(hash) => hash != &new_hash,
-            None => true, // Never applied
+        // Decided by what THIS branch stores, not by the applied hash: the
+        // hash record has no branch in it, so a hash match said nothing about
+        // whether this branch's copy is current (see `merge.rs`).
+        let current_nodetype = storage
+            .node_types()
+            .get(
+                BranchScope::new(tenant_id, repo_id, branch),
+                &nodetype.name,
+                None,
+            )
+            .await?;
+
+        let needs_update = match &current_nodetype {
+            Some(current) => !stored_nodetype_matches(&nodetype, current),
+            None => true,
         };
 
         if needs_update {
-            // Check for breaking changes by comparing with current NodeType
-            let breaking_changes = if old_hash.is_some() {
-                // Get the currently applied NodeType to detect breaking changes
-                if let Some(current_nodetype) = storage
-                    .node_types()
-                    .get(
-                        BranchScope::new(tenant_id, repo_id, branch),
-                        &nodetype.name,
-                        None,
-                    )
-                    .await?
-                {
-                    detect_nodetype_breaking_changes(&current_nodetype, &nodetype)
-                } else {
-                    vec![]
-                }
-            } else {
-                vec![] // New NodeType, no breaking changes possible
+            // Classify what an apply would write: the definition merged with
+            // the stored copy (entries only the stored copy has are kept).
+            let breaking_changes = match &current_nodetype {
+                Some(current) => detect_nodetype_breaking_changes(
+                    current,
+                    &merge_with_stored(&nodetype, current),
+                ),
+                None => vec![], // New NodeType, no breaking changes possible
             };
 
             let is_breaking = !breaking_changes.is_empty();

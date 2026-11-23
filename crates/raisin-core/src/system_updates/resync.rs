@@ -33,10 +33,11 @@ use super::apply::{apply_nodetype, apply_workspace};
 use super::breaking_changes::{
     detect_nodetype_breaking_changes, detect_workspace_breaking_changes,
 };
+use super::merge::{merge_with_stored, stored_nodetype_matches};
 use raisin_error::Result;
 use raisin_models::nodes::types::NodeType;
 use raisin_models::workspace::Workspace;
-use raisin_storage::system_updates::{ResourceType, SystemUpdateRepository};
+use raisin_storage::system_updates::{AppliedDefinition, ResourceType, SystemUpdateRepository};
 use raisin_storage::{
     scope::{BranchScope, RepoScope},
     NodeTypeRepository, Storage, WorkspaceRepository,
@@ -116,25 +117,45 @@ pub async fn resync_nodetypes<S: Storage, R: SystemUpdateRepository>(
 
         // The applied-hash record is keyed by tenant and repository, with NO
         // branch in it — while the registry it describes is PER BRANCH. So the
-        // hash alone says "this repository has seen this definition", not "this
-        // branch has it". Trusting it on its own is what left `publish` without
-        // `raisin:Package` even after the resync started visiting every branch:
-        // `main` had recorded the hash, so every other branch counted as
-        // unchanged and was skipped before anything looked at the registry.
-        //
-        // Hence: a hash match only settles it when the definition is actually
-        // present on THIS branch. The extra read costs one lookup per
-        // definition per branch at boot and is what makes a forked branch
-        // self-heal.
-        if current.is_some()
-            && applied.as_ref().map(|a| a.content_hash.as_str()) == Some(hash.as_str())
-        {
-            outcome.unchanged += 1;
-            continue;
+        // hash says "this repository has seen this definition", never "this
+        // branch has it". Checking only that the type EXISTS on the branch was
+        // not enough either: the branch visited first records the hash, and a
+        // later branch holding an OLDER copy then matched and was skipped. That
+        // is how a tenant's `main` kept a `raisin:AclFolder` without
+        // `raisin:ConversationRecord` while system-updates said nothing was
+        // pending. So the stored copy decides: a branch is up to date when what
+        // it stores already carries the definition (see `merge.rs`).
+        if let Some(existing) = &current {
+            if stored_nodetype_matches(nodetype, existing) {
+                if applied.as_ref().map(|a| a.content_hash.as_str()) != Some(hash.as_str()) {
+                    // Content already there: record the hash, write nothing.
+                    system_update_repo
+                        .set_applied(
+                            tenant_id,
+                            repo_id,
+                            ResourceType::NodeType,
+                            &nodetype.name,
+                            AppliedDefinition {
+                                content_hash: hash.clone(),
+                                applied_version: nodetype.version,
+                                applied_at: chrono::Utc::now(),
+                                applied_by: "system".to_string(),
+                            },
+                        )
+                        .await?;
+                }
+                outcome.unchanged += 1;
+                continue;
+            }
         }
 
+        // Classify what will actually be written: the definition merged with
+        // the stored copy, so entries only the stored copy has never count as
+        // a removal.
         let breaking = match &current {
-            Some(existing) => detect_nodetype_breaking_changes(existing, nodetype),
+            Some(existing) => {
+                detect_nodetype_breaking_changes(existing, &merge_with_stored(nodetype, existing))
+            }
             // Not present at all → creating it can't break anything.
             None => vec![],
         };
@@ -790,6 +811,162 @@ mod tests {
         assert!(!should_apply(AutoApplyPolicy::NonBreaking, false));
         assert!(should_apply(AutoApplyPolicy::All, true));
         assert!(should_apply(AutoApplyPolicy::All, false));
+    }
+
+    /// Regression for the 0.7.53 chat outage.
+    ///
+    /// The startup resync visits branches in key order. A branch sorting
+    /// before `main` recorded the (branch-less) applied hash first; `main`
+    /// already held an OLDER `raisin:AclFolder`, matched on hash, and was
+    /// skipped — so `main` never learned `raisin:ConversationRecord`, every
+    /// chat delivery failed validation, and system-updates reported nothing
+    /// pending. The stored copy must decide, both for the resync and for the
+    /// pending check, and a tenant-added allowed child must survive.
+    #[tokio::test]
+    async fn an_old_acl_folder_on_main_is_upgraded_even_when_the_hash_is_recorded() {
+        use crate::definitions::DefinitionResolver;
+        use crate::system_updates::check_pending_updates;
+        use raisin_storage::CommitMetadata;
+
+        let storage = Arc::new(InMemoryStorage::default());
+        let repo = MemoryUpdateRepo::default();
+        let resolver = DefinitionResolver::embedded_only();
+        let defs = resolver.nodetypes();
+
+        // An earlier-sorting branch gets everything and records every hash.
+        resync_nodetypes(
+            storage.clone(),
+            &repo,
+            TENANT,
+            REPO,
+            "draft",
+            &defs,
+            AutoApplyPolicy::NonBreaking,
+        )
+        .await
+        .unwrap();
+        // `main` holds every type too, but its AclFolder predates the
+        // messaging records and carries a tenant's own child type.
+        resync_nodetypes(
+            storage.clone(),
+            &repo,
+            TENANT,
+            REPO,
+            BRANCH,
+            &defs,
+            AutoApplyPolicy::NonBreaking,
+        )
+        .await
+        .unwrap();
+        let (acl, _) = defs
+            .iter()
+            .find(|(nt, _)| nt.name == "raisin:AclFolder")
+            .expect("raisin:AclFolder is a built-in")
+            .clone();
+        assert!(acl
+            .allowed_children
+            .iter()
+            .any(|c| c == "raisin:ConversationRecord"));
+        let mut old = acl.clone();
+        old.allowed_children.retain(|c| {
+            !matches!(
+                c.as_str(),
+                "raisin:ConversationRecord"
+                    | "raisin:TaskAssignment"
+                    | "raisin:TaskAssignmentResponse"
+                    | "raisin:MessagingConfig"
+            )
+        });
+        old.allowed_children.push("acme:Custom".to_string());
+        storage
+            .node_types()
+            .put(
+                BranchScope::new(TENANT, REPO, BRANCH),
+                old,
+                CommitMetadata::system("old"),
+            )
+            .await
+            .unwrap();
+
+        // The detector sees it — and only it — as a non-breaking update.
+        let pending =
+            check_pending_updates(storage.clone(), &repo, &resolver, TENANT, REPO, BRANCH)
+                .await
+                .unwrap();
+        // (Workspaces and packages are not resynced in this test; only
+        // NodeTypes are under test.)
+        let nodetype_updates: Vec<_> = pending
+            .updates
+            .iter()
+            .filter(|u| u.resource_type == ResourceType::NodeType)
+            .collect();
+        let names: Vec<_> = nodetype_updates.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["raisin:AclFolder"],
+            "pending must name the stale type"
+        );
+        assert!(
+            !nodetype_updates[0].is_breaking,
+            "adding allowed children is not breaking"
+        );
+
+        // The resync repairs it.
+        let outcome = resync_nodetypes(
+            storage.clone(),
+            &repo,
+            TENANT,
+            REPO,
+            BRANCH,
+            &defs,
+            AutoApplyPolicy::NonBreaking,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.applied, 1);
+        let repaired = storage
+            .node_types()
+            .get(
+                BranchScope::new(TENANT, REPO, BRANCH),
+                "raisin:AclFolder",
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(repaired
+            .allowed_children
+            .iter()
+            .any(|c| c == "raisin:ConversationRecord"));
+        assert!(
+            repaired.allowed_children.iter().any(|c| c == "acme:Custom"),
+            "a tenant-added allowed child must survive the upgrade"
+        );
+
+        // And then it is settled: nothing pending, nothing rewritten.
+        let pending =
+            check_pending_updates(storage.clone(), &repo, &resolver, TENANT, REPO, BRANCH)
+                .await
+                .unwrap();
+        let left: Vec<_> = pending
+            .updates
+            .iter()
+            .filter(|u| u.resource_type == ResourceType::NodeType)
+            .map(|u| &u.name)
+            .collect();
+        assert!(left.is_empty(), "left pending: {left:?}");
+        let outcome = resync_nodetypes(
+            storage.clone(),
+            &repo,
+            TENANT,
+            REPO,
+            BRANCH,
+            &defs,
+            AutoApplyPolicy::NonBreaking,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.applied, 0);
     }
 
     #[test]

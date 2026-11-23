@@ -35,6 +35,7 @@ mod branch_fork_index_copies_test;
 mod branch_fork_publish_test;
 mod branch_fork_spatial_index_test;
 mod branch_head_monotonic_test;
+mod builtin_nodetype_resync_test;
 mod checkpoint_network_test;
 mod cluster_integration_test;
 mod cluster_move_node_test;

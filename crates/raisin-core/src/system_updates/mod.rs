@@ -19,11 +19,13 @@
 
 mod apply;
 mod breaking_changes;
+mod merge;
 mod pending;
 mod resync;
 
 pub use apply::{apply_nodetype, apply_workspace};
 pub use breaking_changes::{detect_nodetype_breaking_changes, detect_workspace_breaking_changes};
+pub use merge::{merge_with_stored, stored_nodetype_matches};
 pub use pending::{check_pending_updates, PendingUpdatesChecker};
 pub use resync::{
     resync_nodetypes, resync_repository_definitions, resync_workspaces, AutoApplyPolicy,

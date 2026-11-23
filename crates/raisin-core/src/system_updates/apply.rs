@@ -72,6 +72,9 @@ pub async fn apply_nodetype<S: Storage, R: SystemUpdateRepository>(
         )
         .await?
     {
+        // Never drop what the stored copy has and the definition lacks (an
+        // allowed child, mixin or property a package or the tenant added).
+        nodetype = super::merge::merge_with_stored(&nodetype, &existing);
         nodetype.id = existing.id;
         nodetype.created_at = existing.created_at;
     }
