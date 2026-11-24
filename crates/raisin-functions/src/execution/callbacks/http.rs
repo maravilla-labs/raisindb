@@ -147,7 +147,8 @@ impl reqwest::dns::Resolve for PublicOnlyResolver {
     }
 }
 
-/// The HTTP client every `raisin.http.fetch` goes through.
+/// The HTTP clients every `raisin.http.fetch` goes through: one that follows
+/// redirects (the default) and one that does not (`redirect: "manual"`).
 ///
 /// Separate from [`shared_http_client`] deliberately. The resolver above refuses
 /// private addresses outright, and other users of the shared client — AI
@@ -156,31 +157,64 @@ impl reqwest::dns::Resolve for PublicOnlyResolver {
 /// and function calls still share a connection pool with each other.
 ///
 /// [`shared_http_client`]: crate::execution::types::shared_http_client
-fn guarded_http_client() -> reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .dns_resolver(std::sync::Arc::new(PublicOnlyResolver))
-                .redirect(guarded_redirect_policy())
-                .build()
-                .unwrap_or_else(|e| {
-                    // A client that cannot be built with the guard must not fall
-                    // back to one without it.
-                    panic!("failed to build the guarded HTTP client: {e}")
-                })
-        })
-        .clone()
+fn guarded_http_client(follow_redirects: bool) -> reqwest::Client {
+    static FOLLOWING: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    static MANUAL: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let slot = if follow_redirects {
+        &FOLLOWING
+    } else {
+        &MANUAL
+    };
+    slot.get_or_init(|| {
+        client_builder(follow_redirects)
+            .dns_resolver(std::sync::Arc::new(PublicOnlyResolver))
+            .build()
+            .unwrap_or_else(|e| {
+                // A client that cannot be built with the guard must not fall
+                // back to one without it.
+                panic!("failed to build the guarded HTTP client: {e}")
+            })
+    })
+    .clone()
+}
+
+/// The client's redirect behaviour: every hop held to the egress policy, or
+/// none followed (the 3xx response and its `location` header are returned).
+fn client_builder(follow_redirects: bool) -> reqwest::ClientBuilder {
+    reqwest::Client::builder().redirect(if follow_redirects {
+        guarded_redirect_policy()
+    } else {
+        reqwest::redirect::Policy::none()
+    })
+}
+
+/// Whether a fetch follows redirects: yes, unless the options say
+/// `redirect: "manual"` (the Fetch API spelling) or `followRedirects: false`
+/// (also `follow_redirects`, the spelling the Rust SDK serialises).
+fn follows_redirects(options: &Value) -> bool {
+    if options
+        .get("redirect")
+        .and_then(Value::as_str)
+        .is_some_and(|r| r.eq_ignore_ascii_case("manual"))
+    {
+        return false;
+    }
+    !["followRedirects", "follow_redirects"]
+        .iter()
+        .any(|k| options.get(*k).and_then(Value::as_bool) == Some(false))
 }
 
 /// Create http_request callback: `raisin.http.fetch(method, url, options)`
+///
+/// `options.redirect: "manual"` (or `followRedirects: false`) returns a 3xx
+/// response as it is, with its `location` header, instead of following it.
 pub fn create_http_request(_http_client: reqwest::Client) -> HttpRequestCallback {
     Arc::new(move |method: String, url: String, options: Value| {
         // NOT the client passed in: function fetches go through the
         // resolver-guarded one. The parameter is kept so callers do not have to
         // change, and so the shared client stays available if this ever needs to
         // become configurable.
-        let client = guarded_http_client();
+        let client = guarded_http_client(follows_redirects(&options));
 
         Box::pin(async move {
             // BEFORE anything is built or sent.
@@ -448,5 +482,65 @@ mod egress_guard_tests {
             );
         }
         assert_eq!(super::MAX_FUNCTION_REDIRECTS, 5);
+    }
+}
+
+#[cfg(test)]
+mod redirect_option_tests {
+    use super::{client_builder, follows_redirects};
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn redirects_are_followed_unless_the_options_say_manual() {
+        assert!(follows_redirects(&json!({})));
+        assert!(follows_redirects(&json!({ "redirect": "follow" })));
+        assert!(!follows_redirects(&json!({ "redirect": "manual" })));
+        assert!(!follows_redirects(&json!({ "followRedirects": false })));
+        assert!(!follows_redirects(&json!({ "follow_redirects": false })));
+        assert!(follows_redirects(&json!({ "followRedirects": true })));
+    }
+
+    /// `/a` answers 302 to `/b`, `/b` answers 200. Built without the public
+    /// resolver (the test server is on loopback); the redirect behaviour is
+    /// the one the function clients use.
+    #[tokio::test]
+    async fn manual_returns_the_redirect_and_follow_follows_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let reply = if req.starts_with("GET /a") {
+                        format!(
+                            "HTTP/1.1 302 Found\r\nlocation: http://localhost:{port}/b\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
+                    } else {
+                        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+                            .to_string()
+                    };
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/a");
+
+        let manual = client_builder(false).build().unwrap();
+        let r = manual.get(&url).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 302);
+        assert_eq!(
+            r.headers().get("location").unwrap().to_str().unwrap(),
+            format!("http://localhost:{port}/b")
+        );
+
+        let following = client_builder(true).build().unwrap();
+        let r = following.get(&url).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
     }
 }

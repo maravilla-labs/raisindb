@@ -109,6 +109,9 @@ fn register_fetch_request<'js>(
             opts["timeout"] = serde_json::Value::Number(timeout.into());
         }
 
+        // `redirect: "manual"` returns a 3xx as it is (`http.rs`).
+        opts["redirect"] = serde_json::Value::String(request.redirect.clone());
+
         // Execute the request with timeout to prevent indefinite blocking
         let result = run_async_blocking_with_timeout(
             async move {
