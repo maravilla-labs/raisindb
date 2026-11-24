@@ -890,6 +890,15 @@ let names = graph.package_names();
 
 Workspace patches let a package modify workspace configurations during installation -- typically to register new node types that the package provides.
 
+A package that ships the workspace itself (`workspaces/<name>.yaml`) does not
+need a patch for that: **no install mode narrows an existing workspace, and
+every mode widens it.** `skip` keeps the installed workspace and adds the
+`allowed_node_types` and `allowed_root_node_types` the package newly lists, so
+an upgrade that brings a new node type can create nodes of it at once. `sync`
+and `overwrite` take the package's definition and keep every type the
+installation allowed besides (a Builder-made `local:*` type, an operator's
+addition). A list that allows everything (`*` or empty) is never restricted.
+
 ### Defining Patches
 
 In the manifest, `workspace_patches` is a map of workspace name to patch configuration:

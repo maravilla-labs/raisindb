@@ -115,10 +115,35 @@ const results = await raisin.nodes.query(workspace, queryObject);
 // Write
 const created = await raisin.nodes.create(workspace, parentPath, nodeData);
 await raisin.nodes.update(workspace, path, updateData);
+await raisin.nodes.patch(workspace, path, updateData);   // null removes a property
 await raisin.nodes.delete(workspace, path);
 await raisin.nodes.move(workspace, path, newParentPath);
 await raisin.nodes.updateProperty(workspace, path, propertyPath, value);
 ```
+
+**Updates are partial.** `nodes.update(ws, path, { properties: { status: "done" } })`
+writes ONLY the properties it names. The engine applies them to the node as
+stored when the write commits — not to a copy read earlier — so two functions
+updating DIFFERENT properties of the same node at the same moment both keep
+their change. Per property, the write that lands later wins. Callers take no
+lock, check no version and retry nothing.
+
+| Call | Named properties | Other properties | `null` value |
+|------|------------------|------------------|--------------|
+| `nodes.update(ws, path, { properties })` | set | untouched | stored as `null` |
+| `nodes.patch(ws, path, { properties })` | set | untouched | property **removed** |
+| `nodes.update(ws, path, { properties, replace: true })` | set | **removed** (whole map replaced) | stored as `null` |
+
+The same holds in SQL: `UPDATE ws SET properties = properties || $1::jsonb
+WHERE path = $2` (or `WHERE id = $2`) is a partial update of the keys in `$1`,
+while `SET properties = $1::jsonb` replaces the whole map. The Rust SDK's
+`raisin_sdk::nodes::update` / `patch` are the same host calls. Inside an
+explicit transaction (`beginTransaction`) a write is staged as given; use the
+single-call forms above for concurrent writers.
+
+Ticket seats, purchases and stock reservations — scarce, countable resources —
+are the exception that needs a guard: claim them with `raisin.inventory.claim`
+(or a lease from `raisin.locks`), never with a read-then-write of a counter.
 
 #### SQL Operations -- `raisin.sql.*`
 
@@ -199,6 +224,19 @@ const data = await response.json();
 const result = await raisin.http.fetch(url, options);
 ```
 
+Redirects are followed by default (every hop held to the egress policy). Pass
+`redirect: "manual"` (or `followRedirects: false`) to get the 3xx response
+itself, with its `location` header — for an OAuth callback or a signed
+download URL you want to read rather than fetch:
+
+```javascript
+const r = await raisin.http.fetch("https://auth.example.com/start", { redirect: "manual" });
+// r.status === 302, r.headers.location === "https://..."
+```
+
+The W3C `fetch()` honours its `redirect` init option the same way; in Rust,
+`raisin_sdk::http::request("GET", url, json!({ "redirect": "manual" }))`.
+
 HTTP access requires the function's `network_policy` to explicitly allowlist URLs. See [Network Policy](#network-policy) below.
 
 Global Web APIs are also available: `Request`, `Response`, `Headers`, `AbortController`, `AbortSignal`.
@@ -271,7 +309,17 @@ await raisin.resources.addToNode(workspace, nodePath, propertyPath, {
 
 // Direct PDF processing from storage
 const result = await raisin.pdf.processFromStorage(storageKey, options);
+
+// The bytes of an asset by path, read with the caller's rights
+const { base64, mime_type, size, name } = raisin.assets.readBytes("assets", "/signatures/wo-7.png");
+const thumb = raisin.assets.readBytes("assets", "/report", "thumbnail"); // another resource property
 ```
+
+`assets.readBytes(workspace, path, property?)` reads the node like
+`nodes.get` (a node the caller may not read is not found), resolves its
+resource property (`file` by default; a mounted asset's expired local copy is
+fetched first) and returns the bytes base64-encoded. From Rust:
+`raisin_sdk::assets::read_bytes("assets", "/signatures/wo-7.png", None)`.
 
 #### Task Operations -- `raisin.tasks.*`
 
@@ -456,6 +504,18 @@ React to node lifecycle events:
 ```
 
 Filters use glob patterns for workspaces and paths, allowing fine-grained control over which events trigger the function.
+
+`filters.changed_properties: ["status"]` narrows an `Updated` event to writes
+that changed one of the listed top-level properties. Every committed write
+that changes a property emits its own event naming it — also a write landing
+milliseconds after another write of the same node (events are deduplicated
+per write, not per node). Completing an inbox task is such a write
+(`status`, `completed_by`, `responded_at`, `response`).
+
+**Priority: the higher number runs first.** When several triggers match one
+event they are enqueued in descending `priority` order (`priority: 100` before
+`priority: 30`). Use a high priority for a normalizer that must see the event
+before the checkers that act on it.
 
 #### HTTP Triggers
 

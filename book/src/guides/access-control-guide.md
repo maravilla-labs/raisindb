@@ -227,6 +227,47 @@ Path validation rules (enforced by the Admin Console):
 
 This permission only applies when the node's creator matches the requesting user, effectively implementing ownership-based access.
 
+**Field-level write grants.** `fields` and `except_fields` apply to writes as
+well as reads. On a `create` or `update` grant they restrict which properties
+the write may set: a write is refused (`PermissionDenied: Cannot write property
+'price' ...`) when it changes a property that no matching grant allows —
+listed in `fields` and not in `except_fields`, or a grant with no field list.
+Grants add up across roles. An update is judged by the properties it CHANGES,
+so a client that sends a protected value back unchanged is not refused; a
+create by every property it sets. Engine-owned keys (`$…`, `__…`) are exempt.
+Enforced at the write layer, so REST, SQL, WebSocket and functions are covered
+alike.
+
+```json
+{
+  "workspace": "app",
+  "path": "/**",
+  "operations": ["read", "update"],
+  "node_types": ["app:Order"],
+  "fields": ["status", "notes"]
+}
+```
+
+A technician holding this grant may change a work order's `status` and
+`notes`, and nothing else.
+
+**Create conditions see the new node.** A `create` grant's `condition` is
+evaluated over the node as it will be stored: its path, type, properties and
+`created_by` (the creating principal). For example, only under the caller's
+own home:
+
+```json
+{
+  "workspace": "app",
+  "path": "/customers/**",
+  "operations": ["create"],
+  "condition": "node.path.startsWith(auth.home)"
+}
+```
+
+or only drafts: `"condition": "node.status == 'draft'"`. The REL subset is the
+one read grants use.
+
 ### Via Admin Console
 
 The Admin Console provides a **RoleEditor** form and a **PermissionEditor** component for managing roles and their permissions.
