@@ -24,6 +24,7 @@ pub(crate) mod compound_defs;
 #[cfg(test)]
 mod embedding_config_reader_tests;
 mod handlers;
+mod heavy_pool;
 pub(crate) mod helpers;
 mod phase_timing;
 mod physical_cache;
@@ -675,8 +676,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         let (physical_plan, ctx) = self.plan_query(analyzed, cached).await?;
         timer.planned();
 
-        // 5. Execute physical plan
-        let stream = execute_plan(&physical_plan, &ctx).await?;
+        // 5. Execute physical plan — a heavy one in the bounded pool
+        // (`heavy_pool`), so point reads never queue behind scans.
+        let permit = heavy_pool::admit(&physical_plan).await?;
+        let stream = heavy_pool::hold(execute_plan(&physical_plan, &ctx).await?, permit);
         Ok(timer.opened(stream, sql))
     }
 
