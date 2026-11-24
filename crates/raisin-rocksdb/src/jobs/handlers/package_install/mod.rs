@@ -70,6 +70,7 @@ mod retired_keys_install_tests;
 mod role_install_tests;
 pub(in crate::jobs::handlers) mod translation;
 mod types;
+mod workspace_types;
 
 pub use self::handler::{PackageInstallHandler, RetiredKeysCheck};
 pub use self::manifest::{

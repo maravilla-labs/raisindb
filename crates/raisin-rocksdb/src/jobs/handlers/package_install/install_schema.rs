@@ -544,37 +544,20 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 .await?;
             let was_existing = existing.is_some();
 
-            // Keep (skip) mode: never overwrite an existing workspace, but additively
-            // merge its `allowed_node_types` from the package (add-only, never remove)
-            // so NodeTypes the package newly provides become usable without requiring
-            // an explicit `workspace_patches` entry. The merge is skipped when the
-            // existing workspace already allows everything (empty list or "*"), so we
-            // never silently narrow an unrestricted workspace.
+            // Keep (skip) mode: never overwrite an existing workspace, but add
+            // the allowed / root node types the package newly lists
+            // (`workspace_types`), so the types it provides become usable
+            // without a `workspace_patches` entry.
             if install_mode == InstallMode::Skip {
                 if let Some(mut existing_ws) = existing {
-                    let allows_all = existing_ws.allowed_node_types.is_empty()
-                        || existing_ws.allowed_node_types.iter().any(|t| t == "*");
-
-                    let mut modified = false;
-                    if !allows_all {
-                        for type_name in &workspace.allowed_node_types {
-                            if type_name != "*"
-                                && !existing_ws.allowed_node_types.contains(type_name)
-                            {
-                                existing_ws.allowed_node_types.push(type_name.clone());
-                                modified = true;
-                            }
-                        }
-                    }
-
-                    if modified {
+                    if super::workspace_types::add_missing_types(&mut existing_ws, &workspace) {
                         workspace_repo
                             .put(RepoScope::new(tenant_id, repo_id), existing_ws)
                             .await?;
                         tracing::debug!(
                             job_id = %job_id,
                             workspace = %ws_name,
-                            "Merged allowed_node_types into existing workspace (keep mode)"
+                            "Merged allowed node types into existing workspace (keep mode)"
                         );
                         stats.patches_applied += 1;
                     } else {
@@ -590,16 +573,14 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 // No existing workspace — fall through and create it.
             }
 
-            // SYNC NEVER NARROWS A WORKSPACE. It updates the definition from the
-            // package, but a type the installation added since (a Builder-made
-            // app's `local:*` types, an operator's addition) stays allowed:
-            // dropping it would leave existing nodes of that type in a workspace
-            // that refuses them. Overwrite remains the explicit full replace.
+            // NO INSTALL NARROWS A WORKSPACE. Sync and overwrite update the
+            // definition from the package, but a type the installation allowed
+            // besides (a Builder-made app's `local:*` types, an operator's
+            // addition) stays allowed: dropping it would leave existing nodes
+            // of that type in a workspace that refuses them.
             let mut workspace = workspace;
-            if install_mode == InstallMode::Sync {
-                if let Some(existing_ws) = &existing {
-                    merge_installation_types(&mut workspace, existing_ws);
-                }
+            if let Some(existing_ws) = &existing {
+                super::workspace_types::add_missing_types(&mut workspace, existing_ws);
             }
             // Create (new workspace) or overwrite (force mode).
             workspace_repo
@@ -801,66 +782,5 @@ mod processing_rule_shape_tests {
     #[test]
     fn a_dash_inside_a_comment_does_not_count() {
         assert!(!looks_like_list("# - not a rule, just prose\nid: one\n"));
-    }
-}
-
-/// Keep the types an installation added when a package re-states a workspace.
-///
-/// Adds each existing allowed / root type the package does not list, in the
-/// existing order after the package's own. A package that allows everything
-/// (`*` or an empty list) already covers them.
-fn merge_installation_types(
-    workspace: &mut raisin_models::workspace::Workspace,
-    existing: &raisin_models::workspace::Workspace,
-) {
-    let allows_all = workspace.allowed_node_types.is_empty()
-        || workspace.allowed_node_types.iter().any(|t| t == "*");
-    if !allows_all {
-        for t in &existing.allowed_node_types {
-            if !workspace.allowed_node_types.contains(t) {
-                workspace.allowed_node_types.push(t.clone());
-            }
-        }
-    }
-    for t in &existing.allowed_root_node_types {
-        if !workspace.allowed_root_node_types.contains(t) {
-            workspace.allowed_root_node_types.push(t.clone());
-        }
-    }
-}
-
-#[cfg(test)]
-mod sync_merge_tests {
-    use super::merge_installation_types;
-    use raisin_models::workspace::Workspace;
-
-    #[test]
-    fn sync_keeps_a_type_the_installation_added() {
-        let mut from_package = Workspace::new("assets".into());
-        from_package.allowed_node_types = vec!["raisin:Asset".into(), "raisin:Folder".into()];
-        from_package.allowed_root_node_types = vec!["raisin:Folder".into()];
-        let mut live = from_package.clone();
-        live.allowed_node_types.push("local:Recipe".into());
-        live.allowed_root_node_types.push("local:Recipe".into());
-
-        merge_installation_types(&mut from_package, &live);
-        assert_eq!(
-            from_package.allowed_node_types,
-            vec!["raisin:Asset", "raisin:Folder", "local:Recipe"]
-        );
-        assert_eq!(
-            from_package.allowed_root_node_types,
-            vec!["raisin:Folder", "local:Recipe"]
-        );
-    }
-
-    #[test]
-    fn an_unrestricted_package_workspace_stays_unrestricted() {
-        let mut from_package = Workspace::new("open".into());
-        from_package.allowed_node_types = vec!["*".into()];
-        let mut live = from_package.clone();
-        live.allowed_node_types = vec!["local:X".into()];
-        merge_installation_types(&mut from_package, &live);
-        assert_eq!(from_package.allowed_node_types, vec!["*"]);
     }
 }
