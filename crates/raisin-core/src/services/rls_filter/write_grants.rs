@@ -101,19 +101,43 @@ pub async fn write_fields_denied(
     .await;
     // No grant at all is the operation check's refusal, not ours; an
     // unrestricted grant allows every field.
-    if grants.is_empty() || grants.iter().any(|g| restricts_nothing(g)) {
+    if grants.is_empty() {
+        return None;
+    }
+    let written = written_fields(existing, node);
+    // A move or a type change must land where the caller may write too:
+    // the NEW path and type have to match an update grant of theirs (its
+    // condition judged on the stored node), whatever its field list.
+    if let Some(stored) = existing {
+        for field in ["path", "node_type"] {
+            if written.contains(&Written::NodeField(field))
+                && granting(
+                    node,
+                    stored,
+                    &permissions.permissions,
+                    auth,
+                    scope,
+                    operation,
+                    resolver,
+                )
+                .await
+                .is_empty()
+            {
+                return Some(field.to_string());
+            }
+        }
+    }
+    if grants.iter().any(|g| restricts_nothing(g)) {
         return None;
     }
     // Grants here all restrict fields (an unrestricted one returned above).
-    written_fields(existing, node)
-        .into_iter()
-        .find_map(|w| match w {
-            Written::Property(p) => (!grants.iter().any(|g| allows_field(g, &p))).then_some(p),
-            // A node field (archetype, owner, relations, ...) is not a
-            // property a field list can name: only an unrestricted grant
-            // may write it.
-            Written::NodeField(f) => Some(f.to_string()),
-        })
+    written.into_iter().find_map(|w| match w {
+        Written::Property(p) => (!grants.iter().any(|g| allows_field(g, &p))).then_some(p),
+        // A node field (archetype, owner, relations, ...) is not a
+        // property a field list can name: only an unrestricted grant
+        // may write it.
+        Written::NodeField(f) => Some(f.to_string()),
+    })
 }
 
 /// Grants matching `target` for `operation` whose condition holds over
@@ -360,5 +384,47 @@ mod tests {
                 None
             );
         }
+    }
+
+    /// A type change or move must land inside the caller's update grants,
+    /// even with an unrestricted grant; a field-restricted grant may do
+    /// neither.
+    #[tokio::test]
+    async fn a_type_change_or_move_must_stay_inside_the_grants() {
+        let mut g = Permission::new("/wo/**", vec![Operation::Update]);
+        g.node_types = Some(vec!["app:Order".into()]);
+        let a = auth(vec![g], None);
+        let stored = node("/wo/1", &[("status", "open")]);
+
+        let mut retyped = stored.clone();
+        retyped.node_type = "raisin:User".into();
+        assert_eq!(
+            write_fields_denied(Some(&stored), &retyped, &a, &scope(), None).await,
+            Some("node_type".to_string())
+        );
+        let mut moved = stored.clone();
+        moved.path = "/admin/1".into();
+        assert_eq!(
+            write_fields_denied(Some(&stored), &moved, &a, &scope(), None).await,
+            Some("path".to_string())
+        );
+        let mut inside = stored.clone();
+        inside.path = "/wo/2".into();
+        inside.name = "2".into();
+        assert_eq!(
+            write_fields_denied(Some(&stored), &inside, &a, &scope(), None).await,
+            None
+        );
+
+        // Field-restricted: neither a type change nor a move.
+        let mut r = Permission::new("/**", vec![Operation::Update]);
+        r.fields = Some(vec!["status".into()]);
+        let a = auth(vec![r], None);
+        let mut retyped = stored.clone();
+        retyped.node_type = "app:Other".into();
+        assert_eq!(
+            write_fields_denied(Some(&stored), &retyped, &a, &scope(), None).await,
+            Some("node_type".to_string())
+        );
     }
 }

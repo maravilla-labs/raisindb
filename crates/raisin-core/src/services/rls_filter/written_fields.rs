@@ -106,37 +106,227 @@ pub(super) fn written_fields(existing: Option<&Node>, node: &Node) -> Vec<Writte
         }
     }
 
-    // Node fields outside the property map.
+    // Every other field of the node, decided EXPLICITLY. The destructuring
+    // has no `..`: a field added to `Node` fails to compile here until it is
+    // classified (property write, node-field write, or server-stamped).
+    let Node {
+        id: _,           // identity: an update is addressed by it
+        name,            // placement (with path / parent)
+        path,            // placement
+        node_type,       // node field
+        archetype,       // node field
+        properties: _,   // property writes (above)
+        children: _,     // derived from the tree, server-side
+        order_key: _,    // server-assigned (ORDERED_CHILDREN label)
+        has_children: _, // derived
+        parent,          // placement
+        version: _,      // server-stamped edit counter
+        created_at: _,   // server-stamped
+        updated_at: _,   // server-stamped
+        published_at,    // node field
+        published_by,    // node field
+        updated_by: _,   // server-stamped
+        created_by: _,   // server-stamped
+        translations: _, // property writes by key (above)
+        tenant_id: _,    // scope, not content
+        workspace: _,    // scope, not content
+        owner_id,        // node field
+        relations,       // node field
+    } = node;
     match existing {
         Some(stored) => {
-            if stored.archetype != node.archetype {
-                out.insert(Written::NodeField("archetype"));
-            }
-            if stored.owner_id != node.owner_id {
-                out.insert(Written::NodeField("owner_id"));
-            }
-            if stored.relations != node.relations {
-                out.insert(Written::NodeField("relations"));
-            }
-            if stored.path != node.path || stored.name != node.name {
+            if stored.path != *path || stored.name != *name || stored.parent != *parent {
                 out.insert(Written::NodeField("path"));
             }
-            if stored.published_at != node.published_at || stored.published_by != node.published_by
-            {
+            if stored.node_type != *node_type {
+                out.insert(Written::NodeField("node_type"));
+            }
+            if stored.archetype != *archetype {
+                out.insert(Written::NodeField("archetype"));
+            }
+            if stored.published_at != *published_at || stored.published_by != *published_by {
                 out.insert(Written::NodeField("published"));
+            }
+            if stored.owner_id != *owner_id {
+                out.insert(Written::NodeField("owner_id"));
+            }
+            if stored.relations != *relations {
+                out.insert(Written::NodeField("relations"));
             }
         }
         None => {
-            // A create names its path and type by the grant itself; an owner
-            // or relations set on the new node are writes a field list
-            // cannot grant.
-            if node.owner_id.is_some() {
+            // A create's path and type are what the grant itself matched
+            // (its path pattern and node_types); everything else it sets is
+            // a write a field list cannot grant.
+            let _ = (name, path, parent, node_type);
+            if archetype.is_some() {
+                out.insert(Written::NodeField("archetype"));
+            }
+            if published_at.is_some() || published_by.is_some() {
+                out.insert(Written::NodeField("published"));
+            }
+            if owner_id.is_some() {
                 out.insert(Written::NodeField("owner_id"));
             }
-            if !node.relations.is_empty() {
+            if !relations.is_empty() {
                 out.insert(Written::NodeField("relations"));
             }
         }
     }
     out.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{written_fields, Written};
+    use raisin_models::nodes::properties::PropertyValue;
+    use raisin_models::nodes::Node;
+
+    fn base() -> Node {
+        Node {
+            id: "n".into(),
+            name: "a".into(),
+            path: "/f/a".into(),
+            parent: Some("f".into()),
+            node_type: "x:A".into(),
+            ..Default::default()
+        }
+    }
+
+    fn node_fields(existing: Option<&Node>, node: &Node) -> Vec<&'static str> {
+        written_fields(existing, node)
+            .into_iter()
+            .filter_map(|w| match w {
+                Written::NodeField(f) => Some(f),
+                Written::Property(_) => None,
+            })
+            .collect()
+    }
+
+    /// Every Node field, changed on its own in an UPDATE: what it counts as.
+    #[test]
+    fn every_node_field_is_classified_on_update() {
+        let stored = base();
+        let cases: Vec<(&str, Box<dyn Fn(&mut Node)>, Option<&str>)> = vec![
+            ("name", Box::new(|n| n.name = "b".into()), Some("path")),
+            ("path", Box::new(|n| n.path = "/g/a".into()), Some("path")),
+            (
+                "parent",
+                Box::new(|n| n.parent = Some("g".into())),
+                Some("path"),
+            ),
+            (
+                "node_type",
+                Box::new(|n| n.node_type = "x:B".into()),
+                Some("node_type"),
+            ),
+            (
+                "archetype",
+                Box::new(|n| n.archetype = Some("t".into())),
+                Some("archetype"),
+            ),
+            (
+                "published_at",
+                Box::new(|n| n.published_at = Some(chrono::Utc::now())),
+                Some("published"),
+            ),
+            (
+                "published_by",
+                Box::new(|n| n.published_by = Some("u".into())),
+                Some("published"),
+            ),
+            (
+                "owner_id",
+                Box::new(|n| n.owner_id = Some("u".into())),
+                Some("owner_id"),
+            ),
+            (
+                "relations",
+                Box::new(|n| {
+                    n.relations = vec![serde_json::from_value(serde_json::json!({
+                        "target": "t", "workspace": "w"
+                    }))
+                    .unwrap()]
+                }),
+                Some("relations"),
+            ),
+            // Server-stamped / derived / scope: never a client write.
+            ("id", Box::new(|n| n.id = "other".into()), None),
+            (
+                "children",
+                Box::new(|n| n.children = vec!["c".into()]),
+                None,
+            ),
+            ("order_key", Box::new(|n| n.order_key = "a0".into()), None),
+            (
+                "has_children",
+                Box::new(|n| n.has_children = Some(true)),
+                None,
+            ),
+            ("version", Box::new(|n| n.version = 9), None),
+            (
+                "created_at",
+                Box::new(|n| n.created_at = Some(chrono::Utc::now())),
+                None,
+            ),
+            (
+                "updated_at",
+                Box::new(|n| n.updated_at = Some(chrono::Utc::now())),
+                None,
+            ),
+            (
+                "updated_by",
+                Box::new(|n| n.updated_by = Some("u".into())),
+                None,
+            ),
+            (
+                "created_by",
+                Box::new(|n| n.created_by = Some("u".into())),
+                None,
+            ),
+            (
+                "tenant_id",
+                Box::new(|n| n.tenant_id = Some("t".into())),
+                None,
+            ),
+            (
+                "workspace",
+                Box::new(|n| n.workspace = Some("w".into())),
+                None,
+            ),
+        ];
+        for (field, change, expected) in &cases {
+            let mut n = stored.clone();
+            change(&mut n);
+            let got = node_fields(Some(&stored), &n);
+            assert_eq!(
+                got,
+                expected.into_iter().copied().collect::<Vec<_>>(),
+                "{field}"
+            );
+        }
+        // properties and translations are property writes (by key).
+        let mut n = stored.clone();
+        n.properties
+            .insert("p".into(), PropertyValue::String("v".into()));
+        assert_eq!(
+            written_fields(Some(&stored), &n),
+            vec![Written::Property("p".into())]
+        );
+    }
+
+    /// A create: path and type are matched by the grant; archetype,
+    /// publication, owner and relations are node-field writes.
+    #[test]
+    fn create_counts_archetype_publication_owner_and_relations() {
+        assert!(node_fields(None, &base()).is_empty());
+        let mut n = base();
+        n.archetype = Some("t".into());
+        n.published_at = Some(chrono::Utc::now());
+        n.owner_id = Some("u".into());
+        assert_eq!(
+            node_fields(None, &n),
+            vec!["archetype", "owner_id", "published"]
+        );
+    }
 }
