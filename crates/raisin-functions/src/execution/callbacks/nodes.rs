@@ -22,6 +22,7 @@ use raisin_binary::BinaryStorage;
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
+use raisin_storage::node_patch::{NullMode, PatchTarget, PropertyPatch};
 use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::Storage;
 use raisin_storage::StorageScope;
@@ -223,8 +224,14 @@ where
 
 /// Create node_update callback: `raisin.nodes.update(workspace, path, data)`
 ///
-/// Updates an existing node's properties using SQL UPDATE.
-/// Goes through QueryEngine with auto-commit.
+/// A PARTIAL update: only the top-level properties named in
+/// `data.properties` are written, merged into the node as stored when the
+/// write lands (`TransactionalContext::patch_node_properties`), so a
+/// concurrent update of another property of the same node is never lost. Per
+/// property the later write wins. A `null` value is stored as null.
+///
+/// `data.replace: true` replaces the WHOLE property map with
+/// `data.properties` instead (properties not named are removed).
 pub fn create_node_update<S, B>(query_ctx: Arc<QueryContext<S, B>>) -> NodeUpdateCallback
 where
     S: Storage + TransactionalStorage + 'static,
@@ -232,71 +239,110 @@ where
 {
     Arc::new(move |workspace: String, path: String, data: Value| {
         let ctx = query_ctx.clone();
-
-        Box::pin(async move {
-            // First, get the existing node to apply updates
-            let get_stmt = sql_generator::generate_select_by_path(&workspace, &path);
-            let rows = ctx.execute_query(&get_stmt).await?;
-
-            let existing_node = rows.into_iter().next().ok_or_else(|| {
-                raisin_error::Error::NotFound(format!("Node not found: {}", path))
-            })?;
-
-            // What the row says the archetype is RIGHT NOW, read from the raw
-            // row rather than from the parsed node: the column may arrive
-            // qualified (`<workspace>.archetype`) depending on how the star
-            // projection names it, and a prior value mistaken for absent would
-            // make every update write the column again.
-            let stored_archetype = row_archetype(&existing_node, &workspace);
-
-            let mut node: Node = serde_json::from_value(existing_node).map_err(|e| {
-                raisin_error::Error::Internal(format!("Failed to parse node: {}", e))
-            })?;
-            node.archetype = stored_archetype.clone();
-
-            apply_node_updates(&mut node, data)?;
-
-            tracing::debug!(
-                workspace = %workspace,
-                path = %path,
-                "Updating node via SQL UPDATE"
-            );
-
-            // The archetype is a COLUMN, and WRITING IT EVICTS THE ROW FROM
-            // EVERY PROPERTY INDEX — re-stating the archetype it already had is
-            // enough to do it, and only a later write that CHANGES an indexed
-            // property puts the row back. So: write it ONLY when it actually
-            // DIFFERS, and write it BEFORE the properties, so the property
-            // UPDATE that follows re-indexes the row.
-            if node.archetype != stored_archetype {
-                if let Some(archetype) = node.archetype.as_deref() {
-                    tracing::debug!(
-                        workspace = %workspace,
-                        path = %path,
-                        from = ?stored_archetype,
-                        to = %archetype,
-                        "Archetype differs — writing the column before the properties"
-                    );
-                    let stmt = generate_update_archetype(&workspace, &path, archetype);
-                    ctx.execute_statement(&stmt).await?;
-                }
-            }
-
-            // Caveat worth knowing: an archetype-only update (no `properties`
-            // in `data`) still issues the properties UPDATE below, but with
-            // UNCHANGED values — and it is a write that CHANGES an indexed
-            // property that restores a row evicted by the archetype write. So
-            // set the archetype together with whatever property change belongs
-            // with it whenever you can.
-
-            // Generate and execute UPDATE
-            let stmt =
-                sql_generator::generate_update_properties(&workspace, &path, &node.properties);
-            ctx.execute_statement(&stmt).await?;
-
-            Ok(serde_json::to_value(node).unwrap_or_default())
-        })
+        Box::pin(async move { run_node_patch(&ctx, workspace, path, data, NullMode::Store).await })
     })
+}
+
+/// Create node_patch callback: `raisin.nodes.patch(workspace, path, data)`
+///
+/// The same partial update as `update`, with JSON merge-patch semantics for
+/// `null`: a property set to `null` is REMOVED.
+pub fn create_node_patch<S, B>(query_ctx: Arc<QueryContext<S, B>>) -> NodeUpdateCallback
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    Arc::new(move |workspace: String, path: String, data: Value| {
+        let ctx = query_ctx.clone();
+        Box::pin(async move { run_node_patch(&ctx, workspace, path, data, NullMode::Remove).await })
+    })
+}
+
+async fn run_node_patch<S, B>(
+    ctx: &Arc<QueryContext<S, B>>,
+    workspace: String,
+    path: String,
+    data: Value,
+    nulls: NullMode,
+) -> raisin_error::Result<Value>
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    use raisin_storage::transactional::TransactionalContext;
+
+    // The archetype is a COLUMN, and WRITING IT EVICTS THE ROW FROM EVERY
+    // PROPERTY INDEX — re-stating the archetype it already had is enough to do
+    // it, and only a later write that CHANGES an indexed property puts the row
+    // back. So: write it ONLY when it actually DIFFERS, and write it BEFORE the
+    // properties, so the property write that follows re-indexes the row.
+    if let Some(archetype) = parse_archetype(&data) {
+        let get_stmt = sql_generator::generate_select_by_path(&workspace, &path);
+        let existing = ctx
+            .execute_query(&get_stmt)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| raisin_error::Error::NotFound(format!("Node not found: {}", path)))?;
+        if row_archetype(&existing, &workspace).as_deref() != Some(archetype.as_str()) {
+            let stmt = generate_update_archetype(&workspace, &path, &archetype);
+            ctx.execute_statement(&stmt).await?;
+        }
+    }
+
+    let empty = serde_json::Map::new();
+    let props = data
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .unwrap_or(&empty);
+
+    if data.get("replace").and_then(Value::as_bool) == Some(true) {
+        // Explicit whole-map replacement.
+        let properties = props
+            .iter()
+            .map(|(k, v)| (k.clone(), PropertyValue::from_json(v)))
+            .collect();
+        let stmt = sql_generator::generate_update_properties(&workspace, &path, &properties);
+        ctx.execute_statement(&stmt).await?;
+    } else if !props.is_empty() {
+        let auth = ctx.auth_context.clone().unwrap_or_else(AuthContext::system);
+        let actor = auth
+            .user_id
+            .clone()
+            .filter(|id| id != "system")
+            .or_else(|| auth.agent.clone())
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| "function-update".to_string());
+
+        let txn = ctx.deps.storage.begin_context().await?;
+        txn.set_tenant_repo(&ctx.tenant_id, &ctx.repo_id)?;
+        txn.set_branch(&ctx.branch)?;
+        txn.set_message("nodes.update")?;
+        txn.set_actor(&actor)?;
+        txn.set_auth_context(auth)?;
+        txn.patch_node_properties(
+            &workspace,
+            &PatchTarget::Path(path.clone()),
+            PropertyPatch::from_json(props, nulls),
+        )
+        .await?;
+        txn.commit().await?;
+    }
+
+    // The node as stored now, with the caller's read rights.
+    let get_stmt = sql_generator::generate_select_by_path(&workspace, &path);
+    let row = ctx
+        .execute_query(&get_stmt)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| raisin_error::Error::NotFound(format!("Node not found: {}", path)))?;
+    let archetype = row_archetype(&row, &workspace);
+    let mut node: Node = serde_json::from_value(row)
+        .map_err(|e| raisin_error::Error::Internal(format!("Failed to parse node: {}", e)))?;
+    node.archetype = archetype;
+    Ok(serde_json::to_value(node).unwrap_or_default())
 }
 
 /// Create node_delete callback: `raisin.nodes.delete(workspace, path)`

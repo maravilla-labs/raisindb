@@ -2408,6 +2408,8 @@ async fn test_raisin_api_surface_snapshot() {
             // index mints the fractional key.
             "moveChildAfter",
             "moveChildBefore",
+            // Partial update with merge-patch nulls (`null` removes).
+            "patch",
             "query",
             "reorderChild",
             "update",

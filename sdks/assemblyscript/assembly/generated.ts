@@ -602,6 +602,11 @@ export namespace nodes {
     return call("nodes_moveChildBefore", argsOf([jsonString(workspace), jsonString(parentPath), jsonString(childName), jsonString(beforeChildName)]));
   }
 
+  /** `raisin.nodes.patch` — registry method `nodes_patch`. Returns raw JSON. */
+  export function patch(workspace: string, path: string, data: string): string {
+    return call("nodes_patch", argsOf([jsonString(workspace), jsonString(path), data]));
+  }
+
   /** `raisin.nodes.query` — registry method `nodes_query`. Returns raw JSON. */
   export function query(workspace: string, query: string): string {
     return call("nodes_query", argsOf([jsonString(workspace), query]));

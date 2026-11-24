@@ -245,6 +245,11 @@ impl FunctionApi for MockFunctionApi {
         Ok(mock_updated_node(workspace, path, &data))
     }
 
+    async fn node_patch(&self, workspace: &str, path: &str, data: Value) -> Result<Value> {
+        self.check_node_write_error()?;
+        Ok(mock_updated_node(workspace, path, &data))
+    }
+
     async fn node_delete(&self, _workspace: &str, _path: &str) -> Result<()> {
         self.check_node_write_error()?;
         Ok(())

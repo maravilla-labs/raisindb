@@ -28,6 +28,36 @@ pub trait TransactionalContext: Send + Sync {
     /// Put a node within the transaction
     async fn put_node(&self, workspace: &str, node: &Node) -> Result<()>;
 
+    /// Partial update: set / remove only the top-level properties `patch`
+    /// names, against the node's state as stored when the write lands — NOT
+    /// a copy read earlier — so a concurrent write of another property of the
+    /// same node is never lost. Per property, the later write wins.
+    ///
+    /// A backend may apply the patch at commit (RocksDB does): it is then
+    /// not visible to reads made later in the same transaction, and a
+    /// missing node or a refused write surfaces from `commit`. This default
+    /// reads, merges and `put_node`s immediately.
+    ///
+    /// Returns the id of the node the patch applies to.
+    async fn patch_node_properties(
+        &self,
+        workspace: &str,
+        target: &crate::node_patch::PatchTarget,
+        patch: crate::node_patch::PropertyPatch,
+    ) -> Result<String> {
+        use crate::node_patch::PatchTarget;
+        let found = match target {
+            PatchTarget::Id(id) => self.get_node(workspace, id).await?,
+            PatchTarget::Path(path) => self.get_node_by_path(workspace, path).await?,
+        };
+        let mut node = found.ok_or_else(|| {
+            raisin_error::Error::NotFound(format!("Node not found: {:?}", target))
+        })?;
+        patch.apply(&mut node.properties);
+        self.put_node(workspace, &node).await?;
+        Ok(node.id)
+    }
+
     /// Add a brand new node within the transaction (optimized)
     ///
     /// This is an optimized version of `put_node()` for new nodes.

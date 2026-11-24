@@ -64,3 +64,14 @@ mod validation;
 pub(crate) use append_label::{next_append_label_tx, record_appended_label_tx};
 pub use core::{add_node, put_node};
 pub(crate) use tracking::track_reorder;
+
+/// `(tenant, repo, branch)` of the transaction.
+pub(in crate::transaction) fn metadata_of(
+    tx: &crate::transaction::RocksDBTransaction,
+) -> raisin_error::Result<(
+    std::sync::Arc<String>,
+    std::sync::Arc<String>,
+    std::sync::Arc<String>,
+)> {
+    metadata::extract_metadata(tx)
+}

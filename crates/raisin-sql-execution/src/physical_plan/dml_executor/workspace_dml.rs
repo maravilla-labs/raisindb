@@ -226,6 +226,11 @@ where
         }
     } else {
         tracing::debug!("UPDATE using auto-commit mode");
+        // `SET properties = properties || {...}`: a partial update, merged
+        // into the node as stored when the write lands (`property_patch`).
+        if let Some(patch) = super::property_patch::property_merge_patch(assignments)? {
+            return update_by_patch(workspace, &node_identifier, patch, written, ctx).await;
+        }
         let txn_ctx = ctx.storage.begin_context().await?;
         txn_ctx.set_tenant_repo(&ctx.tenant_id, &ctx.repo_id)?;
         txn_ctx.set_branch(&ctx.branch)?;
@@ -247,6 +252,69 @@ where
         }
     }
 
+    Ok(1)
+}
+
+/// Auto-commit partial update of one node (`property_patch`).
+async fn update_by_patch<S>(
+    workspace: &str,
+    node_identifier: &NodeIdentifier,
+    patch: raisin_storage::node_patch::PropertyPatch,
+    written: Option<&mut Vec<Node>>,
+    ctx: &ExecutionContext<S>,
+) -> Result<usize, Error>
+where
+    S: Storage + raisin_storage::transactional::TransactionalStorage + 'static,
+{
+    use raisin_storage::node_patch::PatchTarget;
+    use raisin_storage::transactional::TransactionalContext;
+
+    let txn_ctx = ctx.storage.begin_context().await?;
+    txn_ctx.set_tenant_repo(&ctx.tenant_id, &ctx.repo_id)?;
+    txn_ctx.set_branch(&ctx.branch)?;
+    txn_ctx.set_message("SQL UPDATE")?;
+    txn_ctx.set_actor(&super::bulk_operations::sql_actor(ctx, "sql-update"))?;
+    txn_ctx.set_auth_context(
+        ctx.auth_context
+            .clone()
+            .unwrap_or_else(AuthContext::anonymous),
+    )?;
+
+    let (target, missing) = match node_identifier {
+        NodeIdentifier::Id(id) => (
+            PatchTarget::Id(id.clone()),
+            format!("Node with id '{}' not found", id),
+        ),
+        NodeIdentifier::Path(path) => (
+            PatchTarget::Path(path.clone()),
+            format!("Node at path '{}' not found", path),
+        ),
+    };
+    let node_id = match txn_ctx
+        .patch_node_properties(workspace, &target, patch)
+        .await
+    {
+        Ok(id) => id,
+        Err(Error::NotFound(_)) => return Err(Error::Validation(missing)),
+        Err(e) => return Err(e),
+    };
+    txn_ctx.commit().await?;
+
+    if let Some(out) = written {
+        if let Some(node) = ctx
+            .storage
+            .nodes()
+            .get(
+                StorageScope::new(&ctx.tenant_id, &ctx.repo_id, &ctx.branch, workspace),
+                &node_id,
+                None,
+            )
+            .await
+            .map_err(|e| Error::storage(e.to_string()))?
+        {
+            out.push(node);
+        }
+    }
     Ok(1)
 }
 

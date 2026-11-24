@@ -45,7 +45,7 @@
 //! All lock acquisitions are carefully scoped using blocks to minimize hold times.
 //! Locks are released before async operations to prevent deadlocks.
 
-mod nodes;
+pub(super) mod nodes;
 mod relation;
 mod setters;
 mod translations;
@@ -104,6 +104,17 @@ impl TransactionalContext for RocksDBTransaction {
     /// Ok(()) on success, Error on validation or storage failure
     async fn put_node(&self, workspace: &str, node: &Node) -> Result<()> {
         nodes::put_node(self, workspace, node).await
+    }
+
+    /// Partial update, applied at commit against the stored state
+    /// (`nodes/patch.rs`).
+    async fn patch_node_properties(
+        &self,
+        workspace: &str,
+        target: &raisin_storage::node_patch::PatchTarget,
+        patch: raisin_storage::node_patch::PropertyPatch,
+    ) -> Result<String> {
+        nodes::patch::patch_node_properties(self, workspace, target, patch).await
     }
 
     /// Create a new node in the transaction (optimized for new nodes)

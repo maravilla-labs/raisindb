@@ -207,6 +207,10 @@ impl FunctionApi for RaisinFunctionApi {
         self.impl_node_update(workspace, path, data).await
     }
 
+    async fn node_patch(&self, workspace: &str, path: &str, data: Value) -> Result<Value> {
+        self.impl_node_patch(workspace, path, data).await
+    }
+
     async fn node_delete(&self, workspace: &str, path: &str) -> Result<()> {
         self.impl_node_delete(workspace, path).await
     }

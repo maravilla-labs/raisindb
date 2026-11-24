@@ -229,6 +229,7 @@ mod tests {
             "node_get_by_id",
             "node_create",
             "node_update",
+            "node_patch",
             "node_delete",
             "node_update_property",
             "node_move",

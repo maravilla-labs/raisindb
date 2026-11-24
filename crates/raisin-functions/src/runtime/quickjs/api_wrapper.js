@@ -381,6 +381,13 @@ globalThis.raisin = {
             if (result && result.error) throw new Error(result.message || result.error);
             return wrapNode(result, workspace);
         },
+        // Partial update like `update`; a null value REMOVES the property.
+        // data: { properties: {...} }
+        patch: (workspace, path, data) => {
+            const result = __call('nodes_patch', [workspace, path, data]);
+            if (result && result.error) throw new Error(result.message || result.error);
+            return wrapNode(result, workspace);
+        },
         delete: (workspace, path) => {
             const parsed = __call('nodes_delete', [workspace, path]);
             if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);

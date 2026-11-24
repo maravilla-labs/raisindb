@@ -36,6 +36,7 @@ pub mod jobs;
 pub mod localized;
 pub mod management;
 pub mod node_operations;
+pub mod node_patch;
 mod repository;
 pub mod scope;
 pub mod spatial;

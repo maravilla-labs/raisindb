@@ -31,6 +31,7 @@ mod initial_structure;
 mod move_copy;
 pub(crate) mod node_helpers;
 mod order;
+mod property_patch;
 mod relations;
 mod schema_builders;
 mod schema_dml;

@@ -77,6 +77,10 @@ pub(crate) struct ReadCache {
     /// Never pruned when a later overlay replaces the name — every hint is
     /// judged against the transaction's final view.
     pub(crate) node_name_hints: HashMap<(String, String, String), BTreeSet<String>>,
+    /// Partial property updates applied at COMMIT, under the nodes' commit
+    /// lock, against the state stored then (`context/nodes/patch.rs`):
+    /// (workspace, node_id) -> the merged patch, in first-patched order.
+    pub(crate) deferred_patches: Vec<((String, String), raisin_storage::node_patch::PropertyPatch)>,
 }
 
 impl ReadCache {

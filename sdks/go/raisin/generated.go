@@ -621,6 +621,11 @@ func (NodesAPI) MoveChildBefore(workspace string, parentPath string, childName s
 	return callVoid("nodes_moveChildBefore", []any{workspace, parentPath, childName, beforeChildName})
 }
 
+// Patch calls the RaisinDB registry method "nodes_patch".
+func (NodesAPI) Patch(workspace string, path string, data any) (json.RawMessage, error) {
+	return callJSON("nodes_patch", []any{workspace, path, data})
+}
+
 // Query calls the RaisinDB registry method "nodes_query".
 func (NodesAPI) Query(workspace string, query any) (json.RawMessage, error) {
 	return callJSON("nodes_query", []any{workspace, query})

@@ -90,8 +90,15 @@ pub trait FunctionApi: Send + Sync {
     /// Create a new node
     async fn node_create(&self, workspace: &str, parent_path: &str, data: Value) -> Result<Value>;
 
-    /// Update a node
+    /// Partially update a node: only the top-level properties named in
+    /// `data.properties` are written, merged into the node as stored when the
+    /// write lands (a `null` is stored as null). `data.replace: true` replaces
+    /// the whole property map instead.
     async fn node_update(&self, workspace: &str, path: &str, data: Value) -> Result<Value>;
+
+    /// Like [`Self::node_update`], with JSON merge-patch semantics for `null`:
+    /// a property set to `null` is removed.
+    async fn node_patch(&self, workspace: &str, path: &str, data: Value) -> Result<Value>;
 
     /// Delete a node
     async fn node_delete(&self, workspace: &str, path: &str) -> Result<()>;

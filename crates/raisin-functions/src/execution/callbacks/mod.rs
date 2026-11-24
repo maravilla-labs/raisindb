@@ -110,6 +110,7 @@ where
             ),
         ))),
         node_update: Some(nodes::create_node_update(query_ctx.clone())),
+        node_patch: Some(nodes::create_node_patch(query_ctx.clone())),
         node_delete: Some(nodes::create_node_delete(query_ctx.clone())),
         node_update_property: Some(nodes::create_node_update_property(query_ctx.clone())),
         node_move: Some(nodes::create_node_move(query_ctx.clone())),

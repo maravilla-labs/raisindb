@@ -32,6 +32,7 @@ pub struct RaisinFunctionApiCallbacks {
     /// Never exposed as a `raisin.*` method.
     pub system_node_create: Option<NodeCreateCallback>,
     pub node_update: Option<NodeUpdateCallback>,
+    pub node_patch: Option<NodeUpdateCallback>,
     pub node_delete: Option<NodeDeleteCallback>,
     pub node_update_property: Option<NodeUpdatePropertyCallback>,
     pub node_move: Option<NodeMoveCallback>,
@@ -137,6 +138,11 @@ impl RaisinFunctionApiCallbacks {
 
     pub fn with_node_create(mut self, callback: NodeCreateCallback) -> Self {
         self.node_create = Some(callback);
+        self
+    }
+
+    pub fn with_node_patch(mut self, callback: NodeUpdateCallback) -> Self {
+        self.node_patch = Some(callback);
         self
     }
 

@@ -165,6 +165,7 @@ declare namespace raisin {
     function move(workspace: string, nodePath: string, newParentPath: string): Promise<any>;
     function moveChildAfter(workspace: string, parentPath: string, childName: string, afterChildName: string): Promise<void>;
     function moveChildBefore(workspace: string, parentPath: string, childName: string, beforeChildName: string): Promise<void>;
+    function patch(workspace: string, path: string, data: any): Promise<any>;
     function query(workspace: string, query: any): Promise<any[]>;
     function reorderChild(workspace: string, parentPath: string, childName: string, position: number): Promise<void>;
     function update(workspace: string, path: string, data: any): Promise<any>;

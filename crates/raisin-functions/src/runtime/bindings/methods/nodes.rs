@@ -138,6 +138,31 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                 })
             },
         },
+        // nodes.patch(workspace, path, data): partial update, `null` removes
+        ApiMethodDescriptor {
+            internal_name: "nodes_patch",
+            js_name: "patch",
+            py_name: "patch",
+            category: "nodes",
+            args: vec![
+                ArgSpec::new("workspace", ArgType::String),
+                ArgSpec::new("path", ArgType::String),
+                ArgSpec::new("data", ArgType::Json),
+            ],
+            return_type: ReturnType::Json,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let workspace = parser.string()?;
+                    let path = parser.string()?;
+                    let data = parser.json()?;
+                    let result = api.node_patch(&workspace, &path, data).await?;
+                    Ok(InvokeResult::Json(result))
+                })
+            },
+        },
         // nodes.delete(workspace, path)
         ApiMethodDescriptor {
             internal_name: "nodes_delete",

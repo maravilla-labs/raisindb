@@ -53,6 +53,14 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
     // Check for conflicts before committing
     tx.check_conflicts()?;
 
+    // PHASE 0: Partial property updates (`context/nodes/patch.rs`). Each
+    // patched node is read as stored NOW, under the commit lock this commit
+    // holds until its batch is written, and staged at a revision allocated
+    // after every earlier writer of the node landed — so a concurrent write
+    // of another property is never overwritten with a stale copy. The guard
+    // covers every node of the transaction and replaces the lock taken below.
+    let patch_guard = super::context::nodes::patch::apply_deferred_patches(tx).await?;
+
     // PHASE 1: Extract metadata and changed data
     let commit_meta = tx.extract_commit_metadata()?;
     let tenant_id = commit_meta.tenant_id;
@@ -154,12 +162,13 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
     // other writer of those nodes lands in between. Under it, each staged
     // property-index write is re-validated against what is stored NOW (two
     // writers of one node, or a commit below a version committed meanwhile).
-    let node_guard = match branch.as_deref() {
-        Some(branch_name) => Some(
+    let node_guard = match (patch_guard, branch.as_deref()) {
+        (Some(guard), _) => Some(guard),
+        (None, Some(branch_name)) => Some(
             tx.lock_written_nodes(&tenant_id, &repo_id, branch_name)
                 .await?,
         ),
-        None => None,
+        (None, None) => None,
     };
     tx.revalidate_staged_index_writes(&mut batch_to_write)?;
     if let Some(guard) = &node_guard {

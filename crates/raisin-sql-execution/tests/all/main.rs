@@ -57,6 +57,7 @@ mod order_by_path_tests;
 mod pagination_navigation_tests;
 mod param_plan_cache_invalidation;
 mod param_plan_cache_tests;
+mod partial_update_concurrency;
 mod path_like_prefix_scan;
 mod pgq_paths_rocksdb;
 mod pgq_rls;

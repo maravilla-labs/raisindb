@@ -2008,6 +2008,31 @@ pub mod nodes {
         crate::wire::decode_void(&raw)
     }
 
+    /// `raisin.nodes.patch` — registry method `nodes_patch`.
+    pub fn patch(workspace: &str, path: &str, data: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(workspace)?,
+            ::serde_json::to_value(path)?,
+            ::serde_json::to_value(data)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("nodes_patch", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `patch`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn patch_as<T: ::serde::de::DeserializeOwned>(workspace: &str, path: &str, data: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(workspace)?,
+            ::serde_json::to_value(path)?,
+            ::serde_json::to_value(data)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("nodes_patch", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
     /// `raisin.nodes.query` — registry method `nodes_query`.
     pub fn query(workspace: &str, query: impl ::serde::Serialize) -> crate::Result<Vec<::serde_json::Value>> {
         let args = ::serde_json::Value::Array(vec![

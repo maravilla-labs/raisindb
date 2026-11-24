@@ -16,6 +16,7 @@ pub(super) mod delete;
 pub(super) mod list;
 pub(super) mod move_tree;
 mod move_view;
+pub(in crate::transaction) mod patch;
 pub(super) mod read;
 pub(super) mod reorder;
 pub(super) mod upsert;

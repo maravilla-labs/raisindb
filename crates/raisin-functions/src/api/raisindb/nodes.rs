@@ -70,6 +70,19 @@ impl RaisinFunctionApi {
         callback(workspace.to_string(), path.to_string(), data).await
     }
 
+    pub(crate) async fn impl_node_patch(
+        &self,
+        workspace: &str,
+        path: &str,
+        data: Value,
+    ) -> Result<Value> {
+        let callback = self.callbacks.node_patch.as_ref().ok_or_else(|| {
+            raisin_error::Error::Validation("Node patch callback not configured".to_string())
+        })?;
+
+        callback(workspace.to_string(), path.to_string(), data).await
+    }
+
     pub(crate) async fn impl_node_delete(&self, workspace: &str, path: &str) -> Result<()> {
         let callback = self.callbacks.node_delete.as_ref().ok_or_else(|| {
             raisin_error::Error::Validation("Node delete callback not configured".to_string())
