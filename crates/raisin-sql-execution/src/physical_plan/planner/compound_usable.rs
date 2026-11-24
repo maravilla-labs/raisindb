@@ -63,6 +63,11 @@ impl PhysicalPlanner {
         // downstream to catch it.
         let availability = self.compound_availability(workspace, branch, index_name);
         if !availability.is_ready() {
+            super::explain_notes::note(format!(
+                "compound index '{}' matches this query but is not used: {}",
+                index_name,
+                availability.explain_reason()
+            ));
             tracing::debug!(
                 index = %index_name,
                 workspace = %workspace,

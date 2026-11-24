@@ -66,6 +66,7 @@ mod pgq_paths_rocksdb;
 mod pgq_rls;
 mod plan_cache_tests;
 mod point_read_shape_tests;
+mod prefix_scan_streaming;
 mod profiling_test;
 mod property_index_bounded_tests;
 mod property_index_limit_tests;

@@ -16,6 +16,9 @@ use super::{SCAN_COUNT_CEILING, SCAN_TIME_LIMIT, TIME_CHECK_INTERVAL};
 use crate::physical_plan::executor::{ExecutionContext, ExecutionError, RowStream};
 use crate::physical_plan::operators::PhysicalPlan;
 use async_stream::try_stream;
+
+/// Page size of an unbounded child or subtree walk.
+const STREAM_PAGE: usize = 512;
 use raisin_core::services::rls_filter;
 use raisin_error::Error;
 use raisin_models::permissions::PermissionScope;
@@ -197,6 +200,10 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                 .and_then(|c| c.label())
                 .map(|label| label.to_string());
             let mut emitted = 0usize;
+            // Without a bound the children are still read in PAGES, so a
+            // consumer that stops early (a LIMIT above a residual filter) stops
+            // the reads too; one unbounded page read every child first.
+            let child_page = scan_limit.unwrap_or(STREAM_PAGE);
 
             'pages: while parent_id.is_some() {
                 let list_options = list_options();
@@ -213,7 +220,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                                 StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
                                 parent_id,
                                 page_cursor.as_deref(),
-                                scan_limit,
+                                Some(child_page),
                                 order_descending,
                                 list_options,
                             )
@@ -302,14 +309,13 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                 // Another page is worth fetching only when the query is bounded,
                 // we came up short of that bound, and this page was full. A short
                 // page means the index is exhausted, so stop regardless.
-                match (limit, scan_limit) {
-                    (Some(lim), Some(page_size)) if emitted < lim && fetched >= page_size => {
-                        tracing::debug!(
-                            "PrefixScan refill: {} of {} rows survived filtering, fetching next page",
-                            emitted, lim
-                        );
-                    }
-                    _ => break 'pages,
+                if fetched >= child_page && limit.is_none_or(|lim| emitted < lim) {
+                    tracing::debug!(
+                        "PrefixScan refill: {} rows emitted, fetching next page",
+                        emitted
+                    );
+                } else {
+                    break 'pages;
                 }
             }
         } else if !is_directory_prefix {
@@ -419,7 +425,8 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                 // come up short. Resume from the last `__tree_order` seen —
                 // `seed_resumed_traversal` descends the spine in O(depth), it
                 // does not re-walk what came before.
-                let page_size = scan_limit.map(|lim| lim.saturating_add(1));
+                // Unbounded scans walk the subtree in pages too (see above).
+                let page_size = Some(scan_limit.map_or(STREAM_PAGE, |lim| lim.saturating_add(1)));
                 let mut page_cursor: Option<String> = order_cursor
                     .as_ref()
                     .and_then(|c| c.tree_order())
@@ -524,11 +531,11 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                     // Resume the walk only when the query is bounded, we are still
                     // short of that bound, and the page came back full. A short page
                     // means the subtree is exhausted.
-                    match (limit, page_size) {
-                        (Some(lim), Some(size)) if emitted < lim && fetched >= size => {
+                    match page_size {
+                        Some(size) if fetched >= size && limit.is_none_or(|lim| emitted < lim) => {
                             tracing::debug!(
-                                "PrefixScan subtree refill: {} of {} rows survived filtering, resuming walk",
-                                emitted, lim
+                                "PrefixScan subtree refill: {} rows emitted, resuming walk",
+                                emitted
                             );
                         }
                         _ => break 'subtree,

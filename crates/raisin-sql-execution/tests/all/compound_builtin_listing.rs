@@ -147,9 +147,15 @@ async fn an_explicit_index_still_wins_and_an_unbuilt_one_does_not_shadow() {
     .await;
     raisin_sql_execution::invalidate_compound_index_cache();
     let typed = explain(&engine, TYPED).await;
+    // The plan proper; EXPLAIN's notes name the unbuilt index on purpose.
+    let (plan, notes) = typed.split_once("=== Notes ===").unwrap_or((&typed, ""));
     assert!(
-        typed.contains("CompoundIndexScan") && !typed.contains("@folder_type_time"),
+        plan.contains("CompoundIndexScan") && !plan.contains("@folder_type_time"),
         "an unbuilt better index must not take the listing off the index:\n{typed}"
+    );
+    assert!(
+        notes.contains("@folder_type_time"),
+        "EXPLAIN says why the better index was passed over:\n{typed}"
     );
     build_compound(&storage, repo).await;
     assert!(explain(&engine, TYPED).await.contains("@folder_type_time"));

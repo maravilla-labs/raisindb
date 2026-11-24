@@ -15,6 +15,7 @@
 
 mod compound_index;
 mod compound_usable;
+pub(crate) mod explain_notes;
 mod filter_analysis;
 mod join_planning;
 mod plan_dispatch;

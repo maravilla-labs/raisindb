@@ -216,3 +216,81 @@ async fn a_range_on_a_date_property_finds_its_rows() {
     .await;
     assert_eq!(window.len(), 3, "{window:?}");
 }
+
+/// A window bounded on both sides drives the scan, not the type equality
+/// (scale item 2: the type index read 52,000 assignments to keep 833).
+#[tokio::test]
+async fn a_bounded_window_beats_the_type_equality() {
+    let (_s, _d, engine) = setup().await;
+    let mut values = Vec::new();
+    for i in 0..400 {
+        values.push(format!(
+            "('/w-{i:04}', 'test:WO', '{{\"code\":\"k{i:04}\"}}'::JSONB)"
+        ));
+    }
+    for chunk in values.chunks(200) {
+        rows(
+            &engine,
+            &format!(
+                "INSERT INTO items (path, node_type, properties) VALUES {}",
+                chunk.join(",")
+            ),
+        )
+        .await;
+    }
+    let q = "SELECT path FROM items WHERE node_type = 'test:WO' \
+             AND properties->>'code'::String >= 'k0100' AND properties->>'code'::String < 'k0110'";
+    let plan = rows(&engine, &format!("EXPLAIN {q}")).await.join("\n");
+    assert!(plan.contains("PropertyRangeScan"), "{plan}");
+    let got = rows(&engine, q).await;
+    assert_eq!(got.len(), 10, "{got:?}");
+}
+
+/// A declared compound index the planner cannot use is NAMED in EXPLAIN with
+/// the reason (scale item 5), instead of a silent fallback.
+#[tokio::test]
+async fn explain_names_an_unusable_compound_index_and_why() {
+    let (storage, _d, engine) = setup().await;
+    storage
+        .node_types()
+        .create(
+            BranchScope::new(TENANT, REPO, BRANCH),
+            serde_json::from_value(serde_json::json!({
+                "name": "test:Job",
+                "properties": [
+                    { "name": "team", "type": "String" },
+                    { "name": "status", "type": "String" },
+                    { "name": "due", "type": "String" }
+                ],
+                "compound_indexes": [{
+                    "name": "job_by_team_status",
+                    "has_order_column": true,
+                    "columns": [
+                        { "property": "team", "column_type": "String" },
+                        { "property": "status", "column_type": "String" },
+                        { "property": "due", "column_type": "String", "ascending": false }
+                    ]
+                }]
+            }))
+            .unwrap(),
+            CommitMetadata {
+                message: "t".into(),
+                actor: "t".into(),
+                is_system: true,
+            },
+        )
+        .await
+        .unwrap();
+    let plan = rows(
+        &engine,
+        "EXPLAIN SELECT path FROM items WHERE node_type = 'test:Job' \
+         AND properties->>'team'::String = 'a' AND properties->>'status'::String = 'open' \
+         ORDER BY properties->>'due' DESC LIMIT 10",
+    )
+    .await
+    .join("\n");
+    assert!(
+        plan.contains("Notes") && plan.contains("job_by_team_status"),
+        "EXPLAIN must name the passed-over index: {plan}"
+    );
+}

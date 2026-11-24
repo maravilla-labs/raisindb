@@ -73,9 +73,11 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         // EXPLAIN shows the plan the query runs.
         let statement = AnalyzedStatement::Query(query.clone());
         let optimized_plan = super::prepared::logical_plan(&self.catalog, &statement)?;
-        let physical_plan = self
-            .physical_plan_for(&statement, Some(&optimized_plan))
-            .await?;
+        let (physical_plan, notes) = crate::physical_plan::planner::explain_notes::collect(
+            self.physical_plan_for(&statement, Some(&optimized_plan)),
+        )
+        .await;
+        let physical_plan = physical_plan?;
 
         let mut explain_output = String::new();
 
@@ -94,6 +96,14 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
         explain_output.push_str("=== Physical Execution Plan ===\n");
         explain_output.push_str(&physical_plan.explain());
+        if !notes.is_empty() {
+            explain_output.push_str("\n=== Notes ===\n");
+            for note in notes {
+                explain_output.push_str("- ");
+                explain_output.push_str(&note);
+                explain_output.push('\n');
+            }
+        }
 
         Ok(Self::explain_row_stream(explain_output))
     }

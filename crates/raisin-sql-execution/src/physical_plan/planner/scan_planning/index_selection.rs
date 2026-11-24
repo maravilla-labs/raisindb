@@ -177,9 +177,36 @@ fn prefer_value_over_type<'a>(
     if !is_type_equality(best) {
         return best;
     }
-    index_options
+    if let Some((p, _)) = index_options
         .iter()
         .find(|(p, _)| matches!(p, CanonicalPredicate::JsonPropertyEq { .. }))
-        .map(|(p, _)| *p)
-        .unwrap_or(best)
+    {
+        return p;
+    }
+    // A property window bounded on BOTH sides (`start_at >= a AND start_at <
+    // b`) beats the type equality the same way: the type held 52,000
+    // assignments and was read whole and filtered (2-3 s, refused under load)
+    // while the window was 833 rows from the range index (20 ms). The type
+    // equality stays a residual filter.
+    bounded_range(index_options).unwrap_or(best)
+}
+
+/// The first JSON property range that has both a lower and an upper bound
+/// among the options.
+fn bounded_range<'a>(
+    index_options: &[(&'a CanonicalPredicate, f64)],
+) -> Option<&'a CanonicalPredicate> {
+    let side = |p: &CanonicalPredicate| match p {
+        CanonicalPredicate::JsonPropertyRange { key, op, .. } => {
+            Some((key.clone(), op.is_lower_bound()))
+        }
+        _ => None,
+    };
+    index_options.iter().find_map(|(p, _)| {
+        let (key, lower) = side(p)?;
+        let other = index_options
+            .iter()
+            .any(|(q, _)| side(q).is_some_and(|(k, l)| k == key && l != lower));
+        other.then_some(*p)
+    })
 }

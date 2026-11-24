@@ -504,8 +504,11 @@ impl PhysicalPlanner {
     /// nothing below it can reorder rows, so this check is a lookup rather than a
     /// re-derivation.
     ///
-    /// Projections pass through (they preserve row order); anything else does
-    /// not, so a Filter or Limit between the Sort and the scan blocks elision.
+    /// Projections and Filters pass through (both preserve row order: a filter
+    /// only drops rows); anything else does not, so a Limit between the Sort
+    /// and the scan blocks elision. Letting a Filter through is what turns
+    /// `CHILD_OF(p) AND name NOT LIKE '.%' ORDER BY __order LIMIT 51` from a
+    /// TopN over every child (2.7-5 s) into a streamed, early-stopping walk.
     fn sort_is_satisfied_by_scan(sort_exprs: &[SortExpr], input: &PhysicalPlan) -> bool {
         if sort_exprs.len() != 1 {
             return false;
@@ -531,7 +534,9 @@ impl PhysicalPlanner {
         let mut node = input;
         loop {
             match node {
-                PhysicalPlan::Project { input, .. } => node = input,
+                PhysicalPlan::Project { input, .. } | PhysicalPlan::Filter { input, .. } => {
+                    node = input
+                }
                 PhysicalPlan::PrefixScan {
                     claims_editorial_order,
                     ..
