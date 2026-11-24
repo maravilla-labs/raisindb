@@ -27,6 +27,7 @@ use raisin_rel::eval::RelationResolver;
 use super::context::evaluate_rel_condition_async;
 use super::matching::matching_permissions;
 use super::visitor_zone;
+use super::written_fields::{written_fields, Written};
 
 /// Whether `auth` may create `node` (its path, type and create condition
 /// evaluated over the node itself).
@@ -85,9 +86,12 @@ pub async fn write_fields_denied(
     if permissions.is_system_admin {
         return None;
     }
+    // An UPDATE grant's condition is judged on the node AS STORED: judged on
+    // the new node, a caller could satisfy it by writing the very values it
+    // checks (an owner field, a status). A create has only the new node.
     let grants = granting(
         target,
-        node,
+        target,
         &permissions.permissions,
         auth,
         scope,
@@ -100,9 +104,16 @@ pub async fn write_fields_denied(
     if grants.is_empty() || grants.iter().any(|g| restricts_nothing(g)) {
         return None;
     }
-    written_properties(existing, node)
+    // Grants here all restrict fields (an unrestricted one returned above).
+    written_fields(existing, node)
         .into_iter()
-        .find(|p| !grants.iter().any(|g| allows_field(g, p)))
+        .find_map(|w| match w {
+            Written::Property(p) => (!grants.iter().any(|g| allows_field(g, &p))).then_some(p),
+            // A node field (archetype, owner, relations, ...) is not a
+            // property a field list can name: only an unrestricted grant
+            // may write it.
+            Written::NodeField(f) => Some(f.to_string()),
+        })
 }
 
 /// Grants matching `target` for `operation` whose condition holds over
@@ -141,41 +152,6 @@ fn allows_field(grant: &Permission, property: &str) -> bool {
             .except_fields
             .as_ref()
             .is_none_or(|e| !e.iter().any(|x| x == property))
-}
-
-fn is_engine_owned(property: &str) -> bool {
-    property.starts_with('$') || property.starts_with("__")
-}
-
-/// The properties a write sets: those it changes (update) or carries
-/// (create), engine-owned keys left out, sorted.
-fn written_properties(existing: Option<&Node>, node: &Node) -> Vec<String> {
-    let mut names: Vec<String> = match existing {
-        None => node.properties.keys().cloned().collect(),
-        Some(stored) => {
-            let differs =
-                |a: &raisin_models::nodes::properties::PropertyValue,
-                 b: &raisin_models::nodes::properties::PropertyValue| {
-                    a != b && serde_json::to_value(a).ok() != serde_json::to_value(b).ok()
-                };
-            node.properties
-                .iter()
-                .filter(|(k, v)| stored.properties.get(*k).is_none_or(|o| differs(o, v)))
-                .map(|(k, _)| k.clone())
-                .chain(
-                    stored
-                        .properties
-                        .keys()
-                        .filter(|k| !node.properties.contains_key(*k))
-                        .cloned(),
-                )
-                .collect()
-        }
-    };
-    names.retain(|k| !is_engine_owned(k));
-    names.sort();
-    names.dedup();
-    names
 }
 
 #[cfg(test)]
@@ -299,5 +275,90 @@ mod tests {
         let a = auth(vec![g], None);
         assert!(can_create_node(&node("/x", &[("status", "draft")]), &a, &scope(), None).await);
         assert!(!can_create_node(&node("/x", &[("status", "sent")]), &a, &scope(), None).await);
+    }
+
+    /// An update condition is judged on the STORED node: writing the value a
+    /// condition checks does not satisfy it.
+    #[tokio::test]
+    async fn an_update_condition_cannot_be_satisfied_by_the_write_itself() {
+        let mut owner_grant = grant(vec![Operation::Update]);
+        owner_grant.condition = Some("node.owner == 'u1'".into());
+        let mut notes_only = grant(vec![Operation::Update]);
+        notes_only.fields = Some(vec!["notes".into()]);
+        let a = auth(vec![owner_grant, notes_only], None);
+
+        let stored = node("/wo/1", &[("owner", "other"), ("price", "100")]);
+        let escalate = node("/wo/1", &[("owner", "u1"), ("price", "1")]);
+        assert!(
+            write_fields_denied(Some(&stored), &escalate, &a, &scope(), None)
+                .await
+                .is_some(),
+            "claiming ownership in the same write must not unlock the grant"
+        );
+
+        // The real owner passes through the unrestricted grant.
+        let mine = node("/wo/1", &[("owner", "u1"), ("price", "100")]);
+        let edit = node("/wo/1", &[("owner", "u1"), ("price", "1")]);
+        assert_eq!(
+            write_fields_denied(Some(&mine), &edit, &a, &scope(), None).await,
+            None
+        );
+    }
+
+    /// Translations are writes of the property they translate; archetype,
+    /// owner and relations are node fields only an unrestricted grant writes.
+    #[tokio::test]
+    async fn translations_and_node_fields_do_not_bypass_field_grants() {
+        let mut g = grant(vec![Operation::Update]);
+        g.fields = Some(vec!["status".into()]);
+        let a = auth(vec![g], None);
+        let stored = node("/wo/1", &[("status", "open"), ("title", "a")]);
+        let translated = |locale_props: serde_json::Value| {
+            let mut n = stored.clone();
+            let mut tr = std::collections::HashMap::new();
+            tr.insert("de".to_string(), PropertyValue::from_json(&locale_props));
+            n.translations = Some(tr);
+            n
+        };
+
+        let title_de = translated(serde_json::json!({ "title": "b" }));
+        assert_eq!(
+            write_fields_denied(Some(&stored), &title_de, &a, &scope(), None).await,
+            Some("title".to_string())
+        );
+        let status_de = translated(serde_json::json!({ "status": "offen" }));
+        assert_eq!(
+            write_fields_denied(Some(&stored), &status_de, &a, &scope(), None).await,
+            None
+        );
+
+        let mut archetype = stored.clone();
+        archetype.archetype = Some("x:Other".into());
+        let mut owner = stored.clone();
+        owner.owner_id = Some("u1".into());
+        let mut related = stored.clone();
+        related.relations = vec![serde_json::from_value(serde_json::json!({
+            "target": "n2", "workspace": "app", "target_node_type": "app:Team", "relation_type": "member"
+        }))
+        .expect("relation")];
+        for (write, field) in [
+            (&archetype, "archetype"),
+            (&owner, "owner_id"),
+            (&related, "relations"),
+        ] {
+            assert_eq!(
+                write_fields_denied(Some(&stored), write, &a, &scope(), None).await,
+                Some(field.to_string())
+            );
+        }
+
+        // An unrestricted grant may write all of them.
+        let a = auth(vec![grant(vec![Operation::Update])], None);
+        for write in [&title_de, &archetype, &owner, &related] {
+            assert_eq!(
+                write_fields_denied(Some(&stored), write, &a, &scope(), None).await,
+                None
+            );
+        }
     }
 }

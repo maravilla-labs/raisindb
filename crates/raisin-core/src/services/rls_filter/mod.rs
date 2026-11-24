@@ -7,6 +7,7 @@
 pub(crate) mod context;
 mod matching;
 mod write_grants;
+mod written_fields;
 
 pub use write_grants::{can_create_node, write_fields_denied};
 

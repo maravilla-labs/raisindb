@@ -174,3 +174,34 @@ async fn a_role_may_create_only_under_its_own_home() {
         .expect_err("another home");
     assert!(err.to_lowercase().contains("cannot create"), "{err}");
 }
+
+/// An update grant's condition is judged on the node AS STORED: a role that
+/// may edit everything on its own work orders cannot make one its own and
+/// change the price in the same write.
+#[tokio::test]
+async fn a_role_cannot_satisfy_an_update_condition_by_writing_it() {
+    let (storage, _dir) = setup().await;
+    let system = engine(&storage, AuthContext::system());
+    insert(&system, "/wo-2", r#"{"owner":"someone","price":"100"}"#)
+        .await
+        .expect("seed");
+
+    let mut own = Permission::new("/**", vec![Operation::Read, Operation::Update]);
+    own.condition = Some("node.owner == auth.user_id".into());
+    let mut notes = Permission::new("/**", vec![Operation::Read, Operation::Update]);
+    notes.fields = Some(vec!["notes".into()]);
+    let tech = engine(&storage, user("tech", vec![own, notes], None));
+
+    let err = exec(
+        &tech,
+        "UPDATE items SET properties = properties || '{\"owner\":\"tech\",\"price\":\"1\"}'::JSONB \
+         WHERE path = '/wo-2'",
+    )
+    .await
+    .expect_err("escalation refused");
+    assert!(err.contains("Cannot write property"), "{err}");
+    assert!(prop(&storage, "/wo-2", "price")
+        .await
+        .unwrap()
+        .contains("100"));
+}
