@@ -50,11 +50,24 @@ pub(crate) async fn fetch_nodes<S: Storage>(
     ids: &[String],
     at: &HLC,
 ) -> Result<Vec<Option<Node>>, Error> {
+    fetch_nodes_with(ctx, scope, workspace, ids, at, ReadOpts::default()).await
+}
+
+/// [`fetch_nodes`] with explicit read options — `PropertiesRead::Skip` when
+/// nothing above the scan reads the property map (an id-only bounded count
+/// decodes node headers, not every property).
+pub(crate) async fn fetch_nodes_with<S: Storage>(
+    ctx: &ExecutionContext<S>,
+    scope: BranchScope<'_>,
+    workspace: &str,
+    ids: &[String],
+    at: &HLC,
+    opts: ReadOpts,
+) -> Result<Vec<Option<Node>>, Error> {
     let items: Vec<BatchReadItem> = ids
         .iter()
         .map(|id| BatchReadItem::id(workspace, id))
         .collect();
-    let opts = ReadOpts::default();
     if ctx.batched_fetch {
         ctx.storage
             .nodes()

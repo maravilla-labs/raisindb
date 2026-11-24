@@ -294,3 +294,41 @@ async fn explain_names_an_unusable_compound_index_and_why() {
         "EXPLAIN must name the passed-over index: {plan}"
     );
 }
+
+/// An id-only index scan (a bounded COUNT subquery) reads node headers, not
+/// properties (scale item 7) — and a residual filter on a property above the
+/// same scan still sees them.
+#[tokio::test]
+async fn id_only_index_scans_count_right_and_filters_still_see_properties() {
+    let (_s, _d, engine) = setup().await;
+    let mut values = Vec::new();
+    for i in 0..300 {
+        values.push(format!(
+            "('/c-{i:04}', 'test:WO', '{{\"status\":\"{}\"}}'::JSONB)",
+            if i % 10 == 0 { "x" } else { "y" }
+        ));
+    }
+    for chunk in values.chunks(150) {
+        rows(
+            &engine,
+            &format!(
+                "INSERT INTO items (path, node_type, properties) VALUES {}",
+                chunk.join(",")
+            ),
+        )
+        .await;
+    }
+    let count = rows(
+        &engine,
+        "SELECT COUNT(*) AS n FROM (SELECT id FROM items WHERE node_type = 'test:WO' LIMIT 250) t",
+    )
+    .await;
+    assert!(count[0].contains("250"), "{count:?}");
+    let filtered = rows(
+        &engine,
+        "SELECT path FROM items WHERE node_type = 'test:WO' \
+         AND properties->>'status'::String = 'x'",
+    )
+    .await;
+    assert_eq!(filtered.len(), 30, "{filtered:?}");
+}

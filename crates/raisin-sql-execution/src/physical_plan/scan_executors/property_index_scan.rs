@@ -8,7 +8,7 @@
 //! Uses the property_index column family to find nodes by property value.
 //! Optimal for queries like: `WHERE properties->>'status' = 'published'`
 
-use super::batch_fetch::{chunk_len, fetch_nodes, per_locale};
+use super::batch_fetch::{chunk_len, fetch_nodes_with, per_locale};
 use super::helpers::{get_locales_to_use, resolve_node_for_locale};
 use super::index_recheck::{is_pseudo_property, json_member_equals, node_still_matches};
 use super::node_to_row::node_to_row_owned;
@@ -110,6 +110,18 @@ pub async fn execute_property_index_scan<S: Storage + 'static>(
         // above this scan), so its candidates are re-checked against the decoded
         // node — see `index_recheck`.
         let pseudo = is_pseudo_property(&property_name);
+        // Nothing above reads the property map (an id-only projection such
+        // as a bounded `COUNT(*)` subquery, no RLS condition, no JSON value
+        // re-check): decode node headers only (scale item 7: a bounded count
+        // of 5,001 cost 100-600 ms decoding every property).
+        let read_opts = raisin_storage::ReadOpts {
+            properties: if verifies_value || super::helpers::scan_needs_properties(&projection, &ctx_clone) {
+                raisin_storage::PropertiesRead::Load
+            } else {
+                raisin_storage::PropertiesRead::Skip
+            },
+            ..Default::default()
+        };
 
         let mut emitted = 0;
         let mut safety_scanned = 0usize;
@@ -166,12 +178,13 @@ pub async fn execute_property_index_scan<S: Storage + 'static>(
                     }
                 }
 
-                let nodes = fetch_nodes(
+                let nodes = fetch_nodes_with(
                     &ctx_clone,
                     BranchScope::new(&tenant_id, &repo_id, &branch),
                     &workspace,
                     chunk,
                     &scan_revision,
+                    read_opts.clone(),
                 )
                 .await?;
 
