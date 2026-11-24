@@ -427,4 +427,82 @@ mod tests {
             Some("node_type".to_string())
         );
     }
+
+    /// The built-in `authenticated_user` role's permissions, from the shipped
+    /// `raisin:access_control` workspace definition.
+    fn shipped_authenticated_user() -> Vec<Permission> {
+        fn find(v: &serde_json::Value) -> Option<serde_json::Value> {
+            match v {
+                serde_json::Value::Object(m) => {
+                    if m.get("properties")
+                        .and_then(|p| p.get("role_id"))
+                        .and_then(|r| r.as_str())
+                        == Some("authenticated_user")
+                    {
+                        return m["properties"].get("permissions").cloned();
+                    }
+                    m.values().find_map(find)
+                }
+                serde_json::Value::Array(a) => a.iter().find_map(find),
+                _ => None,
+            }
+        }
+        let ws = crate::workspace_init::load_global_workspaces()
+            .into_iter()
+            .find(|w| w.name == "raisin:access_control")
+            .expect("access_control workspace");
+        let perms = find(&serde_json::to_value(&ws).unwrap()).expect("authenticated_user role");
+        serde_json::from_value(perms).expect("permissions parse")
+    }
+
+    /// A signed-in user may edit the descriptive fields of their own user
+    /// node, never what decides their rights (roles, groups, status, ...).
+    #[tokio::test]
+    async fn authenticated_user_cannot_grant_itself_roles() {
+        let mut a = auth(shipped_authenticated_user(), None);
+        a.local_user_id = Some("me".into());
+        let acl = PermissionScope::new("raisin:access_control", "main");
+        let mut stored = node("/users/internal/u_me", &[("display_name", "Me")]);
+        stored.id = "me".into();
+        stored.node_type = "raisin:User".into();
+
+        let mut renamed = stored.clone();
+        renamed
+            .properties
+            .insert("display_name".into(), PropertyValue::String("New".into()));
+        assert_eq!(
+            write_fields_denied(Some(&stored), &renamed, &a, &acl, None).await,
+            None
+        );
+
+        for (key, value) in [
+            ("roles", serde_json::json!(["admin"])),
+            ("groups", serde_json::json!(["staff"])),
+            ("can_login", serde_json::json!(true)),
+            ("email", serde_json::json!("x@example.com")),
+        ] {
+            let mut write = stored.clone();
+            write
+                .properties
+                .insert(key.into(), PropertyValue::from_json(&value));
+            assert_eq!(
+                write_fields_denied(Some(&stored), &write, &a, &acl, None).await,
+                Some(key.to_string()),
+                "{key}"
+            );
+        }
+        // Reading the own node is still allowed.
+        assert!(crate::services::rls_filter::can_perform(
+            &stored,
+            Operation::Read,
+            &a,
+            &acl
+        ));
+        assert!(crate::services::rls_filter::can_perform(
+            &stored,
+            Operation::Update,
+            &a,
+            &acl
+        ));
+    }
 }

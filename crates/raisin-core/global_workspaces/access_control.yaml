@@ -112,12 +112,23 @@ initial_structure:
             name: "Authenticated User"
             description: "Default role for all authenticated users with social profile access"
             permissions:
-              # Self - full access to own user node
+              # Self - read own user node
               - path: "users/**"
-                operations: ["read", "update"]
+                operations: ["read"]
                 node_types: ["raisin:User"]
                 workspace: "raisin:access_control"
                 condition: "node.id == auth.local_user_id"
+
+              # Self - update only the descriptive fields of the own user node.
+              # roles, groups, status, can_login, email and user_id decide what
+              # the account may do (PermissionService reads roles/groups from
+              # this node), so they are never the account's own to write.
+              - path: "users/**"
+                operations: ["update"]
+                node_types: ["raisin:User"]
+                workspace: "raisin:access_control"
+                condition: "node.id == auth.local_user_id"
+                fields: ["display_name", "title", "metadata"]
 
               # Self - full access to own profile
               - path: "users/**/profile"
