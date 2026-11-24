@@ -143,11 +143,6 @@ pub async fn resync_system_definitions(
     // only ever see the default branch.
     use raisin_storage::BranchRepository;
 
-    if policy == raisin_core::system_updates::AutoApplyPolicy::Off {
-        tracing::info!("System definition resync disabled (auto_apply = off)");
-        return;
-    }
-
     let repos = match storage.repository_management().list_repositories().await {
         Ok(r) => r,
         Err(e) => {
@@ -155,6 +150,32 @@ pub async fn resync_system_definitions(
             return;
         }
     };
+
+    // SECURITY update, applied whatever `auto_apply` says: an older
+    // repository's `authenticated_user` role let a signed-in user write the
+    // roles and groups of their own user node
+    // (`raisin_core::system_updates::role_security`). Idempotent.
+    for repo_info in &repos {
+        if let Err(e) = raisin_core::system_updates::role_security::secure_authenticated_user_role(
+            storage.as_ref(),
+            &repo_info.tenant_id,
+            &repo_info.repo_id,
+        )
+        .await
+        {
+            tracing::error!(
+                tenant_id = %repo_info.tenant_id,
+                repo_id = %repo_info.repo_id,
+                error = %e,
+                "security update of the authenticated_user role failed"
+            );
+        }
+    }
+
+    if policy == raisin_core::system_updates::AutoApplyPolicy::Off {
+        tracing::info!("System definition resync disabled (auto_apply = off)");
+        return;
+    }
 
     let system_update_repo = raisin_rocksdb::SystemUpdateRepositoryImpl::new(storage.db().clone());
     let nodetypes = definitions.nodetypes();

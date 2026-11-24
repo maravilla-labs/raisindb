@@ -22,6 +22,7 @@ mod breaking_changes;
 mod merge;
 mod pending;
 mod resync;
+pub mod role_security;
 
 pub use apply::{apply_nodetype, apply_workspace};
 pub use breaking_changes::{detect_nodetype_breaking_changes, detect_workspace_breaking_changes};
