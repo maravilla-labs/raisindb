@@ -94,10 +94,18 @@ pub fn is_self_grant(entry: &PropertyValue) -> bool {
     {
         return false;
     }
-    if let Some(types) = &p.node_types {
-        if !types.is_empty() && !types.iter().any(|t| t == "raisin:User") {
-            return false;
-        }
+    // Only a grant that NAMES raisin:User is rewritten. A grant for every
+    // type (node_types empty) is an owner grant over all content (the
+    // built-in `author` role's `conditions: {owner: ...}`): restricting it to
+    // three fields would break every other write it allows. The write-layer
+    // guard (`rls_filter::self_guard`) already keeps such a grant from
+    // touching the access-deciding fields of the caller's own user node.
+    if !p
+        .node_types
+        .as_ref()
+        .is_some_and(|types| types.iter().any(|t| t == "raisin:User"))
+    {
+        return false;
     }
     let (auth, own, other) = probes();
     let scope = PermissionScope::new(ROLE_WORKSPACE, "main");
@@ -137,8 +145,25 @@ pub fn secure_permissions(entries: &[PropertyValue]) -> Option<Vec<Value>> {
             rest["operations"] = Value::Array(others);
             out.push(rest);
         }
+        // Other node types the grant names keep their full update.
+        let other_types: Vec<Value> = raw["node_types"]
+            .as_array()
+            .map(|t| {
+                t.iter()
+                    .filter(|v| v.as_str() != Some("raisin:User"))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !other_types.is_empty() {
+            let mut others_update = raw.clone();
+            others_update["operations"] = json!(["update"]);
+            others_update["node_types"] = Value::Array(other_types);
+            out.push(others_update);
+        }
         let mut update = raw;
         update["operations"] = json!(["update"]);
+        update["node_types"] = json!(["raisin:User"]);
         update["fields"] = json!(SELF_EDITABLE);
         if let Some(obj) = update.as_object_mut() {
             obj.remove("except_fields");
@@ -242,14 +267,38 @@ mod tests {
     #[test]
     fn equivalent_spellings_are_recognised() {
         for v in [
-            // whitespace, other self conditions, no node_types (= every type)
-            json!({ "path": "users/**", "operations": ["UPDATE"], "condition": "  node.id==auth.local_user_id " }),
-            json!({ "path": "**", "operations": ["update"], "node_types": [], "condition": "node.path == auth.home" }),
-            json!({ "path": "users/**", "operations": ["update"], "condition": "node.user_id == auth.user_id" }),
-            json!({ "path": "users/**", "operations": ["update"], "conditions": { "owner": "$user.id" } }),
+            json!({ "path": "users/**", "operations": ["UPDATE"], "node_types": ["raisin:User"],
+                    "condition": "  node.id==auth.local_user_id " }),
+            json!({ "path": "**", "operations": ["update"], "node_types": ["raisin:User"],
+                    "condition": "node.path == auth.home" }),
+            json!({ "path": "users/**", "operations": ["update"], "node_types": ["raisin:User"],
+                    "condition": "node.user_id == auth.user_id" }),
+            json!({ "path": "users/**", "operations": ["update"], "node_types": ["raisin:User"],
+                    "conditions": { "owner": "$user.id" } }),
         ] {
             assert!(is_self_grant(&pv(v.clone())), "{v}");
         }
+    }
+
+    /// The built-in `author` shape (every type, owner condition) keeps its
+    /// full update; a grant naming raisin:User and other types is split so
+    /// the other types keep theirs.
+    #[test]
+    fn an_owner_grant_over_all_content_is_kept_and_other_types_keep_update() {
+        let author = json!({ "path": "**", "operations": ["read", "update", "delete"],
+                             "conditions": { "owner": "$user.id" } });
+        assert!(!is_self_grant(&pv(author.clone())));
+        assert!(secure_permissions(&[pv(author)]).is_none());
+
+        let mixed = json!({ "path": "users/**", "operations": ["update"],
+                            "node_types": ["raisin:User", "raisin:Profile"],
+                            "condition": "node.id == auth.local_user_id" });
+        let fixed = secure_permissions(&[pv(mixed)]).expect("changed");
+        assert_eq!(fixed.len(), 2);
+        assert_eq!(fixed[0]["node_types"], json!(["raisin:Profile"]));
+        assert!(fixed[0].get("fields").is_none());
+        assert_eq!(fixed[1]["node_types"], json!(["raisin:User"]));
+        assert_eq!(fixed[1]["fields"], json!(SELF_EDITABLE));
     }
 
     #[test]
@@ -336,7 +385,17 @@ mod tests {
             "main",
             "member",
             json!([{ "path": "users/**", "operations": ["update"],
-            "condition": "node.path == auth.home" }]),
+            "node_types": ["raisin:User"], "condition": "node.path == auth.home" }]),
+        )
+        .await;
+        seed(
+            &storage,
+            t,
+            r,
+            "main",
+            "author",
+            json!([{ "path": "**", "operations": ["update"],
+            "conditions": { "owner": "$user.id" } }]),
         )
         .await;
         seed(

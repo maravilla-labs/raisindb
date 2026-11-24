@@ -12,7 +12,8 @@
     `metadata`;
   - a security system update rewrites, on engine start, every `raisin:Role` on
     every branch of every repository that holds such a self grant (decided
-    from the parsed permission, however it is spelled), whatever the
+    from the parsed permission, however it is spelled; only grants that name
+    `raisin:User`, so an owner grant over all content is untouched), whatever the
     `auto_apply` policy says; other permissions are kept, a fixed role is not
     written again (`raisin_core::system_updates::role_security`);
   - the write layer refuses a non-admin caller's write of `roles`, `groups`,
