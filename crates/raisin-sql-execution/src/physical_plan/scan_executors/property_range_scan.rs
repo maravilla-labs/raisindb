@@ -112,6 +112,18 @@ pub async fn execute_property_range_scan<S: Storage + 'static>(
 
     let lower_pv = parse_bound(&lower_bound, &property_name);
     let upper_pv = parse_bound(&upper_bound, &property_name);
+    // A `Date` property is indexed by its instant (`hash_property_value`:
+    // zero-padded nanoseconds), not its text, so a text bound like
+    // '2026-11-17' compared lexicographically against those digits matched
+    // NOTHING. When a bound reads as a date, the instant range is scanned too
+    // (widened by a day for offsets); the planner keeps the range predicate
+    // in the residual filter for custom properties, so each row is still
+    // judged by the exact text comparison `->>` makes.
+    let date_bounds = if property_name.starts_with("__") {
+        None
+    } else {
+        date_range_bounds(lower_bound.as_ref(), upper_bound.as_ref())
+    };
 
     tracing::debug!(
         "PropertyRangeScan: {} (lower={:?}, upper={:?}) {} limit={:?}",
@@ -137,7 +149,7 @@ pub async fn execute_property_range_scan<S: Storage + 'static>(
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut index_limit = limit;
         loop {
-            let entries = storage
+            let mut entries = storage
                 .property_index()
                 .scan_property_range(
                     StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
@@ -151,7 +163,25 @@ pub async fn execute_property_range_scan<S: Storage + 'static>(
                 )
                 .await
                 .map_err(|e| ExecutionError::Backend(e.to_string()))?;
-            let truncated = index_limit.is_some_and(|l| entries.len() >= l);
+            let mut truncated = index_limit.is_some_and(|l| entries.len() >= l);
+            if let Some((date_lower, date_upper)) = &date_bounds {
+                let dated = storage
+                    .property_index()
+                    .scan_property_range(
+                        StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                        &property_name,
+                        date_lower.as_ref().map(|v| (v, true)),
+                        date_upper.as_ref().map(|v| (v, true)),
+                        false,
+                        Some(&scan_revision),
+                        ascending,
+                        index_limit,
+                    )
+                    .await
+                    .map_err(|e| ExecutionError::Backend(e.to_string()))?;
+                truncated |= index_limit.is_some_and(|l| dated.len() >= l);
+                entries.extend(dated);
+            }
 
             for entry in entries {
                 if emitted >= limit_count {
@@ -232,4 +262,79 @@ pub async fn execute_property_range_scan<S: Storage + 'static>(
             index_limit = None;
         }
     }))
+}
+
+/// A text bound that reads as a date or date-time, as an instant (UTC).
+fn parse_date_bound(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
+    let t = text.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(t) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(n) = NaiveDateTime::parse_from_str(t, fmt) {
+            return Some(Utc.from_utc_datetime(&n));
+        }
+    }
+    NaiveDate::parse_from_str(t, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|n| Utc.from_utc_datetime(&n))
+}
+
+/// Instant bounds for a `Date` property's index when the text bounds read as
+/// dates: widened by a day each way (a stored value may carry any offset; the
+/// residual filter makes the exact text comparison). `None` when neither
+/// bound is a date, or one bound is present but not a date.
+#[allow(clippy::type_complexity)]
+fn date_range_bounds(
+    lower: Option<&(String, bool)>,
+    upper: Option<&(String, bool)>,
+) -> Option<(Option<PropertyValue>, Option<PropertyValue>)> {
+    let day = chrono::Duration::days(1);
+    let conv = |b: Option<&(String, bool)>,
+                shift: chrono::Duration|
+     -> Result<Option<PropertyValue>, ()> {
+        match b {
+            None => Ok(None),
+            Some((text, _)) => parse_date_bound(text)
+                .map(|dt| Some(PropertyValue::Date((dt + shift).into())))
+                .ok_or(()),
+        }
+    };
+    if lower.is_none() && upper.is_none() {
+        return None;
+    }
+    let lo = conv(lower, -day).ok()?;
+    let hi = conv(upper, day).ok()?;
+    Some((lo, hi))
+}
+
+#[cfg(test)]
+mod date_bound_tests {
+    use super::{date_range_bounds, parse_date_bound};
+
+    #[test]
+    fn dates_and_date_times_read_as_instants() {
+        for t in [
+            "2026-11-17",
+            "2026-11-17T00:00:00Z",
+            "2026-11-17T00:00:00+00:00",
+            "2026-11-17T00:00",
+        ] {
+            assert_eq!(
+                parse_date_bound(t).unwrap().to_rfc3339(),
+                "2026-11-17T00:00:00+00:00",
+                "{t}"
+            );
+        }
+        assert!(parse_date_bound("open").is_none());
+        assert!(date_range_bounds(Some(&("M".into(), true)), None).is_none());
+        assert!(date_range_bounds(Some(&("2026-11-17".into(), true)), None).is_some());
+    }
 }

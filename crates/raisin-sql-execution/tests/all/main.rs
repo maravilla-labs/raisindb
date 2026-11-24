@@ -56,6 +56,7 @@ mod move_copy_order_at_root;
 mod mvcc_index_oracle;
 mod neighborhood_rocksdb;
 mod order_by_path_tests;
+mod order_scan_filtered_limit;
 mod pagination_navigation_tests;
 mod param_plan_cache_invalidation;
 mod param_plan_cache_tests;

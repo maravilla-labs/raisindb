@@ -729,7 +729,7 @@ impl PhysicalPlanner {
     /// `->>` already yields text), and the `$.` dollar-dot double-cast shape
     /// (`CAST(properties::jsonb ->> ['key'] AS text)`, from
     /// `$.properties.key::TEXT`).
-    fn match_json_key_extract(expr: &Expr) -> Option<(String, String, String)> {
+    pub(crate) fn match_json_key_extract(expr: &Expr) -> Option<(String, String, String)> {
         // Simple shape: properties->>'key'
         if let Expr::JsonExtractText { object, key } = expr {
             if let Expr::Column { table, column } = &object.expr {

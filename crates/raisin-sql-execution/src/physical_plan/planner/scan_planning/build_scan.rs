@@ -815,7 +815,11 @@ impl PhysicalPlanner {
                     upper_bound = Some((encoded, inclusive));
                 }
             }
-            consumed[i] = true;
+            // A custom property's range predicate stays a row filter too: a
+            // `Date` property is also scanned by instant with widened bounds
+            // (`property_range_scan::date_range_bounds`), and the exact text
+            // comparison decides each row.
+            consumed[i] = property_name.starts_with("__");
         }
 
         let remaining: Vec<_> = canonical

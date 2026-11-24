@@ -19,6 +19,7 @@ use crate::physical_plan::executor::{ExecutionContext, ExecutionError, Row, RowS
 use async_stream::try_stream;
 use raisin_core::services::rls_filter;
 use raisin_error::Error;
+use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_models::permissions::PermissionScope;
 use raisin_storage::{NodeRepository, PropertyIndexRepository, Storage, StorageScope};
@@ -88,18 +89,61 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
         // node at a position its record contradicts.
         let pseudo = is_pseudo_property(&property_name);
 
-        let entries = storage
-            .property_index()
-            .scan_property(
-                StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                &property_name,
-                false,
-                Some(&scan_revision),
-                ascending,
-                fetch_limit,
-            )
-            .await
-            .map_err(|e| ExecutionError::Backend(e.to_string()))?;
+        // The index is read in PAGES: a filter above the scan may reject
+        // most entries, and stopping after one bounded fetch returned a SILENT
+        // SUBSET (`LIMIT 5` found 0 of 76 matching rows). Each page re-reads
+        // from the start with a 4x larger bound and skips what was already
+        // consumed (one revision, so the order is stable), until enough rows
+        // were emitted, the index is exhausted, or the scan budget is spent —
+        // which is an error, never a short answer.
+        // Seek to a range bound on the ORDER property itself
+        // (`start_at >= x ORDER BY start_at`): scanning from the first entry
+        // walked every earlier value before reaching the window. Text bounds
+        // only, and not for a value that reads as a date (a `Date` property is
+        // indexed by instant, not text); the filter still checks every row.
+        let (seek_lower, seek_upper) = match &filter {
+            Some(f) if !property_name.starts_with("__") => order_range_bounds(f, &property_name),
+            _ => (None, None),
+        };
+        let seek_lower_pv = seek_lower.map(|(v, i)| (PropertyValue::String(v), i));
+        let seek_upper_pv = seek_upper.map(|(v, i)| (PropertyValue::String(v), i));
+        let seek = seek_lower_pv.is_some() || seek_upper_pv.is_some();
+
+        let mut fetch_limit = fetch_limit;
+        let mut consumed = 0usize;
+        let mut emitted = 0usize;
+        let mut scanned = 0usize;
+        let start_time = Instant::now();
+        let mut budget: Option<Error> = None;
+        'pages: loop {
+        let entries = if seek {
+            storage
+                .property_index()
+                .scan_property_range(
+                    StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                    &property_name,
+                    seek_lower_pv.as_ref().map(|(v, i)| (v, *i)),
+                    seek_upper_pv.as_ref().map(|(v, i)| (v, *i)),
+                    false,
+                    Some(&scan_revision),
+                    ascending,
+                    fetch_limit,
+                )
+                .await
+        } else {
+            storage
+                .property_index()
+                .scan_property(
+                    StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                    &property_name,
+                    false,
+                    Some(&scan_revision),
+                    ascending,
+                    fetch_limit,
+                )
+                .await
+        }
+        .map_err(|e| ExecutionError::Backend(e.to_string()))?;
 
         let entries_count = entries.len();
         tracing::debug!(
@@ -118,12 +162,7 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
             tracing::debug!("PropertyOrderScan: ... and {} more entries", entries_count - 5);
         }
 
-        let mut emitted = 0usize;
-        let mut scanned = 0usize;
-        let start_time = Instant::now();
-        let needs_fallback = filter.is_some() && target_rows != usize::MAX;
-
-        for entry in entries {
+        for entry in entries.into_iter().skip(consumed) {
             if target_rows != usize::MAX && emitted >= target_rows {
                 break;
             }
@@ -132,13 +171,15 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
 
             if scanned > SCAN_COUNT_CEILING {
                 tracing::warn!("PropertyOrderScan count limit reached: {} entries checked", scanned);
-                Err(super::super::scan_count_budget_exceeded(scanned, start_time.elapsed()))?;
+                budget = Some(super::super::scan_count_budget_exceeded(scanned, start_time.elapsed()));
+                break 'pages;
             }
 
             if scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
                 tracing::warn!("PropertyOrderScan time limit reached: {:?} elapsed, {} entries checked",
                                start_time.elapsed(), scanned);
-                Err(super::super::scan_time_budget_exceeded(scanned, start_time.elapsed()))?;
+                budget = Some(super::super::scan_time_budget_exceeded(scanned, start_time.elapsed()));
+                break 'pages;
             }
 
             let node_opt = storage
@@ -220,8 +261,33 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
             }
         }
 
+        consumed = entries_count;
+        let exhausted = fetch_limit.is_none_or(|n| entries_count < n);
+        if (target_rows != usize::MAX && emitted >= target_rows) || exhausted {
+            break 'pages;
+        }
+        fetch_limit = fetch_limit.map(|n| n.saturating_mul(4));
+        }
+
+        // The budget ran out before the answer was complete. With nothing
+        // emitted yet, an equality predicate in the filter can still produce
+        // the COMPLETE answer filter-first (all matches, sorted here); any
+        // other case is the budget error, never a partial result.
+        let fallback_possible = emitted == 0
+            && target_rows != usize::MAX
+            && filter
+                .as_ref()
+                .and_then(extract_property_predicate_from_filter)
+                .is_some();
+        let budget_hit = budget.is_some();
+        if let Some(err) = budget.take() {
+            if !fallback_possible {
+                Err(err)?;
+            }
+        }
+
         // FALLBACK: filter-first strategy for ultra-selective filters
-        if needs_fallback && emitted < target_rows && scanned >= entries_count && entries_count > 0 {
+        if budget_hit && fallback_possible {
             let remaining_needed = target_rows - emitted;
             tracing::debug!(
                 "PropertyOrderScan safety valve triggered: scanned={}, emitted={}, need={}. Falling back to filter-first strategy.",
@@ -578,4 +644,81 @@ mod tests {
         // Must not be Equal (they are different types)
         assert_ne!(ord1, Ordering::Equal);
     }
+}
+
+/// Text range bounds the filter puts on `property` itself
+/// (`properties->>'p' >= 'x' AND properties->>'p' < 'y'`), only from
+/// top-level AND-ed comparisons with a text literal that does NOT read as a
+/// date. The tightest bound on each side wins.
+fn order_range_bounds(
+    filter: &raisin_sql::analyzer::TypedExpr,
+    property: &str,
+) -> (Option<(String, bool)>, Option<(String, bool)>) {
+    use raisin_sql::analyzer::{BinaryOperator, Expr, Literal};
+    fn conjuncts(
+        e: &raisin_sql::analyzer::TypedExpr,
+        out: &mut Vec<raisin_sql::analyzer::TypedExpr>,
+    ) {
+        if let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } = &e.expr
+        {
+            conjuncts(left, out);
+            conjuncts(right, out);
+        } else {
+            out.push(e.clone());
+        }
+    }
+    let looks_like_date = |v: &str| {
+        v.len() >= 10
+            && v.as_bytes()[4] == b'-'
+            && v.as_bytes()[7] == b'-'
+            && v[..4].bytes().all(|b| b.is_ascii_digit())
+    };
+    let mut parts = Vec::new();
+    conjuncts(filter, &mut parts);
+    let (mut lower, mut upper): (Option<(String, bool)>, Option<(String, bool)>) = (None, None);
+    for part in &parts {
+        let Expr::BinaryOp { left, op, right } = &part.expr else {
+            continue;
+        };
+        let (key_side, lit_side, flipped) = match (
+            crate::physical_plan::planner::PhysicalPlanner::match_json_key_extract(&left.expr),
+            &right.expr,
+        ) {
+            (Some((_, _, k)), Expr::Literal(Literal::Text(v))) => (k, v.clone(), false),
+            _ => match (
+                crate::physical_plan::planner::PhysicalPlanner::match_json_key_extract(&right.expr),
+                &left.expr,
+            ) {
+                (Some((_, _, k)), Expr::Literal(Literal::Text(v))) => (k, v.clone(), true),
+                _ => continue,
+            },
+        };
+        if key_side != property || looks_like_date(&lit_side) {
+            continue;
+        }
+        let op = match (op, flipped) {
+            (BinaryOperator::Gt, false) | (BinaryOperator::Lt, true) => (true, false),
+            (BinaryOperator::GtEq, false) | (BinaryOperator::LtEq, true) => (true, true),
+            (BinaryOperator::Lt, false) | (BinaryOperator::Gt, true) => (false, false),
+            (BinaryOperator::LtEq, false) | (BinaryOperator::GtEq, true) => (false, true),
+            _ => continue,
+        };
+        match op {
+            (true, incl) => {
+                if lower.as_ref().is_none_or(|(v, _)| lit_side > *v) {
+                    lower = Some((lit_side, incl));
+                }
+            }
+            (false, incl) => {
+                if upper.as_ref().is_none_or(|(v, _)| lit_side < *v) {
+                    upper = Some((lit_side, incl));
+                }
+            }
+        }
+    }
+    (lower, upper)
 }
