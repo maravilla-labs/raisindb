@@ -205,3 +205,71 @@ async fn a_role_cannot_satisfy_an_update_condition_by_writing_it() {
         .unwrap()
         .contains("100"));
 }
+
+/// Defence in depth: even under a role that grants unrestricted update of
+/// the own user node (an old `authenticated_user`), a user cannot write their
+/// own roles or groups through SQL — the same write layer REST, WebSocket and
+/// functions reach.
+#[tokio::test]
+async fn a_user_cannot_grant_themselves_roles_whatever_the_role_says() {
+    const ACL: &str = "raisin:access_control";
+    let (storage, _dir) = setup().await;
+    storage
+        .workspaces()
+        .put(
+            RepoScope::new(TENANT, REPO),
+            raisin_models::workspace::Workspace::new(ACL.to_string()),
+        )
+        .await
+        .expect("acl workspace");
+    storage
+        .node_types()
+        .create(
+            BranchScope::new(TENANT, REPO, BRANCH),
+            serde_json::from_value(serde_json::json!({ "name": "raisin:User" })).expect("nt"),
+            CommitMetadata {
+                message: "t".into(),
+                actor: "t".into(),
+                is_system: true,
+            },
+        )
+        .await
+        .expect("user type");
+    let acl_engine = |auth: AuthContext| {
+        let mut catalog = StaticCatalog::default_nodes_schema();
+        catalog.register_workspace(ACL.to_string());
+        QueryEngine::new(storage.clone(), TENANT, REPO, BRANCH)
+            .with_catalog(Arc::new(catalog))
+            .with_auth(auth)
+    };
+    exec(
+        &acl_engine(AuthContext::system()),
+        "INSERT INTO \"raisin:access_control\" (id, path, node_type, properties) VALUES \
+         ('node-me', '/u_me', 'raisin:User', '{\"display_name\":\"Me\",\"roles\":[]}'::JSONB)",
+    )
+    .await
+    .expect("seed user");
+
+    let mut open_self = Permission::new("/**", vec![Operation::Read, Operation::Update]);
+    open_self.node_types = Some(vec!["raisin:User".into()]);
+    open_self.condition = Some("node.id == auth.local_user_id".into());
+    let mut me = user("id-me", vec![open_self], Some("/u_me"));
+    me.local_user_id = Some("node-me".into());
+    let me = acl_engine(me);
+
+    let err = exec(
+        &me,
+        "UPDATE \"raisin:access_control\" SET properties = properties || '{\"roles\":[\"admin\"]}'::JSONB \
+         WHERE path = '/u_me'",
+    )
+    .await
+    .expect_err("self-granted role refused");
+    assert!(err.contains("roles"), "{err}");
+    exec(
+        &me,
+        "UPDATE \"raisin:access_control\" SET properties = properties || '{\"display_name\":\"New\"}'::JSONB \
+         WHERE path = '/u_me'",
+    )
+    .await
+    .expect("display_name is the user's");
+}

@@ -20,7 +20,7 @@
 //! The result is a flattened set of permissions that can be cached.
 
 mod cached;
-mod parsing;
+pub(crate) mod parsing;
 mod scoped;
 
 pub use cached::CachedPermissionService;

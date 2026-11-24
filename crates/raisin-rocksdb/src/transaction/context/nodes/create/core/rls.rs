@@ -149,6 +149,16 @@ pub async fn check_put_permission(
                         field, existing.path
                     )));
                 }
+                // Whatever any role grants: never the access-deciding
+                // properties of the caller's own user node.
+                if let Some(field) =
+                    rls_filter::self_protected_write(Some(existing), node, &auth, &scope)
+                {
+                    return Err(raisin_error::Error::PermissionDenied(format!(
+                        "Cannot write '{}' of your own user node; only an administrator can",
+                        field
+                    )));
+                }
             }
             Ok(())
         }
@@ -177,6 +187,12 @@ async fn check_create(
         return Err(raisin_error::Error::PermissionDenied(format!(
             "Cannot create {} at path '{}'",
             node.node_type, node.path
+        )));
+    }
+    if let Some(field) = rls_filter::self_protected_write(None, node, auth, scope) {
+        return Err(raisin_error::Error::PermissionDenied(format!(
+            "Cannot write '{}' of your own user node; only an administrator can",
+            field
         )));
     }
     if let Some(field) = rls_filter::write_fields_denied(None, node, auth, scope, resolver).await {

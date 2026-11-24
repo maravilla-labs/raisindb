@@ -7,13 +7,19 @@
 - **A signed-in user could grant themselves roles and groups.** The built-in
   `authenticated_user` role allowed `update` on the caller's own `raisin:User`
   node with no field limit, and a user's direct roles and groups are read from
-  that node's `roles` / `groups` properties. The self update is now limited to
-  `display_name`, `title` and `metadata`. Existing repositories are fixed on
-  engine start by a security system update
-  (`raisin_core::system_updates::role_security`), whatever the
-  `auto_apply` policy says: only the open self-update permission of the role
-  is rewritten, a customised role keeps every other permission, and a role
-  already fixed is not written again.
+  that node's `roles` / `groups` properties. Fixed three ways:
+  - the shipped role limits the self update to `display_name`, `title` and
+    `metadata`;
+  - a security system update rewrites, on engine start, every `raisin:Role` on
+    every branch of every repository that holds such a self grant (decided
+    from the parsed permission, however it is spelled), whatever the
+    `auto_apply` policy says; other permissions are kept, a fixed role is not
+    written again (`raisin_core::system_updates::role_security`);
+  - the write layer refuses a non-admin caller's write of `roles`, `groups`,
+    `can_login`, `status`, `email`, `email_verified`, `user_id`,
+    `identity_id` or `birth_date` of their own user node, or a move of it,
+    whatever any role grants (`rls_filter::self_guard`), on every write path
+    including the NodeService property update.
 - Field-level write grants: `fields` / `except_fields` now restrict what a
   `create` or `update` grant may write (properties, translations by property
   key; archetype, owner, relations, path, type and publication only with an

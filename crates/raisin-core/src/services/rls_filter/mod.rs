@@ -6,9 +6,11 @@
 
 pub(crate) mod context;
 mod matching;
+mod self_guard;
 mod write_grants;
 mod written_fields;
 
+pub use self_guard::{self_protected_write, SELF_PROTECTED};
 pub use write_grants::{can_create_node, write_fields_denied};
 
 use raisin_models::auth::AuthContext;

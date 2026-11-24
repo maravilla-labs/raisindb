@@ -76,6 +76,50 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             )));
         }
 
+        // This path writes through the repository, not the transaction layer
+        // where field-level write grants and the own-user-node guard are
+        // enforced, so check them here on the node as it will be.
+        if let Some(auth) = &self.auth_context {
+            let top = property_path
+                .trim_start_matches('/')
+                .split(['.', '/'])
+                .next()
+                .unwrap_or(property_path)
+                .to_string();
+            let mut candidate = existing.clone();
+            let nested = top.len() != property_path.trim_start_matches('/').len();
+            candidate.properties.insert(
+                top.clone(),
+                if nested {
+                    // A nested write changes the top-level property.
+                    models::nodes::properties::PropertyValue::String("\u{0}changed".into())
+                } else {
+                    value.clone()
+                },
+            );
+            let scope = self.permission_scope();
+            if let Some(field) = crate::services::rls_filter::self_protected_write(
+                Some(&existing),
+                &candidate,
+                auth,
+                &scope,
+            )
+            .or(crate::services::rls_filter::write_fields_denied(
+                Some(&existing),
+                &candidate,
+                auth,
+                &scope,
+                None,
+            )
+            .await)
+            {
+                return Err(raisin_error::Error::PermissionDenied(format!(
+                    "Permission denied: cannot write property '{}' of node at path '{}'",
+                    field, existing.path
+                )));
+            }
+        }
+
         self.storage
             .nodes()
             .update_property_by_path(self.scope(), node_path, property_path, value.clone())

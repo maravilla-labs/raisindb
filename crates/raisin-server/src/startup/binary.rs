@@ -151,24 +151,37 @@ pub async fn resync_system_definitions(
         }
     };
 
-    // SECURITY update, applied whatever `auto_apply` says: an older
-    // repository's `authenticated_user` role let a signed-in user write the
-    // roles and groups of their own user node
-    // (`raisin_core::system_updates::role_security`). Idempotent.
+    // SECURITY update, applied whatever `auto_apply` says: no role may let a
+    // user write the roles and groups of their own user node
+    // (`raisin_core::system_updates::role_security`). Every repository and
+    // every branch, since roles are resolved on the branch a request runs on.
+    // Idempotent.
     for repo_info in &repos {
-        if let Err(e) = raisin_core::system_updates::role_security::secure_authenticated_user_role(
-            storage.as_ref(),
-            &repo_info.tenant_id,
-            &repo_info.repo_id,
-        )
-        .await
+        let branches = match storage
+            .branches()
+            .list_branches(&repo_info.tenant_id, &repo_info.repo_id)
+            .await
         {
-            tracing::error!(
-                tenant_id = %repo_info.tenant_id,
-                repo_id = %repo_info.repo_id,
-                error = %e,
-                "security update of the authenticated_user role failed"
-            );
+            Ok(list) if !list.is_empty() => list.into_iter().map(|b| b.name).collect(),
+            _ => vec![repo_info.config.default_branch.clone()],
+        };
+        for branch in branches {
+            if let Err(e) = raisin_core::system_updates::role_security::secure_roles(
+                storage.as_ref(),
+                &repo_info.tenant_id,
+                &repo_info.repo_id,
+                &branch,
+            )
+            .await
+            {
+                tracing::error!(
+                    tenant_id = %repo_info.tenant_id,
+                    repo_id = %repo_info.repo_id,
+                    branch = %branch,
+                    error = %e,
+                    "security update of roles failed"
+                );
+            }
         }
     }
 
