@@ -42,31 +42,15 @@ pub async fn check_create_permission(
             let scope = PermissionScope::new(workspace, br);
             // Fast path: build the graph resolver only when a `RELATES`
             // condition is present; otherwise evaluate synchronously.
-            let allowed = if auth.uses_graph_rls() {
-                // Write-time RLS evaluates relations at latest committed state.
-                let revision = raisin_hlc::HLC::now();
-                let resolver = tx
-                    .storage
-                    .graph_resolver(BranchScope::new(tid, rid, br), &revision);
-                rls_filter::can_create_at_path_async(
-                    &node.path,
-                    &node.node_type,
-                    &auth,
-                    &scope,
-                    resolver.as_deref(),
-                )
-                .await
+            // Write-time RLS evaluates relations at latest committed state.
+            let revision = raisin_hlc::HLC::now();
+            let resolver = if auth.uses_graph_rls() {
+                tx.storage
+                    .graph_resolver(BranchScope::new(tid, rid, br), &revision)
             } else {
-                rls_filter::can_create_at_path(&node.path, &node.node_type, &auth, &scope)
+                None
             };
-
-            if !allowed {
-                return Err(raisin_error::Error::PermissionDenied(format!(
-                    "Cannot create {} at path '{}'",
-                    node.node_type, node.path
-                )));
-            }
-            Ok(())
+            check_create(node, &auth, &scope, resolver.as_deref()).await
         }
         None => {
             tracing::warn!(
@@ -129,24 +113,7 @@ pub async fn check_put_permission(
 
             if existing_node.is_none() {
                 // CREATE operation
-                let allowed = if use_graph {
-                    rls_filter::can_create_at_path_async(
-                        &node.path,
-                        &node.node_type,
-                        &auth,
-                        &scope,
-                        resolver.as_deref(),
-                    )
-                    .await
-                } else {
-                    rls_filter::can_create_at_path(&node.path, &node.node_type, &auth, &scope)
-                };
-                if !allowed {
-                    return Err(raisin_error::Error::PermissionDenied(format!(
-                        "Cannot create {} at path '{}'",
-                        node.node_type, node.path
-                    )));
-                }
+                check_create(node, &auth, &scope, resolver.as_deref()).await?;
             } else if let Some(existing) = existing_node {
                 // UPDATE operation
                 let allowed = if use_graph {
@@ -167,6 +134,21 @@ pub async fn check_put_permission(
                         existing.path
                     )));
                 }
+                // Field-level update grants (`fields` / `except_fields`).
+                if let Some(field) = rls_filter::write_fields_denied(
+                    Some(existing),
+                    node,
+                    &auth,
+                    &scope,
+                    resolver.as_deref(),
+                )
+                .await
+                {
+                    return Err(raisin_error::Error::PermissionDenied(format!(
+                        "Cannot write property '{}' of node at path '{}'",
+                        field, existing.path
+                    )));
+                }
             }
             Ok(())
         }
@@ -180,4 +162,28 @@ pub async fn check_put_permission(
             ))
         }
     }
+}
+
+/// A create: the grant (path, type, and its condition evaluated over the node
+/// being created), then its field-level `fields` / `except_fields`.
+async fn check_create(
+    node: &Node,
+    auth: &raisin_models::auth::AuthContext,
+    scope: &raisin_models::permissions::PermissionScope,
+    resolver: Option<&dyn raisin_rel::eval::RelationResolver>,
+) -> Result<()> {
+    use raisin_core::services::rls_filter;
+    if !rls_filter::can_create_node(node, auth, scope, resolver).await {
+        return Err(raisin_error::Error::PermissionDenied(format!(
+            "Cannot create {} at path '{}'",
+            node.node_type, node.path
+        )));
+    }
+    if let Some(field) = rls_filter::write_fields_denied(None, node, auth, scope, resolver).await {
+        return Err(raisin_error::Error::PermissionDenied(format!(
+            "Cannot write property '{}' when creating {} at path '{}'",
+            field, node.node_type, node.path
+        )));
+    }
+    Ok(())
 }

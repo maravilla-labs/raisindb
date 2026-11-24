@@ -13,7 +13,7 @@ use futures::StreamExt;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_sql_execution::{QueryEngine, StaticCatalog};
 use raisin_storage::node_patch::{NullMode, PatchTarget, PropertyPatch};
-use raisin_storage::transactional::{TransactionalContext, TransactionalStorage};
+use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::{
     BranchRepository, NodeRepository, NodeTypeRepository, RepoScope, Storage, StorageScope,
     WorkspaceRepository,

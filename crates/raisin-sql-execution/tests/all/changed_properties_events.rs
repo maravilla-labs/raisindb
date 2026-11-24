@@ -12,7 +12,7 @@
 use futures::StreamExt;
 use raisin_sql_execution::{QueryEngine, StaticCatalog};
 use raisin_storage::{
-    BranchRepository, BranchScope, CommitMetadata, Event, EventBus, EventHandler, NodeEventKind,
+    BranchRepository, BranchScope, CommitMetadata, Event, EventHandler, NodeEventKind,
     NodeTypeRepository, RepoScope, Storage, WorkspaceRepository,
 };
 use std::future::Future;
