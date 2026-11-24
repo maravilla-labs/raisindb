@@ -28,6 +28,7 @@ mod compound_workspace_listing;
 mod compound_workspace_measure;
 mod count_scan_rls;
 mod created_event_nonsystem;
+mod creator_stamp;
 mod current_user_gating;
 mod delta_restore_tests;
 mod dml_index_and_predicate_maintenance;
