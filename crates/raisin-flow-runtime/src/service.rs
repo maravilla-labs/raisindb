@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::jobs::JobType;
+use raisin_storage::node_patch::{PatchTarget, PropertyPatch};
+use raisin_storage::transactional::{TransactionalContext, TransactionalStorage};
 use raisin_storage::{NodeRepository, Storage, StorageScope, UpdateNodeOptions};
 use serde::Serialize;
 use serde_json::Value;
@@ -775,54 +777,80 @@ fn evaluate_group_response(
     })
 }
 
-async fn persist_inbox_task<S: Storage>(
+async fn persist_inbox_task<S: Storage + TransactionalStorage>(
     storage: &S,
     tenant_id: &str,
     repo: &str,
-    task: raisin_models::nodes::Node,
+    loaded: &raisin_models::nodes::Node,
+    task: &raisin_models::nodes::Node,
 ) -> Result<(), FlowError> {
-    let task_id = task.id.clone();
-    let task_path = task.path.clone();
-    let task_type = task.node_type.clone();
-    let scope = StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, INBOX_WORKSPACE);
-    storage
-        .nodes()
-        .update(
-            scope,
-            task,
-            UpdateNodeOptions {
-                validate_schema: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|error| FlowError::Other(format!("Failed to update task node: {}", error)))?;
-
-    let revision = {
-        use raisin_storage::BranchRepository;
-        match storage
-            .branches()
-            .get_branch(tenant_id, repo, DEFAULT_BRANCH)
-            .await
-        {
-            Ok(Some(branch)) => branch.head,
-            _ => raisin_hlc::HLC::new(0, 0),
+    // The completion is a PARTIAL update of the properties it changed,
+    // written through the transaction layer:
+    // - the commit announces it like every other write (the node's data, the
+    //   changed property names, the writer, and the revision of THIS write),
+    //   so a trigger on `raisin:InboxTask` updates is delivered. The raw
+    //   repository write it replaces was silent, and the event published by
+    //   hand beside it carried no node data and the branch HEAD read after
+    //   the write, which a concurrent commit may already have moved;
+    // - a concurrent write of another property of the task (a group's
+    //   progress counters, a read marker) is not overwritten with the copy
+    //   loaded before the completion.
+    let mut patch = PropertyPatch::default();
+    for (key, value) in &task.properties {
+        if loaded.properties.get(key) != Some(value) {
+            patch.set.push((key.clone(), value.clone()));
         }
+    }
+    for key in loaded.properties.keys() {
+        if !task.properties.contains_key(key) {
+            patch.remove.push(key.clone());
+        }
+    }
+    let fail = |error: raisin_error::Error| {
+        FlowError::Other(format!("Failed to update task node: {}", error))
     };
-    storage
-        .event_bus()
-        .publish(raisin_storage::Event::Node(raisin_storage::NodeEvent {
-            tenant_id: tenant_id.to_string(),
-            repository_id: repo.to_string(),
-            branch: DEFAULT_BRANCH.to_string(),
-            workspace_id: INBOX_WORKSPACE.to_string(),
-            node_id: task_id,
-            node_type: Some(task_type),
-            revision,
-            kind: raisin_storage::NodeEventKind::Updated,
-            path: Some(task_path),
-            metadata: None,
-        }));
+    let ctx = storage.begin_context().await.map_err(fail)?;
+    ctx.set_tenant_repo(tenant_id, repo).map_err(fail)?;
+    ctx.set_branch(DEFAULT_BRANCH).map_err(fail)?;
+    ctx.set_actor("inbox").map_err(fail)?;
+    ctx.set_message("inbox task completed").map_err(fail)?;
+    ctx.set_auth_context(raisin_models::auth::AuthContext::system())
+        .map_err(fail)?;
+    ctx.set_validate_schema(false).map_err(fail)?;
+    ctx.patch_node_properties(INBOX_WORKSPACE, &PatchTarget::Id(task.id.clone()), patch)
+        .await
+        .map_err(fail)?;
+    ctx.commit().await.map_err(fail)?;
+
+    // A backend whose commit does not announce writes (the in-memory one)
+    // gets the event the way NodeService publishes it.
+    if !storage.commit_publishes_node_events() {
+        let revision = {
+            use raisin_storage::BranchRepository;
+            match storage
+                .branches()
+                .get_branch(tenant_id, repo, DEFAULT_BRANCH)
+                .await
+            {
+                Ok(Some(branch)) => branch.head,
+                _ => raisin_hlc::HLC::new(0, 0),
+            }
+        };
+        storage
+            .event_bus()
+            .publish(raisin_storage::Event::Node(raisin_storage::NodeEvent {
+                tenant_id: tenant_id.to_string(),
+                repository_id: repo.to_string(),
+                branch: DEFAULT_BRANCH.to_string(),
+                workspace_id: INBOX_WORKSPACE.to_string(),
+                node_id: task.id.clone(),
+                node_type: Some(task.node_type.clone()),
+                revision,
+                kind: raisin_storage::NodeEventKind::Updated,
+                path: Some(task.path.clone()),
+                metadata: None,
+            }));
+    }
     Ok(())
 }
 
@@ -834,7 +862,7 @@ async fn persist_inbox_task<S: Storage>(
 ///
 /// Idempotency: completing an already-completed task returns
 /// `FlowError::AlreadyTerminated`.
-pub async fn complete_task<S: Storage>(
+pub async fn complete_task<S: Storage + TransactionalStorage>(
     storage: &S,
     scheduler: &dyn FlowJobScheduler,
     tenant_id: &str,
@@ -844,6 +872,7 @@ pub async fn complete_task<S: Storage>(
     response: Value,
 ) -> Result<TaskCompletionResult, FlowError> {
     let mut task_node = load_task_node(storage, tenant_id, repo, task_ref).await?;
+    let loaded_task = task_node.clone();
     let task_path = task_node.path.clone();
     let task_id = task_node.id.clone();
 
@@ -1013,7 +1042,7 @@ pub async fn complete_task<S: Storage>(
             .insert("response".to_string(), PropertyValue::Object(response_prop));
     }
 
-    persist_inbox_task(storage, tenant_id, repo, task_node.clone()).await?;
+    persist_inbox_task(storage, tenant_id, repo, &loaded_task, &task_node).await?;
 
     // 7. A GROUP assignment closes ONCE and resumes its flow once.
     //

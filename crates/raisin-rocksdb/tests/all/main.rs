@@ -58,6 +58,7 @@ mod history_gc_collapse;
 mod history_gc_test;
 mod hnsw_integration_test;
 mod immutable_nodetype_test;
+mod inbox_task_completion_event;
 mod index_parity_test;
 mod integration_tests;
 mod legacy_node_op_test;
