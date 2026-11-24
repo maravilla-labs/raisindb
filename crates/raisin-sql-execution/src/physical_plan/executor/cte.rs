@@ -173,6 +173,18 @@ pub(super) async fn execute_cte_scan<
             let original_keys: Vec<String> = row.columns.keys().cloned().collect();
 
             for key in original_keys {
+                // Nothing to add for this column: do not clone it at all.
+                let missing = match key.split_once('.') {
+                    Some((_, column)) => {
+                        !row.columns
+                            .contains_key(&format!("{}.{}", cte_name, column))
+                            || !row.columns.contains_key(column)
+                    }
+                    None => !row.columns.contains_key(&format!("{}.{}", cte_name, key)),
+                };
+                if !missing {
+                    continue;
+                }
                 let value = match row.columns.get(&key).cloned() {
                     Some(v) => v,
                     None => continue,
@@ -180,12 +192,22 @@ pub(super) async fn execute_cte_scan<
 
                 if let Some((_, column)) = key.split_once('.') {
                     let cte_key = format!("{}.{}", cte_name, column);
-                    if !row.columns.contains_key(&cte_key) {
-                        row.columns.insert(cte_key, value.clone());
-                    }
-
-                    if !row.columns.contains_key(column) {
-                        row.columns.insert(column.to_string(), value.clone());
+                    let need_cte = !row.columns.contains_key(&cte_key);
+                    let need_bare = !row.columns.contains_key(column);
+                    // Clone a (possibly large) value only for the copies that
+                    // are actually missing; the last one takes it.
+                    match (need_cte, need_bare) {
+                        (true, true) => {
+                            row.columns.insert(cte_key, value.clone());
+                            row.columns.insert(column.to_string(), value);
+                        }
+                        (true, false) => {
+                            row.columns.insert(cte_key, value);
+                        }
+                        (false, true) => {
+                            row.columns.insert(column.to_string(), value);
+                        }
+                        (false, false) => {}
                     }
                 } else {
                     let cte_key = format!("{}.{}", cte_name, key);

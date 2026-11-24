@@ -45,12 +45,20 @@ pub struct CTEConfig {
     pub temp_dir: PathBuf,
 }
 
+/// Default memory a CTE may hold before it spills to disk.
+pub const DEFAULT_PER_CTE_MEMORY_LIMIT: usize = 128 * 1024 * 1024;
+
 impl Default for CTEConfig {
     fn default() -> Self {
         let per_cte_memory_limit = std::env::var("RAISIN_CTE_MEMORY_LIMIT")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(10 * 1024 * 1024);
+            // 128 MiB, not 10: a CTE that projects `properties` passes 10 MiB
+            // at a thousand or two rows, and every row then went through a
+            // MessagePack spill file and back — scale item 8 measured a FILTER
+            // aggregate over such a CTE ~35x slower than over one scalar
+            // column (1,000 rows in 3.7 s vs 5,001 in 0.49 s).
+            .unwrap_or(DEFAULT_PER_CTE_MEMORY_LIMIT);
 
         Self {
             per_cte_memory_limit,
@@ -349,6 +357,26 @@ mod tests {
     fn test_cte_config_custom() {
         let config = CTEConfig::new(5 * 1024 * 1024);
         assert_eq!(config.per_cte_memory_limit, 5 * 1024 * 1024);
+    }
+
+    /// A CTE of 2,000 rows carrying an 8 KiB property map each (~16 MiB,
+    /// what a `properties` projection of a work-order list weighs) stays in
+    /// memory by default instead of round-tripping through a spill file.
+    #[test]
+    fn a_properties_projection_of_a_few_thousand_rows_stays_in_memory() {
+        let mut props = std::collections::HashMap::new();
+        props.insert(
+            "notes".to_string(),
+            PropertyValue::String("x".repeat(8 * 1024)),
+        );
+        let mut row = Row::new();
+        row.insert("t.properties".to_string(), PropertyValue::Object(props));
+        let total: usize = (0..2_000).map(|_| estimate_row_size(&row)).sum();
+        assert!(
+            total > 10 * 1024 * 1024,
+            "the old 10 MiB limit would spill: {total}"
+        );
+        assert!(total < CTEConfig::default().per_cte_memory_limit);
     }
 
     #[test]
