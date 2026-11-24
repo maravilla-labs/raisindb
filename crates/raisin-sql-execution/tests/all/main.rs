@@ -19,6 +19,7 @@
 
 mod batched_fetch_tests;
 mod bulk_sql_rls;
+mod changed_properties_events;
 mod compound_builtin_listing;
 mod compound_builtin_measure;
 mod compound_index_hierarchy;
