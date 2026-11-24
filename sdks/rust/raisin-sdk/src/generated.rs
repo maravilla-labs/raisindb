@@ -705,6 +705,31 @@ pub mod assets {
         crate::wire::decode_json_as(&raw)
     }
 
+    /// `raisin.assets.readBytes` — registry method `asset_read_bytes`.
+    pub fn read_bytes(workspace: &str, path: &str, property: Option<&str>) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(workspace)?,
+            ::serde_json::to_value(path)?,
+            ::serde_json::to_value(property)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("asset_read_bytes", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `read_bytes`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn read_bytes_as<T: ::serde::de::DeserializeOwned>(workspace: &str, path: &str, property: Option<&str>) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(workspace)?,
+            ::serde_json::to_value(path)?,
+            ::serde_json::to_value(property)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("asset_read_bytes", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
     /// `raisin.assets.reextract` — registry method `asset_reextract`.
     pub fn reextract(workspace: &str, node_ref: &str) -> crate::Result<::serde_json::Value> {
         let args = ::serde_json::Value::Array(vec![

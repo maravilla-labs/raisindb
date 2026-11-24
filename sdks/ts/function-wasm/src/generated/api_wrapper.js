@@ -1293,6 +1293,14 @@ globalThis.raisin = {
         }
     },
     assets: {
+        // The bytes of an asset's resource property (default 'file'), read
+        // with the caller's rights: { base64, mime_type, size, name }. Throws
+        // when the node is not readable or has no such resource.
+        readBytes: (workspace, path, property) => {
+            const r = __call('asset_read_bytes', [workspace, path, property ?? null]);
+            if (__isErr(r)) throw new Error(r.message);
+            return r;
+        },
         // Store text extracted by a task that runs ABOVE the engine — a .docx
         // converted to markdown by raisin.media.doc.toMarkdown, say. Core reads
         // PDFs and nothing else, so this is how every other format's text

@@ -201,6 +201,11 @@ func (AssetsAPI) PublicUrl(workspace string, path string, options any) (json.Raw
 	return callJSON("asset_public_url", []any{workspace, path, options})
 }
 
+// ReadBytes calls the RaisinDB registry method "asset_read_bytes".
+func (AssetsAPI) ReadBytes(workspace string, path string, property *string) (json.RawMessage, error) {
+	return callJSON("asset_read_bytes", []any{workspace, path, property})
+}
+
 // Reextract calls the RaisinDB registry method "asset_reextract".
 func (AssetsAPI) Reextract(workspace string, nodeRef string) (json.RawMessage, error) {
 	return callJSON("asset_reextract", []any{workspace, nodeRef})

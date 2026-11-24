@@ -168,5 +168,125 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                 })
             },
         },
+        // assets.readBytes(workspace, path, property?)
+        //   -> { base64, mime_type, size, name }
+        //
+        // The bytes of an asset's resource property (default `file`), read
+        // with the CALLER's rights: the node is read like `nodes.get` (a node
+        // the caller may not read is not found), and only then are its bytes
+        // fetched. A mounted asset whose local copy expired is fetched first,
+        // like `node.getResource('file')` does. One call for what took
+        // `nodes.get` + `resources.getBinary(storage_key)` — which also makes it
+        // reachable from the Rust SDK (`raisin_sdk::assets::read_bytes`).
+        ApiMethodDescriptor {
+            internal_name: "asset_read_bytes",
+            js_name: "readBytes",
+            py_name: "read_bytes",
+            category: "assets",
+            args: vec![
+                ArgSpec::new("workspace", ArgType::String),
+                ArgSpec::new("path", ArgType::String),
+                ArgSpec::new("property", ArgType::OptionalString),
+            ],
+            return_type: ReturnType::Json,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let workspace = parser.string()?;
+                    let path = parser.string()?;
+                    let property = parser
+                        .optional_string()?
+                        .unwrap_or_else(|| "file".to_string());
+                    let result = read_bytes(api, &workspace, &path, &property).await?;
+                    Ok(InvokeResult::Json(result))
+                })
+            },
+        },
     ]
+}
+
+/// `assets.readBytes`: the resource property of a node read with the caller's
+/// rights, then its bytes.
+async fn read_bytes(
+    api: Arc<dyn FunctionApi>,
+    workspace: &str,
+    path: &str,
+    property: &str,
+) -> Result<Value> {
+    let not_found = || raisin_error::Error::NotFound(format!("Asset not found: {path}"));
+    let node = api.node_get(workspace, path).await?.ok_or_else(not_found)?;
+    let mut resource = node
+        .get("properties")
+        .and_then(|p| p.get(property))
+        .cloned();
+    let is_virtual = node
+        .get("properties")
+        .and_then(|p| p.get("__virtual"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    if resource.is_none() && property == "file" && is_virtual {
+        api.asset_ensure_content(workspace, path).await?;
+        resource = api
+            .node_get(workspace, path)
+            .await?
+            .and_then(|n| n.get("properties").and_then(|p| p.get(property)).cloned());
+    }
+    let resource = resource.ok_or_else(|| {
+        raisin_error::Error::NotFound(format!("{path} has no resource property '{property}'"))
+    })?;
+    let storage_key = storage_key_of(&resource, path, property)?;
+    let base64 = api.resource_get_binary(&storage_key).await?;
+    Ok(serde_json::json!({
+        "base64": base64,
+        "mime_type": resource.get("mime_type").cloned().unwrap_or(Value::Null),
+        "size": resource.get("size").cloned().unwrap_or(Value::Null),
+        "name": resource.get("name").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+/// The blob key of a stored resource property.
+fn storage_key_of(resource: &Value, path: &str, property: &str) -> Result<String> {
+    resource
+        .get("metadata")
+        .and_then(|m| m.get("storage_key"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            raisin_error::Error::Validation(format!(
+                "property '{property}' of {path} is not a stored resource (no storage_key)"
+            ))
+        })
+}
+
+#[cfg(test)]
+mod read_bytes_tests {
+    use super::{read_bytes, storage_key_of};
+    use crate::api::FunctionApi;
+    use crate::api::MockFunctionApi;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[test]
+    fn the_storage_key_comes_from_the_resource_metadata() {
+        let file = json!({ "name": "sig.png", "metadata": { "storage_key": "uploads/t/sig.png" } });
+        assert_eq!(
+            storage_key_of(&file, "/sig.png", "file").unwrap(),
+            "uploads/t/sig.png"
+        );
+        let not_a_resource = json!("just text");
+        assert!(storage_key_of(&not_a_resource, "/x", "title").is_err());
+    }
+
+    /// The node is read first (with the caller's rights, as `nodes.get`); a
+    /// node without the property yields a clear error, never bytes.
+    #[tokio::test]
+    async fn a_node_without_the_resource_is_an_error() {
+        let api: Arc<dyn FunctionApi> = Arc::new(MockFunctionApi::new(json!({})));
+        let err = read_bytes(api, "assets", "/page", "file")
+            .await
+            .expect_err("no file property");
+        assert!(err.to_string().contains("no resource property"), "{err}");
+    }
 }

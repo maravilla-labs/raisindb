@@ -227,6 +227,11 @@ export namespace assets {
     return call("asset_public_url", argsOf([jsonString(workspace), jsonString(path), options]));
   }
 
+  /** `raisin.assets.readBytes` — registry method `asset_read_bytes`. Returns raw JSON. */
+  export function readBytes(workspace: string, path: string, property: string | null): string {
+    return call("asset_read_bytes", argsOf([jsonString(workspace), jsonString(path), jsonStringOrNull(property)]));
+  }
+
   /** `raisin.assets.reextract` — registry method `asset_reextract`. Returns raw JSON. */
   export function reextract(workspace: string, nodeRef: string): string {
     return call("asset_reextract", argsOf([jsonString(workspace), jsonString(nodeRef)]));
